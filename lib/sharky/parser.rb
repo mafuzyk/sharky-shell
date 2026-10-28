@@ -19,7 +19,7 @@ module Sharky
       [[ ]] (( ))
     ].freeze
 
-    COMPOUND_STARTERS = %w[if for while until].freeze
+    COMPOUND_STARTERS = %w[if for while until case function].freeze
     REDIRECT_TYPES = [:redir_out, :redir_append, :redir_in, :redir_dup, :redir_both].freeze
     REDIRECT_OPS = {
       redir_out: :out,
@@ -174,7 +174,14 @@ module Sharky
         parse_while(false)
       when "until"
         parse_while(true)
+      when "case"
+        parse_case
+      when "function"
+        parse_function_keyword
       else
+        return parse_group if at?(:lbrace)
+        return parse_function_definition if function_definition?
+
         raise syntax_error("unexpected #{describe(current)}")
       end
     end
@@ -243,22 +250,152 @@ module Sharky
       AST::While.new(condition: condition, body: body, until_form: until_form, pos: pos)
     end
 
-    def parse_compound_list(terminators)
-      entries = []
-      skip_compound_separators
+    def parse_case
+      pos = current.pos
+      advance
 
-      until at?(:eof) || terminators.any? { |word| keyword?(word) }
+      unless at?(:word)
+        raise ParseError.new("unclosed case", pos: current.pos, incomplete: true) if at?(:eof)
+
+        raise syntax_error("expected case word but found #{describe(current)}")
+      end
+
+      word = convert_word(advance.value)
+      skip_newlines
+      expect_keyword!("in")
+      skip_compound_separators
+      arms = []
+
+      until keyword?("esac")
+        raise ParseError.new("unclosed case", pos: current.pos, incomplete: true) if at?(:eof)
+
+        patterns = parse_case_patterns
+        body = parse_compound_list(%w[esac], case_body: true)
+        arms << [patterns, body]
+
+        if case_break?
+          consume_case_terminator
+          skip_compound_separators
+        elsif keyword?("esac")
+          break
+        else
+          raise syntax_error("unexpected #{describe(current)}")
+        end
+      end
+
+      expect_keyword!("esac")
+      AST::Case.new(word: word, arms: arms, pos: pos)
+    end
+
+    def parse_case_patterns
+      patterns = []
+      advance if at?(:lparen)
+
+      loop do
+        unless at?(:word)
+          raise ParseError.new("unclosed case pattern", pos: current.pos, incomplete: true) if at?(:eof)
+
+          raise syntax_error("expected case pattern but found #{describe(current)}")
+        end
+
+        patterns << convert_word(advance.value)
+        break unless at?(:pipe)
+
+        advance
+        skip_newlines
+      end
+
+      unless at?(:rparen)
+        raise ParseError.new("unclosed case pattern", pos: current.pos, incomplete: true) if at?(:eof)
+
+        raise syntax_error("expected ) after case pattern but found #{describe(current)}")
+      end
+      advance
+
+      patterns
+    end
+
+    def consume_case_terminator
+      if at?(:case_break, :case_continue)
+        advance
+      else
+        advance
+        advance
+      end
+    end
+
+    def parse_function_definition
+      pos = current.pos
+      name = literal_word(current)
+      advance
+      advance
+      advance
+      skip_newlines
+      body = parse_function_body
+      AST::FunctionDef.new(name: name, body: body, pos: pos)
+    end
+
+    def parse_function_keyword
+      pos = current.pos
+      advance
+      name = literal_word(current)
+
+      unless name
+        raise ParseError.new("unclosed function definition", pos: current.pos, incomplete: true) if at?(:eof)
+
+        raise syntax_error("expected function name but found #{describe(current)}")
+      end
+
+      advance
+      if at?(:lparen) && peek_token&.type == :rparen
+        advance
+        advance
+      end
+      skip_newlines
+      body = parse_function_body
+      AST::FunctionDef.new(name: name, body: body, pos: pos)
+    end
+
+    def parse_function_body
+      unless at?(:lbrace)
+        if at?(:eof)
+          raise ParseError.new("unclosed function definition", pos: current.pos, incomplete: true)
+        end
+
+        raise syntax_error("expected { after function definition but found #{describe(current)}")
+      end
+
+      parse_group.list
+    end
+
+    def parse_group
+      pos = current.pos
+      advance
+      list = parse_compound_list([], token_terminators: [:rbrace])
+      advance
+      AST::Group.new(list: list, pos: pos)
+    end
+
+    def parse_compound_list(terminators, token_terminators: [], case_body: false)
+      entries = []
+      skip_compound_separators(case_body: case_body)
+
+      until at?(:eof) || compound_list_terminator?(terminators, token_terminators) ||
+            (case_body && case_break?)
         and_or = parse_and_or
 
-        if at?(:semi, :amp)
+        if case_body && case_break?
+          entries << [:seq, [and_or]]
+          break
+        elsif at?(:semi, :amp)
           entries << [at?(:amp) ? :async : :seq, [and_or]]
           advance
-          skip_compound_separators
+          skip_compound_separators(case_body: case_body)
         elsif at?(:newline)
           entries << [:seq, [and_or]]
           advance
-          skip_compound_separators
-        elsif at?(:eof) || terminators.any? { |word| keyword?(word) }
+          skip_compound_separators(case_body: case_body)
+        elsif at?(:eof) || compound_list_terminator?(terminators, token_terminators)
           entries << [:seq, [and_or]]
           break
         else
@@ -273,8 +410,21 @@ module Sharky
       AST::List.new(entries: entries)
     end
 
-    def skip_compound_separators
-      advance while at?(:semi, :newline)
+    def compound_list_terminator?(terminators, token_terminators)
+      terminators.any? { |word| keyword?(word) } || token_terminators.include?(type)
+    end
+
+    def case_break?
+      at?(:case_break, :case_continue) || (at?(:semi) && peek_token&.type == :semi)
+    end
+
+    def skip_compound_separators(case_body: false)
+      loop do
+        break if case_body && case_break?
+        break unless at?(:semi, :newline)
+
+        advance
+      end
     end
 
     def expect_keyword!(word)
@@ -458,7 +608,15 @@ module Sharky
     end
 
     def compound_command?
-      @compound && COMPOUND_STARTERS.include?(literal_word(current))
+      return false unless @compound
+
+      at?(:lbrace) || COMPOUND_STARTERS.include?(literal_word(current)) || function_definition?
+    end
+
+    def function_definition?
+      return false unless at?(:word) && literal_word(current)
+
+      peek_token&.type == :lparen && peek_token(2)&.type == :rparen
     end
 
     def keyword?(word)

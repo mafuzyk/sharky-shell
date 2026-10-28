@@ -20,8 +20,12 @@ class ParserTest < Minitest::Test
     list.entries.first[1].first.commands.first
   end
 
+  def word_text(word)
+    word.parts.map { |part| part.type == :double ? part.value.map(&:value).join : part.value }.join
+  end
+
   def word_values(command)
-    command.words.map { |word| word.parts.map(&:value).join }
+    command.words.map { |word| word_text(word) }
   end
 
   def test_simple_command_with_assignment_and_redirect
@@ -200,5 +204,115 @@ class ParserTest < Minitest::Test
 
     assert_equal 2, semicolon.lines.first.list.entries.size
     assert_equal 2, newline.lines.size
+  end
+
+  def test_compound_case_parses_arms_with_multiple_patterns
+    source = "case fruit in apple|p?ar) echo fruit;; *) echo other;; esac"
+    node = first_command(compound_parse(source))
+
+    assert_instance_of Sharky::AST::Case, node
+    assert_equal "fruit", word_text(node.word)
+    assert_equal 0, node.pos
+    assert_equal 2, node.arms.size
+
+    patterns, body = node.arms.first
+    assert_equal %w[apple p?ar], patterns.map { |pattern| word_text(pattern) }
+    assert_equal ["echo", "fruit"], word_values(first_list_command(body))
+
+    patterns, body = node.arms.last
+    assert_equal ["*"], patterns.map { |pattern| word_text(pattern) }
+    assert_equal ["echo", "other"], word_values(first_list_command(body))
+  end
+
+  def test_compound_case_parses_quoted_pattern_and_final_arm_without_terminator
+    source = "case $x in\n  \"a b\") echo spaced;;\n  *) echo other\nesac"
+    node = first_command(compound_parse(source))
+
+    assert_equal 2, node.arms.size
+    patterns, body = node.arms.first
+    assert_equal ["a b"], patterns.map { |pattern| word_text(pattern) }
+    assert_equal ["echo", "spaced"], word_values(first_list_command(body))
+    assert_equal ["echo", "other"], word_values(first_list_command(node.arms.last[1]))
+  end
+
+  def test_compound_case_parses_nested_body
+    source = "case $x in a) if true; then echo yes; fi;; esac"
+    node = first_command(compound_parse(source))
+    inner = first_list_command(node.arms.first[1])
+
+    assert_instance_of Sharky::AST::If, inner
+    assert_equal source.index("if"), inner.pos
+    assert_equal ["echo", "yes"], word_values(first_list_command(inner.branches.first[1]))
+  end
+
+  def test_compound_case_without_esac_is_incomplete
+    error = assert_raises(Sharky::ParseError) { compound_parse("case x in a) echo hi;;") }
+    assert error.incomplete?
+  end
+
+  def test_compound_function_definition_parses_short_form
+    source = "greet() { if true; then echo hi; fi; }"
+    node = first_command(compound_parse(source))
+    inner = first_list_command(node.body)
+
+    assert_instance_of Sharky::AST::FunctionDef, node
+    assert_equal "greet", node.name
+    assert_equal 0, node.pos
+    assert_instance_of Sharky::AST::If, inner
+    assert_equal source.index("if"), inner.pos
+    assert_equal ["echo", "hi"], word_values(first_list_command(inner.branches.first[1]))
+  end
+
+  def test_compound_function_definition_parses_keyword_form
+    node = first_command(compound_parse("function greet { echo hello; }"))
+
+    assert_instance_of Sharky::AST::FunctionDef, node
+    assert_equal "greet", node.name
+    assert_equal 0, node.pos
+    assert_equal ["echo", "hello"], word_values(first_list_command(node.body))
+  end
+
+  def test_compound_function_without_body_is_incomplete
+    error = assert_raises(Sharky::ParseError) { compound_parse("function greet") }
+    assert error.incomplete?
+  end
+
+  def test_compound_function_without_closing_brace_is_incomplete
+    error = assert_raises(Sharky::ParseError) { compound_parse("greet() { echo hi;") }
+    assert error.incomplete?
+  end
+
+  def test_compound_group_parses_body
+    node = first_command(compound_parse("{ echo hi; }"))
+
+    assert_instance_of Sharky::AST::Group, node
+    assert_equal 0, node.pos
+    assert_equal ["echo", "hi"], word_values(first_list_command(node.list))
+  end
+
+  def test_compound_group_parses_nested_group
+    source = "{ { echo inner; }; echo outer; }"
+    outer = first_command(compound_parse(source))
+    inner = first_list_command(outer.list)
+
+    assert_instance_of Sharky::AST::Group, outer
+    assert_equal 2, outer.list.entries.size
+    assert_instance_of Sharky::AST::Group, inner
+    assert_equal source.index("{", 1), inner.pos
+    assert_equal ["echo", "inner"], word_values(first_list_command(inner.list))
+  end
+
+  def test_compound_group_without_closing_brace_is_incomplete
+    error = assert_raises(Sharky::ParseError) { compound_parse("{ echo hi;") }
+    assert error.incomplete?
+  end
+
+  def test_default_mode_still_rejects_case_and_function
+    case_error = assert_raises(Sharky::ParseError) { parse("case x in a) echo hi;; esac") }
+    function_error = assert_raises(Sharky::ParseError) { parse("function f { echo hi; }") }
+
+    assert_equal "unsupported syntax: 'case'. Use bash -c '...' or a Ruby function.", case_error.message
+    assert_equal "unsupported syntax: 'function'. Use bash -c '...' or a Ruby function.",
+                 function_error.message
   end
 end
