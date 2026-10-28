@@ -2,6 +2,7 @@
 
 require_relative "test_helper"
 require "pty"
+require "io/console"
 require "sharky"
 
 class TerminalTest < Minitest::Test

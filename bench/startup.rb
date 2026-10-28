@@ -1,6 +1,8 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+require "rbconfig"
+
 ROOT = File.expand_path("..", __dir__)
 EXECUTABLE = File.join(ROOT, "bin/sharky")
 RUNS = 20
@@ -23,7 +25,12 @@ end
 scenarios = [
   ["bin/sharky --version", [EXECUTABLE, "--version"]],
   ["bin/sharky -c true", [EXECUTABLE, "-c", "true"]],
-  ["bin/sharky --no-config -c true", [EXECUTABLE, "--no-config", "-c", "true"]]
+  ["bin/sharky --no-config -c true", [EXECUTABLE, "--no-config", "-c", "true"]],
+  ["bin/sharky --help", [EXECUTABLE, "--help"]],
+  ["bin/sharky --no-config --json -c true", [EXECUTABLE, "--no-config", "--json", "-c", "true"]],
+  ["bin/sharky --no-config state --json", [EXECUTABLE, "--no-config", "state", "--json"]],
+  ["ruby --disable-gems -e 0", [RbConfig.ruby, "--disable-gems", "-e", "0"]],
+  ["require sharky (--disable-gems)", [RbConfig.ruby, "--disable-gems", "-I#{File.join(ROOT, 'lib')}", "-rsharky", "-e", "0"]]
 ]
 
 puts "startup benchmark (n=#{RUNS} after #{WARMUP} warmups)"
@@ -34,5 +41,5 @@ scenarios.each do |label, command|
   samples = Array.new(RUNS) { measure(command) }
   median = percentile(samples, 0.5)
   p95 = percentile(samples, 0.95)
-  puts format("%-24s %7.1f ms %7.1f ms", label, median, p95)
+  puts format("%-34s %7.1f ms %7.1f ms", label, median, p95)
 end

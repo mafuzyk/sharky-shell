@@ -1,7 +1,5 @@
 # frozen_string_literal: true
 
-require "json"
-require "socket"
 require "stringio"
 
 module Sharky
@@ -171,6 +169,7 @@ module Sharky
     end
 
     def self.write_json(io, payload)
+      require "json"
       io.puts(JSON.generate(normalize_utf8(payload)))
     end
 
@@ -412,6 +411,7 @@ module Sharky
     end
 
     def self.host
+      require "socket"
       Socket.gethostname.split(".").first
     rescue StandardError
       "localhost"

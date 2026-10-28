@@ -1,36 +1,37 @@
 require_relative "sharky/version"
-require_relative "sharky/runtime"
-require_relative "sharky/ast"
-require_relative "sharky/lexer"
-require_relative "sharky/parser"
-require_relative "sharky/expansion"
-require_relative "sharky/control_flow"
-require_relative "sharky/jobs"
-require_relative "sharky/builtins"
-require_relative "sharky/functions"
-require_relative "sharky/executor"
-require_relative "sharky/shell"
-require_relative "sharky/result"
-require_relative "sharky/session"
-require_relative "sharky/config"
 require_relative "sharky/api"
-require_relative "sharky/repl"
-require_relative "sharky/theme"
-require_relative "sharky/prompt"
-require_relative "sharky/prompt_layout"
-require_relative "sharky/prompt_presets"
-require_relative "sharky/starship"
-require_relative "sharky/history"
-require_relative "sharky/z"
-require_relative "sharky/terminal"
-require_relative "sharky/keys"
-require_relative "sharky/line_buffer"
-require_relative "sharky/highlighter"
-require_relative "sharky/completion"
-require_relative "sharky/fuzzy"
-require_relative "sharky/pager"
-require_relative "sharky/editor"
-require_relative "sharky/cli"
 
 module Sharky
+  autoload :AST, File.expand_path("sharky/ast", __dir__)
+  autoload :Arithmetic, File.expand_path("sharky/arithmetic", __dir__)
+  autoload :Lexer, File.expand_path("sharky/lexer", __dir__)
+  autoload :LexError, File.expand_path("sharky/lexer", __dir__)
+  autoload :Token, File.expand_path("sharky/lexer", __dir__)
+  autoload :Parser, File.expand_path("sharky/parser", __dir__)
+  autoload :ParseError, File.expand_path("sharky/parser", __dir__)
+  autoload :Expansion, File.expand_path("sharky/expansion", __dir__)
+  autoload :ControlFlow, File.expand_path("sharky/control_flow", __dir__)
+  autoload :Jobs, File.expand_path("sharky/jobs", __dir__)
+  autoload :Builtins, File.expand_path("sharky/builtins", __dir__)
+  autoload :Functions, File.expand_path("sharky/functions", __dir__)
+  autoload :Executor, File.expand_path("sharky/executor", __dir__)
+  autoload :Config, File.expand_path("sharky/config", __dir__)
+  autoload :Repl, File.expand_path("sharky/repl", __dir__)
+  autoload :Theme, File.expand_path("sharky/theme", __dir__)
+  autoload :Prompt, File.expand_path("sharky/prompt", __dir__)
+  autoload :PromptLayout, File.expand_path("sharky/prompt_layout", __dir__)
+  autoload :PromptPresets, File.expand_path("sharky/prompt_presets", __dir__)
+  autoload :Starship, File.expand_path("sharky/starship", __dir__)
+  autoload :History, File.expand_path("sharky/history", __dir__)
+  autoload :Z, File.expand_path("sharky/z", __dir__)
+  autoload :Terminal, File.expand_path("sharky/terminal", __dir__)
+  autoload :Key, File.expand_path("sharky/keys", __dir__)
+  autoload :Keys, File.expand_path("sharky/keys", __dir__)
+  autoload :LineBuffer, File.expand_path("sharky/line_buffer", __dir__)
+  autoload :Highlighter, File.expand_path("sharky/highlighter", __dir__)
+  autoload :Completion, File.expand_path("sharky/completion", __dir__)
+  autoload :Fuzzy, File.expand_path("sharky/fuzzy", __dir__)
+  autoload :Pager, File.expand_path("sharky/pager", __dir__)
+  autoload :Editor, File.expand_path("sharky/editor", __dir__)
+  autoload :CLI, File.expand_path("sharky/cli", __dir__)
 end
