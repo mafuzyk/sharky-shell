@@ -189,6 +189,10 @@ module Sharky
     end
 
     def self.run_script(shell, path, args, stderr)
+      if shell_script?(path)
+        return shell.run_script_file(path, args)
+      end
+
       runtime = shell.runtime
       runtime.shell = shell
       previous_argv = ARGV.dup
@@ -209,6 +213,15 @@ module Sharky
         ARGV.replace(previous_argv)
         runtime.shell = nil
       end
+    end
+
+    def self.shell_script?(path)
+      return true if File.extname(path) == ".sh"
+
+      first_line = File.open(path, &:readline)
+      first_line.start_with?("#!") && first_line.include?("sharky")
+    rescue SystemCallError, EOFError
+      false
     end
 
     def self.run_interactive(stdin:, stdout:, stderr:, load_config:)

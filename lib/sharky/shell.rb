@@ -168,6 +168,31 @@ module Sharky
       Expansion.new(env: @env, positional: @positional, script_name: @script_name, cwd: @cwd)
     end
 
+    def run_script_file(path, args = [])
+      absolute = File.expand_path(path)
+      source = File.read(absolute)
+      previous_name = @script_name
+      previous_positional = @positional
+      @script_name = absolute
+      @positional = Array(args).map(&:to_s)
+      run(source, compound: true)
+    rescue SystemCallError => error
+      @stderr.puts("sharky: #{path}: #{error.message}")
+      mark_status(1)
+    ensure
+      @script_name = previous_name if defined?(previous_name)
+      @positional = previous_positional if defined?(previous_positional)
+    end
+
+    def source_file(path, args = [])
+      absolute = File.expand_path(path, @cwd)
+      source = File.read(absolute)
+      with_positional(args) { run(source, compound: true) }
+    rescue SystemCallError
+      @stderr.puts("sharky: source: #{path}: not found")
+      mark_status(1)
+    end
+
     def with_positional(values)
       @positional_stack << @positional
       @positional = Array(values).map(&:to_s)

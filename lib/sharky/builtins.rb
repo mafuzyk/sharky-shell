@@ -16,6 +16,12 @@ module Sharky
         shell.stdout.puts(shell.cwd)
         0
       end,
+      "source" => lambda do |shell, argv, _stdin|
+        Builtins.source_builtin(shell, argv)
+      end,
+      "." => lambda do |shell, argv, _stdin|
+        Builtins.source_builtin(shell, argv)
+      end,
       "export" => lambda do |shell, argv, _stdin|
         if argv.empty?
           shell.env.each { |name, value| shell.stdout.puts("#{name}=#{value}") }
@@ -346,6 +352,15 @@ module Sharky
       nil
     end
     private_class_method :control_level
+
+    def self.source_builtin(shell, argv)
+      if argv.empty?
+        shell.stderr.puts("sharky: source: filename argument required")
+        return 1
+      end
+
+      shell.source_file(argv.first, argv.drop(1))
+    end
 
     def self.shift_builtin(shell, argv)
       count = argv.empty? ? 1 : Integer(argv.first, 10)
