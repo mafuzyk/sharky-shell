@@ -28,9 +28,10 @@ module Sharky
         end
       end
 
-      def initialize(cwd, git_command: "git")
+      def initialize(cwd, git_command: "git", timeout: TIMEOUT_SECONDS)
         @cwd = File.expand_path(cwd)
         @git_command = git_command
+        @timeout = timeout
       end
 
       def info
@@ -112,7 +113,7 @@ module Sharky
       end
 
       def query_status
-        deadline = monotonic + TIMEOUT_SECONDS
+        deadline = monotonic + @timeout
         out_reader, out_writer = IO.pipe
         err_reader, err_writer = IO.pipe
         pid = Process.spawn(

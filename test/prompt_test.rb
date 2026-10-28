@@ -130,7 +130,7 @@ class PromptTest < Minitest::Test
     File.chmod(0755, fake)
     started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
-    info = Sharky::Prompt::Git.new(@tmp, git_command: fake).info
+    info = Sharky::Prompt::Git.new(@tmp, git_command: fake, timeout: 0.2).info
 
     assert_equal "large", info[:branch]
     assert_equal true, info[:dirty]
