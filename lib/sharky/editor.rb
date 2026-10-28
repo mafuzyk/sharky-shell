@@ -473,8 +473,8 @@ module Sharky
     def history_down
       return :handled unless @history_entries
 
-      @history_index += 1
-      if @history_index < @history_entries.length
+      @history_index -= 1
+      if @history_index >= 0
         @buffer.replace(@history_entries[@history_index])
       else
         @buffer.replace(@history_prefix)

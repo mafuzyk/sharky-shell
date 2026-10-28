@@ -160,13 +160,13 @@ class CompletionEditorTest < Minitest::Test
     super
   end
 
-  def type_line(keys)
+  def type_line(keys, history: nil)
     reader, writer = IO.pipe
     output = StringIO.new
     terminal = FakeTerminal.new(reader, output)
     editor = Sharky::Editor.new(
       terminal: terminal,
-      history: Sharky::History.new(path: File.join(@tmp, "history")),
+      history: history || Sharky::History.new(path: File.join(@tmp, "history")),
       prompt: "> ",
       theme: Sharky::Theme.new,
       runtime: @runtime,
@@ -181,6 +181,13 @@ class CompletionEditorTest < Minitest::Test
     thread&.kill if thread&.alive?
     writer&.close unless writer&.closed?
     reader&.close unless reader&.closed?
+  end
+
+  def test_history_down_returns_toward_the_newest_entry
+    history = Sharky::History.new(path: File.join(@tmp, "history"))
+    %w[one two three].each { |entry| history.add(entry) }
+
+    assert_equal "three", type_line("\e[A\e[A\e[B\r", history: history)
   end
 
   def test_tab_completes_a_unique_command_prefix
