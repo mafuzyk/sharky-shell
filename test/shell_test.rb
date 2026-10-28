@@ -111,6 +111,16 @@ class ShellTest < Minitest::Test
     assert_match(/invalid option/, @shell.stderr.string)
   end
 
+  def test_command_substitution
+    assert_equal 0, @shell.run("printf '%s' \"$(printf sub)\"")
+    assert_equal "sub", @shell.stdout.string
+  end
+
+  def test_command_substitution_strips_trailing_newlines
+    assert_equal 0, @shell.run("printf '<%s>' \"$(printf 'x\\n\\n')\"")
+    assert_equal "<x>", @shell.stdout.string
+  end
+
   def test_nounset_and_recovery
     assert_equal 1, @shell.run("set -u; printf '%s' \"$MISSING\"")
     assert_match(/MISSING: unbound variable/, @shell.stderr.string)

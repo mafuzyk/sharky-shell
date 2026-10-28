@@ -175,8 +175,27 @@ module Sharky
         script_name: @script_name,
         nounset: option?(:nounset),
         arrays: @arrays,
-        cwd: @cwd
+        cwd: @cwd,
+        command_substitution: ->(program) { capture_command(program) }
       )
+    end
+
+    def capture_command(program)
+      reader, writer = IO.pipe
+      pid = fork do
+        reader.close
+        $stdout.reopen(writer)
+        @stdout = writer
+        status = Executor.new(self).execute(program, foreground: false)
+        writer.close
+        exit!(status)
+      end
+
+      writer.close
+      output = reader.read
+      reader.close
+      Process.waitpid(pid)
+      output
     end
 
     def set_array(name, values, append: false)
