@@ -66,6 +66,9 @@ module Sharky
     rescue ParseError => error
       report_parse_error(source, error)
       mark_status(2)
+    rescue Expansion::ParameterError => error
+      @stderr.puts("sharky: #{error.message}")
+      mark_status(1)
     ensure
       reap_jobs
     end

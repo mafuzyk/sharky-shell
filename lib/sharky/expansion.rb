@@ -5,6 +5,7 @@ module Sharky
     Chunk = Struct.new(:text, :split, :glob, :quoted_empty, keyword_init: true)
     IFS = " \t\n"
     GLOB_MAGIC = "*?["
+    ParameterError = Class.new(StandardError)
 
     def initialize(env: {}, cwd: Dir.pwd, command_substitution: nil)
       @env = env
@@ -40,6 +41,8 @@ module Sharky
       when :variable, :special
         text = parameter_value(part.value)
         [chunk(text, split: !quoted, glob: !quoted, quoted_empty: quoted && text.empty?)]
+      when :parameter
+        evaluate_parameter(part.value, quoted: quoted)
       when :cmdsub
         text = command_substitution(part.value)
         [chunk(text, split: !quoted, glob: !quoted, quoted_empty: quoted && text.empty?)]
@@ -64,6 +67,88 @@ module Sharky
         else @env.fetch(name, "")
         end
       value.to_s
+    end
+
+    def evaluate_parameter(parameter, quoted:)
+      value = parameter_value(parameter.name)
+      text =
+        case parameter.operator
+        when nil
+          value
+        when :length
+          value.length.to_s
+        when :default
+          value.empty? ? expand_argument(parameter.argument) : value
+        when :assign
+          if value.empty?
+            assigned = expand_argument(parameter.argument)
+            @env[parameter.name] = assigned
+            assigned
+          else
+            value
+          end
+        when :error
+          if value.empty?
+            message = parameter.argument.to_s
+            message = "parameter null or not set" if message.empty?
+            raise ParameterError, "#{parameter.name}: #{message}"
+          end
+          value
+        when :alternate
+          value.empty? ? "" : expand_argument(parameter.argument)
+        when :trim_prefix_short
+          trim_prefix(value, parameter.argument, longest: false)
+        when :trim_prefix_long
+          trim_prefix(value, parameter.argument, longest: true)
+        when :trim_suffix_short
+          trim_suffix(value, parameter.argument, longest: false)
+        when :trim_suffix_long
+          trim_suffix(value, parameter.argument, longest: true)
+        when :substitute
+          substitute(value, parameter.argument, all: false)
+        when :substitute_all
+          substitute(value, parameter.argument, all: true)
+        else
+          value
+        end
+
+      [chunk(text, split: !quoted, glob: !quoted, quoted_empty: quoted && text.empty?)]
+    end
+
+    def expand_argument(raw)
+      return "" if raw.nil?
+
+      words = Lexer.new(raw).tokenize.select { |token| token.type == :word }.map do |token|
+        AST::Word.new(parts: token.value.parts, pos: token.pos)
+      end
+      return raw if words.empty?
+
+      words.map { |word| expand_word(word, quoted: true).join }.join(" ")
+    rescue LexError
+      raw
+    end
+
+    def trim_prefix(value, pattern, longest:)
+      indexes = (0..value.length).select do |index|
+        File.fnmatch(pattern.to_s, value[0...index], File::FNM_DOTMATCH)
+      end
+      index = longest ? indexes.max : indexes.min
+      index ? value[index..] : value
+    end
+
+    def trim_suffix(value, pattern, longest:)
+      indexes = (0..value.length).select do |index|
+        File.fnmatch(pattern.to_s, value[index..], File::FNM_DOTMATCH)
+      end
+      index = longest ? indexes.min : indexes.max
+      index ? value[0...index] : value
+    end
+
+    def substitute(value, argument, all:)
+      pattern, replacement = argument.to_s.split("/", 2)
+      return value if pattern.nil? || pattern.empty?
+
+      all ? value.gsub(pattern, replacement.to_s) : value.sub(pattern, replacement.to_s)
     end
 
     def command_substitution(program)

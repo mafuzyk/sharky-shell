@@ -408,14 +408,53 @@ module Sharky
     end
 
     def scan_braced_variable(pos)
-      @pos += 1
-      start = @pos
-      @pos += 1 while current && current != "}"
-      raise LexError.new("unclosed variable expansion", pos: pos, incomplete: true) if current.nil?
+      start = @pos + 1
+      index = start
+      depth = 0
 
-      name = @source[start...@pos]
-      @pos += 1
-      AST::Part.new(type: :variable, value: name, pos: pos)
+      while index < @source.length
+        if @source[index] == "$" && @source[index + 1] == "{"
+          depth += 1
+          index += 2
+        elsif @source[index] == "}"
+          break if depth.zero?
+
+          depth -= 1
+          index += 1
+        else
+          index += 1
+        end
+      end
+
+      raise LexError.new("unclosed variable expansion", pos: pos, incomplete: true) if index >= @source.length
+
+      content = @source[start...index]
+      @pos = index + 1
+      AST::Part.new(type: :parameter, value: parse_parameter(content, pos), pos: pos)
+    end
+
+    def parse_parameter(content, pos)
+      if content.start_with?("#") && content.length > 1
+        return AST::Parameter.new(name: content[1..], operator: :length, argument: nil, pos: pos)
+      end
+
+      match = /\A([A-Za-z_][A-Za-z0-9_]*)(?:(:-|:=|:\?|:\+|##|#|%%|%|\/\/|\/)(.*))?\z/m.match(content)
+      return AST::Parameter.new(name: content, operator: nil, argument: nil, pos: pos) unless match
+
+      operator = case match[2]
+                 when ":-" then :default
+                 when ":=" then :assign
+                 when ":?" then :error
+                 when ":+" then :alternate
+                 when "##" then :trim_prefix_long
+                 when "#" then :trim_prefix_short
+                 when "%%" then :trim_suffix_long
+                 when "%" then :trim_suffix_short
+                 when "//" then :substitute_all
+                 when "/" then :substitute
+                 end
+
+      AST::Parameter.new(name: match[1], operator: operator, argument: match[3], pos: pos)
     end
 
     def scan_command_substitution(pos)

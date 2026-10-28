@@ -16,6 +16,7 @@ module Sharky
     Redirect = Struct.new(:fd, :op, :target, keyword_init: true)
     Word = Struct.new(:parts, :pos, keyword_init: true)
     Part = Struct.new(:type, :value, :pos, keyword_init: true)
+    Parameter = Struct.new(:name, :operator, :argument, :pos, keyword_init: true)
     If = Struct.new(:branches, :else_body, :pos, keyword_init: true)
     For = Struct.new(:name, :words, :body, :pos, keyword_init: true)
     While = Struct.new(:condition, :body, :until_form, :pos, keyword_init: true)

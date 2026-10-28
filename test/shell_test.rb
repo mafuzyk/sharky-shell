@@ -58,4 +58,10 @@ class ShellTest < Minitest::Test
     assert_equal 0, @shell.run("exit 0; printf no")
     assert_equal "", @shell.stdout.string
   end
+
+  def test_parameter_error_is_reported_without_crashing
+    assert_equal 1, @shell.run("echo ${MISSING:?oops}")
+    assert_equal "", @shell.stdout.string
+    assert_match(/MISSING: oops/, @shell.stderr.string)
+  end
 end

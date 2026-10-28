@@ -47,4 +47,48 @@ class ExpansionTest < Minitest::Test
     part = Sharky::AST::Part.new(type: :variable, value: "X")
     assert_equal "a b", expansion(env: env).expand_assignment(word(part))
   end
+
+  def parameter(name, operator: nil, argument: nil)
+    Sharky::AST::Part.new(type: :parameter, value: Sharky::AST::Parameter.new(name: name, operator: operator, argument: argument))
+  end
+
+  def test_braced_parameter_plain_and_default
+    assert_equal ["value"], expansion(env: { "X" => "value" }).expand_word(word(parameter("X")), quoted: true)
+    assert_equal ["fallback"], expansion(env: {}).expand_word(word(parameter("X", operator: :default, argument: "fallback")), quoted: true)
+    assert_equal ["value"], expansion(env: { "X" => "value" }).expand_word(word(parameter("X", operator: :default, argument: "fallback")), quoted: true)
+  end
+
+  def test_braced_parameter_assign_and_alternate
+    env = {}
+    exp = expansion(env: env)
+    assert_equal ["assigned"], exp.expand_word(word(parameter("X", operator: :assign, argument: "assigned")), quoted: true)
+    assert_equal "assigned", env["X"]
+    assert_equal ["alt"], expansion(env: { "X" => "yes" }).expand_word(word(parameter("X", operator: :alternate, argument: "alt")), quoted: true)
+    assert_equal [], expansion(env: {}).expand_word(word(parameter("X", operator: :alternate, argument: "alt")))
+  end
+
+  def test_braced_parameter_length_and_trim
+    assert_equal ["3"], expansion(env: { "X" => "abc" }).expand_word(word(parameter("X", operator: :length)), quoted: true)
+    assert_equal ["bar.txt"], expansion(env: { "X" => "foo.bar.txt" }).expand_word(word(parameter("X", operator: :trim_prefix_short, argument: "*.")), quoted: true)
+    assert_equal ["txt"], expansion(env: { "X" => "foo.bar.txt" }).expand_word(word(parameter("X", operator: :trim_prefix_long, argument: "*.")), quoted: true)
+    assert_equal ["foo.bar"], expansion(env: { "X" => "foo.bar.txt" }).expand_word(word(parameter("X", operator: :trim_suffix_short, argument: ".*")), quoted: true)
+    assert_equal ["foo"], expansion(env: { "X" => "foo.bar.txt" }).expand_word(word(parameter("X", operator: :trim_suffix_long, argument: ".*")), quoted: true)
+  end
+
+  def test_braced_parameter_substitution
+    assert_equal ["bar.bar.txt"], expansion(env: { "X" => "foo.bar.txt" }).expand_word(word(parameter("X", operator: :substitute, argument: "foo/bar")), quoted: true)
+    assert_equal ["bar.bar.txt"], expansion(env: { "X" => "foo.foo.txt" }).expand_word(word(parameter("X", operator: :substitute_all, argument: "foo/bar")), quoted: true)
+  end
+
+  def test_braced_parameter_error_is_raised
+    assert_raises(Sharky::Expansion::ParameterError) do
+      expansion(env: {}).expand_word(word(parameter("X", operator: :error, argument: "missing")))
+    end
+  end
+
+  def test_braced_parameter_quoted_empty_and_splitting
+    assert_equal [""], expansion(env: {}).expand_word(word(parameter("X", operator: :default, argument: "")), quoted: true)
+    assert_equal [], expansion(env: {}).expand_word(word(parameter("X", operator: :default, argument: "")))
+    assert_equal ["a", "b"], expansion(env: { "X" => "a b" }).expand_word(word(parameter("X")))
+  end
 end

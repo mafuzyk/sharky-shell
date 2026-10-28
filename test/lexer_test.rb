@@ -22,7 +22,7 @@ class LexerTest < Minitest::Test
     assert_equal :double, tokens[1].value.parts.first.type
     assert_equal :single, tokens[2].value.parts.first.type
     assert_equal :variable, tokens[3].value.parts.first.type
-    assert_equal :variable, tokens[4].value.parts.first.type
+    assert_equal :parameter, tokens[4].value.parts.first.type
   end
 
   def test_command_substitution_and_nesting
@@ -126,5 +126,31 @@ class LexerTest < Minitest::Test
     assert_equal [:word, :redir_in, :redir_in, :word, :eof], lex("cat <<EOF").map(&:type)
     assert_equal [:word, :redir_both, :redir_out, :word, :eof], lex("cmd &>> log").map(&:type)
     assert_equal [:word, :semi, :amp, :word, :semi, :semi, :amp, :word, :eof], lex("a ;& b ;;& c").map(&:type)
+  end
+
+  def test_braced_parameter_operators
+    tokens = lex("${X} ${X:-fallback} ${X:=assign} ${X:?missing} ${X:+alt} ${#X} ${X%%.*} ${X#*.} ${X/foo/bar} ${X//foo/bar}")
+    parts = tokens.select { |token| token.type == :word }.map { |token| token.value.parts.first }
+
+    assert_equal Array.new(10, :parameter), parts.map(&:type)
+    assert_equal Array.new(10, "X"), parts.map { |part| part.value.name }
+    assert_equal [nil, :default, :assign, :error, :alternate, :length, :trim_suffix_long, :trim_prefix_short, :substitute, :substitute_all],
+                 parts.map { |part| part.value.operator }
+    assert_equal [nil, "fallback", "assign", "missing", "alt", nil, ".*", "*.", "foo/bar", "foo/bar"],
+                 parts.map { |part| part.value.argument }
+  end
+
+  def test_braced_parameter_keeps_nested_default_word
+    token = lex("${A:-${B}}").first
+    parameter = token.value.parts.first.value
+
+    assert_equal "A", parameter.name
+    assert_equal :default, parameter.operator
+    assert_equal "${B}", parameter.argument
+  end
+
+  def test_unclosed_braced_parameter_is_incomplete
+    error = assert_raises(Sharky::LexError) { lex("${X:-oops") }
+    assert error.incomplete?
   end
 end
