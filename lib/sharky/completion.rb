@@ -7,6 +7,10 @@ module Sharky
     ASSIGNMENT = /\A[A-Za-z_][A-Za-z0-9_]*=/
     TOKEN_BREAK = /[\s|&;<>()]/
     VARIABLE = /\$\{?([A-Za-z_][A-Za-z0-9_]*)?\z/
+    SHELL_KEYWORDS = %w[
+      if then elif else fi for in do done while until case esac function
+      break continue return
+    ].freeze
 
     def initialize(runtime:, shell:)
       @runtime = runtime
@@ -34,7 +38,7 @@ module Sharky
       before = line[0...start]
 
       if variable_token?(before)
-        names = @shell.env.keys.grep(/\A[A-Za-z_][A-Za-z0-9_]*\z/).sort
+        names = (@shell.env.keys + @shell.arrays.keys).grep(/\A[A-Za-z_][A-Za-z0-9_]*\z/).uniq.sort
         return matched(names, word, "variable")
       end
 
@@ -66,9 +70,11 @@ module Sharky
     end
 
     def command_candidates(word)
-      matched(@runtime.aliases.keys, word, "alias") +
+      matched(SHELL_KEYWORDS, word, "keyword") +
+        matched(@runtime.aliases.keys, word, "alias") +
         matched(@runtime.abbreviations.keys, word, "abbreviation") +
         matched(@runtime.commands.keys, word, "function") +
+        matched(@shell.functions.keys, word, "function") +
         matched(Builtins::TABLE.keys, word, "builtin") +
         matched(path_commands, word, "executable")
     end

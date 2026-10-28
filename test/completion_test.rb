@@ -15,8 +15,8 @@ class CompletionTest < Minitest::Test
     @runtime.aliases["ll"] = "printf ll"
     @runtime.abbreviations["gco"] = "git checkout"
     @runtime.commands["hello"] = ->(_argv) { 0 }
-    shell = Sharky::Shell.new(env: { "PATH" => File.join(@tmp, "bin"), "HOME" => @tmp }, cwd: @tmp)
-    @completion = Sharky::Completion.new(runtime: @runtime, shell: shell)
+    @shell = Sharky::Shell.new(env: { "PATH" => File.join(@tmp, "bin"), "HOME" => @tmp }, cwd: @tmp)
+    @completion = Sharky::Completion.new(runtime: @runtime, shell: @shell)
   end
 
   def test_command_position_completion
@@ -32,6 +32,22 @@ class CompletionTest < Minitest::Test
 
   def test_command_position_after_a_pipe
     assert_includes @completion.candidates("printf hi | ec", 13).map(&:value), "echo"
+  end
+
+  def test_compound_keywords_complete
+    assert_includes @completion.candidates("th", 2).map(&:value), "then"
+    assert_includes @completion.candidates("f", 1).map(&:value), "fi"
+    assert_includes @completion.candidates("do", 2).map(&:value), "done"
+  end
+
+  def test_shell_function_completes
+    @shell.functions["myfunc"] = Sharky::AST::List.new(entries: [])
+    assert_includes @completion.candidates("myf", 3).map(&:value), "myfunc"
+  end
+
+  def test_array_names_complete_as_variables
+    @shell.set_array("myarray", ["one"])
+    assert_includes @completion.candidates("echo $mya", 9).map(&:value), "myarray"
   end
 
   def test_file_completion
