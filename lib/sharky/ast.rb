@@ -15,5 +15,14 @@ module Sharky
     Redirect = Struct.new(:fd, :op, :target, keyword_init: true)
     Word = Struct.new(:parts, :pos, keyword_init: true)
     Part = Struct.new(:type, :value, :pos, keyword_init: true)
+    If = Struct.new(:branches, :else_body, :pos, keyword_init: true)
+    For = Struct.new(:name, :words, :body, :pos, keyword_init: true)
+    While = Struct.new(:condition, :body, :until_form, :pos, keyword_init: true)
+    Case = Struct.new(:word, :arms, :pos, keyword_init: true)
+    FunctionDef = Struct.new(:name, :body, :pos, keyword_init: true)
+    Group = Struct.new(:list, :pos, keyword_init: true)
+    Arithmetic = Struct.new(:source, :pos, keyword_init: true)
+    TestCommand = Struct.new(:source, :double_bracket, :pos, keyword_init: true)
+    HereDoc = Struct.new(:delimiter, :strip_tabs, :quoted, :body, :pos, keyword_init: true)
   end
 end
