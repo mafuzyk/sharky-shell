@@ -14,7 +14,7 @@ Internal design notes and implementation plans are kept outside the published re
 - Ruby 3.4 on Linux
 - Standard library and default gems only; no third-party runtime gems
 
-sharky is not a login shell in v0.1. Start it from Bash or another shell and test it there first.
+sharky is not a login shell in v1.0. Start it from Bash or another shell and test it there first.
 
 ## Install
 
@@ -151,12 +151,15 @@ machine (Arch Linux, NTFS checkout):
 | `bash -c true` | ~1 ms |
 | `fish --no-config -c true` | ~2 ms |
 | `ruby --disable-gems -e ''` | ~7 ms |
-| `sharky --no-config -c true` | ~36 ms |
+| `Sharky::Prompt.render` (default) | ~0.003 ms median / p95 |
+| `sharky --no-config -c true` | ~42 ms |
 
 Fish's interactive startup is commonly in the 20–30 ms range; sharky is in that
 range, not Bash's. sharky does **not** claim to be the fastest shell. The v1
 budget is startup under 50 ms and prompt p95 under 20 ms, with no external
-process in the default path.
+process in the default path. Measured on the reference machine: startup median
+41.9 ms (`--no-config -c true`) and prompt p95 0.003 ms for the default prompt
+renderer; see `ruby bench/startup.rb` and `ruby bench/prompt.rb`.
 
 ## Tests and benchmarks
 
@@ -172,9 +175,9 @@ their results; the CI soak job runs repeated command and PTY sessions.
 
 ## Roadmap
 
-v0.1 is complete. v1.0 is the stable daily-driver release: installable,
-job-control hardened, CI-tested, documented, and built around the session
-contract.
+v1.0 is the stable daily-driver release: installable, job-control hardened,
+CI-tested, documented, and built around the session contract. Login-shell
+installation remains post-v1.
 
 ## License
 

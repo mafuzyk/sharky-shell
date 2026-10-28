@@ -1,6 +1,6 @@
 # Maintainer: sharky maintainers
 pkgname=sharky
-pkgver=0.1.0
+pkgver=1.0.0
 pkgrel=1
 pkgdesc="Unix-first interactive shell written in Ruby"
 arch=('any')

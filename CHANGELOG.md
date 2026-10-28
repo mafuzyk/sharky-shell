@@ -6,15 +6,46 @@ versioning.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-28
+
 ### Added
 
-- Built-in prompt presets and optional Starship provider.
-- Design docs for the v1 session contract.
+- First-class `Sharky::Session` and structured `Sharky::Result`; `--json -c` and
+  `state --json` use a versioned envelope with environment redaction by default.
+- Native Bash-like language subset: conditionals, loops, `case`, functions,
+  groups, `!`, arithmetic commands and expansion, indexed arrays, brace
+  expansion, parameter expansion, here-documents, here-strings and compound
+  redirections.
+- Native `.sh` scripts and shebangs, `$0`/`$#`/`$@` positional parameters,
+  function arguments, `source`/`.`, `set -e/-u/-x`, `pipefail`, `read`,
+  `shift`, `break`/`continue`/`return` and `trap` (EXIT action executes).
+- Interactive continuation for compound commands and here-documents; syntax
+  highlighting and completion understand the new grammar.
+- `Makefile` prefix install/uninstall, source tarball, Arch `PKGBUILD`, man page
+  and an install integration test.
 
 ### Changed
 
-- Documented the v1.0 scope: session shell, no login-shell installation until
-  the stability gate passes.
+- CLI `-c` and the interactive loop use the compound parser; the legacy
+  `Shell#run` default remains for compatibility.
+- Unsupported syntax still exits 2 with a precise message; no Bash fallback.
+- Job listings reconstruct compound command text instead of showing blanks.
+
+### Fixed
+
+- Command substitution now runs in a forked subshell, captures stdout, strips
+  trailing newlines and reaps the child.
+- Compound trailing redirections, `pipefail`, nounset defaults and brace
+  expansion regressions found by the Bash oracle matrix.
+
+### Known limitations
+
+- Login-shell installation remains post-v1 until the stability gate passes.
+- Signal traps are stored, but only the EXIT trap executes in v1.
+- No positional/slice array field splitting parity; no associative arrays,
+  `coproc`, process substitution, extglob, programmable completion or full
+  `[[ =~ ]]`.
+- `pipefail` is not applied to job-control pipelines.
 
 ## [0.1.0] - 2026-10-27
 
