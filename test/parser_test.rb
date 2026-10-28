@@ -13,11 +13,18 @@ class ParserTest < Minitest::Test
   end
 
   def first_command(program)
-    program.lines.first.list.entries.first[1].first.commands.first
+    first_in_and_or(program.lines.first.list)
   end
 
   def first_list_command(list)
-    list.entries.first[1].first.commands.first
+    first_in_and_or(list)
+  end
+
+  def first_in_and_or(list)
+    first = list.entries.first[1].first
+    first = first.first if first.is_a?(Sharky::AST::AndOr)
+    first = first.commands.first if first.is_a?(Sharky::AST::Pipeline)
+    first
   end
 
   def word_text(word)
@@ -314,5 +321,148 @@ class ParserTest < Minitest::Test
     assert_equal "unsupported syntax: 'case'. Use bash -c '...' or a Ruby function.", case_error.message
     assert_equal "unsupported syntax: 'function'. Use bash -c '...' or a Ruby function.",
                  function_error.message
+  end
+
+  def test_compound_mode_parses_bang_negation
+    node = first_command(compound_parse("! grep foo file"))
+
+    assert_instance_of Sharky::AST::Not, node
+    assert_equal 0, node.pos
+    assert_instance_of Sharky::AST::Pipeline, node.command
+    assert_equal ["grep", "foo", "file"], word_values(node.command.commands.first)
+  end
+
+  def test_compound_bang_negates_the_whole_pipeline
+    node = first_command(compound_parse("! a | b"))
+
+    assert_instance_of Sharky::AST::Not, node
+    assert_equal 2, node.command.commands.size
+  end
+
+  def test_compound_mode_parses_arithmetic_command
+    node = first_command(compound_parse("((1 + (2 * 3)))"))
+
+    assert_instance_of Sharky::AST::Arithmetic, node
+    assert_equal "1 + (2 * 3)", node.source
+    assert_equal 0, node.pos
+  end
+
+  def test_compound_mode_parses_double_bracket_test
+    source = %q{[[ -n "$a" && -z "$b" || "$a" == x && "$b" != y ]]}
+    node = first_command(compound_parse(source))
+
+    assert_instance_of Sharky::AST::TestCommand, node
+    assert node.double_bracket
+    assert_equal %q{-n "$a" && -z "$b" || "$a" == x && "$b" != y}, node.source
+    assert_equal 0, node.pos
+  end
+
+  def test_compound_redirects_parse_both_append_and_here_string
+    simple = first_command(compound_parse("cmd &>> log <<< word"))
+    redirects = simple.redirects
+
+    assert_equal [:both_append, :here_string], redirects.map(&:op)
+    assert_equal [nil, 0], redirects.map(&:fd)
+    assert_equal ["log", "word"], redirects.map { |redirect| word_text(redirect.target) }
+  end
+
+  def test_compound_keeps_existing_redirect_forms
+    simple = first_command(compound_parse("cmd 2>err <in >>out 2>&1 &>both"))
+    redirects = simple.redirects
+
+    assert_equal [:out, :in, :append, :dup, :both], redirects.map(&:op)
+    assert_equal [2, 0, 1, 2, nil], redirects.map(&:fd)
+    assert_equal "err", word_text(redirects[0].target)
+    assert_equal "in", word_text(redirects[1].target)
+    assert_equal "out", word_text(redirects[2].target)
+    assert_equal 1, redirects[3].target
+    assert_equal "both", word_text(redirects[4].target)
+  end
+
+  def test_compound_here_document_collects_body_and_skips_it
+    source = "cat <<EOF\nhello\nEOF\necho after"
+    program = compound_parse(source)
+    simple = first_list_command(program.lines.first.list)
+    redirect = simple.redirects.first
+    document = redirect.target
+
+    assert_equal [:heredoc, 0], [redirect.op, redirect.fd]
+    assert_instance_of Sharky::AST::HereDoc, document
+    assert_equal "EOF", document.delimiter
+    refute document.strip_tabs
+    refute document.quoted
+    assert_equal "hello\n", document.body
+    assert_equal source.index("<<"), document.pos
+    assert_equal 2, program.lines.size
+    assert_equal ["echo", "after"], word_values(first_list_command(program.lines[1].list))
+  end
+
+  def test_compound_here_document_strips_tabs_and_quotes_delimiter
+    source = "cat <<-'EOF'\n\thello\n\tEOF\necho after"
+    program = compound_parse(source)
+    document = first_list_command(program.lines.first.list).redirects.first.target
+
+    assert_equal "EOF", document.delimiter
+    assert document.strip_tabs
+    assert document.quoted
+    assert_equal "hello\n", document.body
+    assert_equal 2, program.lines.size
+  end
+
+  def test_compound_here_documents_consume_bodies_in_order
+    source = "cat <<A <<B\none\nA\ntwo\nB\necho after"
+    program = compound_parse(source)
+    documents = first_list_command(program.lines.first.list).redirects.map(&:target)
+
+    assert_equal ["one\n", "two\n"], documents.map(&:body)
+    assert_equal 2, program.lines.size
+  end
+
+  def test_compound_unclosed_here_document_is_incomplete
+    unterminated = assert_raises(Sharky::ParseError) { compound_parse("cat <<EOF\nhello\n") }
+    missing_line = assert_raises(Sharky::ParseError) { compound_parse("cat <<EOF") }
+
+    assert unterminated.incomplete?
+    assert missing_line.incomplete?
+  end
+
+  def test_compound_unclosed_arithmetic_and_test_are_incomplete
+    arithmetic = assert_raises(Sharky::ParseError) { compound_parse("((1 + 2") }
+    test = assert_raises(Sharky::ParseError) { compound_parse("[[ -f file") }
+
+    assert arithmetic.incomplete?
+    assert test.incomplete?
+  end
+
+  def test_compound_case_fallthrough_terminators_parse
+    node = first_command(compound_parse("case x in a) echo a;& b) echo b;;& c) echo c;; esac"))
+
+    assert_instance_of Sharky::AST::Case, node
+    assert_equal 3, node.arms.size
+  end
+
+  def test_compound_nested_case_group_and_function_parse
+    source = "f() { case x in a) { echo a; };; esac; }"
+    function = first_command(compound_parse(source))
+    case_node = first_list_command(function.body)
+    group = first_list_command(case_node.arms.first[1])
+
+    assert_instance_of Sharky::AST::FunctionDef, function
+    assert_instance_of Sharky::AST::Case, case_node
+    assert_instance_of Sharky::AST::Group, group
+    assert_equal ["echo", "a"], word_values(first_list_command(group.list))
+  end
+
+  def test_default_mode_still_rejects_arithmetic_test_and_here_doc
+    arithmetic = assert_raises(Sharky::ParseError) { parse("((1 + 2))") }
+    test = assert_raises(Sharky::ParseError) { parse("[[ -f x ]]") }
+    here_doc = assert_raises(Sharky::ParseError) { parse("cat <<EOF") }
+
+    assert_equal "unsupported syntax: '(('. Use bash -c '...' or a Ruby function.", arithmetic.message
+    assert_equal "unsupported syntax: '[['. Use bash -c '...' or a Ruby function.", test.message
+    assert_equal "unsupported syntax: '<<'. Use bash -c '...' or a Ruby function.", here_doc.message
+    refute arithmetic.incomplete?
+    refute test.incomplete?
+    refute here_doc.incomplete?
   end
 end

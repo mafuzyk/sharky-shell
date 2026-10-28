@@ -20,25 +20,39 @@ module Sharky
     ].freeze
 
     COMPOUND_STARTERS = %w[if for while until case function].freeze
-    REDIRECT_TYPES = [:redir_out, :redir_append, :redir_in, :redir_dup, :redir_both].freeze
+    REDIRECT_TYPES = [
+      :redir_out, :redir_append, :redir_in, :redir_dup, :redir_both,
+      :redir_both_append, :heredoc, :heredoc_strip, :here_string
+    ].freeze
     REDIRECT_OPS = {
       redir_out: :out,
       redir_append: :append,
       redir_in: :in,
-      redir_both: :both
+      redir_both: :both,
+      redir_both_append: :both_append,
+      heredoc: :heredoc,
+      heredoc_strip: :heredoc,
+      here_string: :here_string
     }.freeze
+    HEREDOC_TYPES = [:heredoc, :heredoc_strip].freeze
     NAME = /\A[A-Za-z_][A-Za-z0-9_]*\z/
 
     def self.parse(source, compound: false)
-      new(Lexer.new(source, compound: compound).tokenize, compound: compound).parse
+      new(
+        Lexer.new(source, compound: compound).tokenize,
+        compound: compound,
+        source: source
+      ).parse
     rescue LexError => error
       raise ParseError.new(error.message, pos: error.pos, incomplete: error.incomplete?)
     end
 
-    def initialize(tokens, compound: false)
+    def initialize(tokens, compound: false, source: nil)
       @tokens = tokens
       @compound = compound
+      @source = source
       @pos = 0
+      @pending_heredocs = []
     end
 
     def parse
@@ -52,6 +66,8 @@ module Sharky
           skip_newlines
         end
       end
+
+      raise_unclosed_heredoc! unless @pending_heredocs.empty?
 
       AST::Program.new(lines: lines)
     end
@@ -77,6 +93,7 @@ module Sharky
     def advance
       token = current
       @pos += 1
+      collect_heredocs(token.pos + 1) if token.type == :newline && !@pending_heredocs.empty?
       token
     end
 
@@ -139,6 +156,11 @@ module Sharky
     end
 
     def parse_pipeline
+      if at?(:bang)
+        pos = advance.pos
+        return AST::Not.new(command: parse_pipeline, pos: pos)
+      end
+
       commands = [parse_command]
       commands << parse_command while consume(:pipe)
 
@@ -153,6 +175,8 @@ module Sharky
     end
 
     def parse_command
+      return parse_arithmetic if @compound && at?(:arith_start)
+      return parse_test_command if @compound && at?(:test_start)
       return parse_compound_command if compound_command?
 
       check_reserved!
@@ -162,6 +186,58 @@ module Sharky
       else
         parse_simple_command
       end
+    end
+
+    def parse_arithmetic
+      token = advance
+      body_start = token.pos + 2
+      body_end = arithmetic_end_index(body_start)
+
+      unless body_end
+        raise ParseError.new("unclosed arithmetic command", pos: token.pos, incomplete: true)
+      end
+
+      source = @source[body_start...body_end].to_s.strip
+      skip_tokens_before(body_end + 2)
+      AST::Arithmetic.new(source: source, pos: token.pos)
+    end
+
+    def arithmetic_end_index(start)
+      depth = 0
+      index = start
+
+      while index < @source.length
+        case @source[index]
+        when "("
+          depth += 1
+        when ")"
+          return index if depth.zero? && @source[index + 1] == ")"
+
+          depth -= 1 if depth.positive?
+        end
+        index += 1
+      end
+
+      nil
+    end
+
+    def skip_tokens_before(position)
+      @pos += 1 while current && current.pos < position
+    end
+
+    def parse_test_command
+      token = advance
+      body_start = token.pos + 2
+
+      until at?(:test_end)
+        raise ParseError.new("unclosed test command", pos: token.pos, incomplete: true) if at?(:eof)
+
+        advance
+      end
+
+      source = @source[body_start...current.pos].to_s.strip
+      advance
+      AST::TestCommand.new(source: source, double_bracket: true, pos: token.pos)
     end
 
     def parse_compound_command
@@ -517,10 +593,34 @@ module Sharky
       end
 
       target = expect_redirect_word
+
+      if HEREDOC_TYPES.include?(token.type)
+        delimiter, quoted = heredoc_delimiter(target)
+        document = AST::HereDoc.new(
+          delimiter: delimiter,
+          strip_tabs: token.type == :heredoc_strip,
+          quoted: quoted,
+          body: nil,
+          pos: token.pos
+        )
+        @pending_heredocs << document
+        return AST::Redirect.new(fd: token.value || 0, op: :heredoc, target: document)
+      end
+
       op = REDIRECT_OPS.fetch(token.type)
-      default_fd = op == :in ? 0 : 1
-      fd = token.value || (op == :both ? nil : default_fd)
+      default_fd = [:in, :here_string].include?(op) ? 0 : 1
+      fd = token.value || ([:both, :both_append].include?(op) ? nil : default_fd)
       AST::Redirect.new(fd: fd, op: op, target: convert_word(target))
+    end
+
+    def heredoc_delimiter(word)
+      delimiter = word.parts.map do |part|
+        part.type == :double ? part.value.map(&:value).join : part.value
+      end.join
+      raw_end = current&.pos || @source.length
+      raw = @source[word.pos...raw_end]
+      quoted = raw.include?("'") || raw.include?('"') || raw.include?("\\")
+      [delimiter, quoted]
     end
 
     def expect_redirect_word
@@ -528,6 +628,51 @@ module Sharky
       raise syntax_error("missing redirect target") unless at?(:word)
 
       advance.value
+    end
+
+    def collect_heredocs(body_start)
+      pending = @pending_heredocs
+      @pending_heredocs = []
+
+      pending.each do |document|
+        body, following = read_heredoc(document, body_start)
+        document.body = body
+        @pos = following
+        body_start = @tokens[following].pos + 1
+      end
+    end
+
+    def read_heredoc(document, body_start)
+      line_start = body_start
+      while line_start <= @source.length
+        line_end = @source.index("\n", line_start)
+        content_end = line_end || @source.length
+        line = @source[line_start...content_end]
+        line = line.sub(/\A\t+/, "") if document.strip_tabs
+
+        if line == document.delimiter
+          body = @source[body_start...line_start]
+          body = body.gsub(/^\t+/, "") if document.strip_tabs
+          following = @tokens.index { |token| token.pos >= line_start && token.type == :newline }
+          following ||= @tokens.index { |token| token.type == :eof }
+          return [body, following]
+        end
+
+        break unless line_end
+
+        line_start = line_end + 1
+      end
+
+      raise_unclosed_heredoc!(document)
+    end
+
+    def raise_unclosed_heredoc!(document = nil)
+      document ||= @pending_heredocs.first
+      raise ParseError.new(
+        "unclosed here-document '#{document.delimiter}'",
+        pos: document.pos,
+        incomplete: true
+      )
     end
 
     def assignment_for(word)

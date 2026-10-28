@@ -9,6 +9,7 @@ module Sharky
       end
     end
     Pipeline = Struct.new(:commands, keyword_init: true)
+    Not = Struct.new(:command, :pos, keyword_init: true)
     Simple = Struct.new(:assignments, :words, :redirects, keyword_init: true)
     Subshell = Struct.new(:list, keyword_init: true)
     Assignment = Struct.new(:name, :value, keyword_init: true)

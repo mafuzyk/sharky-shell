@@ -112,6 +112,14 @@ class ASTTest < Minitest::Test
     assert_equal 90, node.pos
   end
 
+  def test_not_node
+    command = Sharky::AST::Simple.new(assignments: [], words: [], redirects: [])
+    node = Sharky::AST::Not.new(command: command, pos: 110)
+
+    assert_same command, node.command
+    assert_equal 110, node.pos
+  end
+
   def test_redirect_carries_heredoc_and_here_string_targets
     heredoc = Sharky::AST::HereDoc.new(
       delimiter: "EOF", strip_tabs: false, quoted: true, body: "hi\n", pos: 100
