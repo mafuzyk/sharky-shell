@@ -178,6 +178,18 @@ class JobControlTest < Minitest::Test
     end
   end
 
+  def test_compound_background_job_lists_command_and_wait
+    shell = Sharky::Shell.new(
+      env: { "PATH" => "/usr/bin:/bin", "HOME" => @tmp },
+      cwd: @tmp,
+      stdout: StringIO.new,
+      stderr: StringIO.new
+    )
+    assert_equal 0, shell.run("if true; then sleep 0.5; fi & jobs", compound: true)
+    assert_match(/Running.*if true; then sleep 0\.5; fi/, shell.stdout.string)
+    assert_equal 0, shell.run("wait", compound: true)
+  end
+
   private
 
   def with_child

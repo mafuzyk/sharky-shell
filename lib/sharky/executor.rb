@@ -989,12 +989,81 @@ module Sharky
     def command_text_for(command)
       case command
       when AST::Simple
-        command.words.map { |word| word.parts.map(&:value).join }.join(" ")
+        text = command.words.map { |word| word_text(word) }.join(" ")
+        redirects = command.redirects.map { |redirect| redirect_text(redirect) }.join(" ")
+        [text, redirects].reject(&:empty?).join(" ")
       when AST::Subshell
-        "(#{command.list.entries.map { |_, and_ors| command_text(and_ors.first) }.join('; ')})"
+        "(#{list_text(command.list)})"
+      when AST::Redirected
+        [command_text_for(command.command), *command.redirects.map { |r| redirect_text(r) }]
+          .reject(&:empty?).join(" ")
+      when AST::If
+        branches = command.branches
+        condition, body = branches.first
+        text = "if #{list_text(condition)}; then #{list_text(body)}"
+        branches.drop(1).each do |extra_condition, extra_body|
+          text << "; elif #{list_text(extra_condition)}; then #{list_text(extra_body)}"
+        end
+        text << "; else #{list_text(command.else_body)}" if command.else_body
+        "#{text}; fi"
+      when AST::For
+        words = command.words.map { |word| word_text(word) }
+        header = words.empty? ? "for #{command.name}" : "for #{command.name} in #{words.join(' ')}"
+        "#{header}; do #{list_text(command.body)}; done"
+      when AST::While
+        keyword = command.until_form ? "until" : "while"
+        "#{keyword} #{list_text(command.condition)}; do #{list_text(command.body)}; done"
+      when AST::Case
+        arms = command.arms.map do |patterns, body|
+          "#{patterns.map { |pattern| word_text(pattern) }.join('|')}) #{list_text(body)};;"
+        end
+        "case #{word_text(command.word)} in #{arms.join(' ')} esac"
+      when AST::Group
+        "{ #{list_text(command.list)}; }"
+      when AST::FunctionDef
+        "#{command.name}() { #{list_text(command.body)}; }"
+      when AST::Arithmetic
+        "((#{command.source}))"
+      when AST::TestCommand
+        "[[ #{command.source} ]]"
+      when AST::Not
+        "! #{command_text_for(command.command)}"
       else
         ""
       end
+    end
+
+    def list_text(list)
+      return "" unless list
+
+      list.entries.map do |_kind, and_ors|
+        and_or = and_ors.first
+        and_or ? command_text(and_or) : ""
+      end.reject(&:empty?).join("; ")
+    end
+
+    def word_text(word)
+      word.parts.map do |part|
+        case part.type
+        when :literal, :tilde then part.value.to_s
+        when :single then "'#{part.value}'"
+        when :double then "\"#{part.value.map { |child| word_text(AST::Word.new(parts: [child])) }.join}\""
+        when :variable, :special, :positional then "$#{part.value}"
+        when :parameter then "${#{part.value.name}#{part.value.index ? "[#{part.value.index}]" : ""}}"
+        when :arithmetic then "$((#{part.value.source}))"
+        when :cmdsub then "$(...)"
+        else part.value.to_s
+        end
+      end.join
+    end
+
+    def redirect_text(redirect)
+      operator = {
+        out: ">", append: ">>", in: "<", both: "&>", heredoc: "<<",
+        heredoc_strip: "<<-", here_string: "<<<", dup: ">&"
+      }.fetch(redirect.op, redirect.op.to_s)
+      target = redirect.target.respond_to?(:delimiter) ? redirect.target.delimiter : word_text(redirect.target)
+      "#{redirect.fd == 0 ? "" : redirect.fd}#{operator} #{target}".strip
     end
 
     def enter_shell_cwd
