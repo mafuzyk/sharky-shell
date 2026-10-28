@@ -110,4 +110,23 @@ class ShellTest < Minitest::Test
     assert_equal 1, @shell.run("set -Z")
     assert_match(/invalid option/, @shell.stderr.string)
   end
+
+  def test_nounset_and_recovery
+    assert_equal 1, @shell.run("set -u; printf '%s' \"$MISSING\"")
+    assert_match(/MISSING: unbound variable/, @shell.stderr.string)
+    assert_equal 0, @shell.run("set +u; printf '%s' \"$MISSING\"")
+    assert_equal 0, @shell.run("set -u; printf '%s' \"${MISSING:-ok}\"")
+    assert_includes @shell.stdout.string, "ok"
+  end
+
+  def test_xtrace_prints_expanded_command
+    assert_equal 0, @shell.run("set -x; echo traced")
+    assert_includes @shell.stderr.string, "+ echo traced"
+    assert_includes @shell.stdout.string, "traced"
+  end
+
+  def test_pipefail
+    assert_equal 1, @shell.run("set -o pipefail; false | true")
+    assert_equal 0, @shell.run("set +o pipefail; false | true")
+  end
 end

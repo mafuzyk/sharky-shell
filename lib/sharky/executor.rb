@@ -259,6 +259,7 @@ module Sharky
       end
       words = @shell.expansion.expand_words(simple.words)
       words = expand_aliases(words)
+      @shell.stderr.puts("+ #{words.join(" ")}") if @shell.option?(:xtrace) && !words.empty?
 
       if words.empty?
         values.each { |name, value| @shell.export(name, value) }
@@ -482,8 +483,12 @@ module Sharky
       status = if control
                  wait_foreground(pids, command: command_text_for_pipeline(commands), pgid: pgid)
                else
-                 statuses = pids.map { |pid| Process.waitpid2(pid).last }
-                 decode_status(statuses.last)
+                 statuses = pids.map { |pid| decode_status(Process.waitpid2(pid).last) }
+                 if @shell.option?(:pipefail)
+                   statuses.reverse.find { |code| !code.zero? } || 0
+                 else
+                   statuses.last
+                 end
                end
       copy_output(out_thread, err_thread)
       status

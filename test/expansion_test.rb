@@ -10,11 +10,12 @@ class ExpansionTest < Minitest::Test
     Sharky::AST::Part.new(type: :literal, value: text)
   end
 
-  def expansion(env: {}, positional: [], script_name: "sharky", command_substitution: ->(_program) { "" })
+  def expansion(env: {}, positional: [], script_name: "sharky", nounset: false, command_substitution: ->(_program) { "" })
     Sharky::Expansion.new(
       env: env,
       positional: positional,
       script_name: script_name,
+      nounset: nounset,
       cwd: @tmp,
       command_substitution: command_substitution
     )
@@ -117,6 +118,17 @@ class ExpansionTest < Minitest::Test
     assert_equal ["a b"], exp.expand_word(word(part.call("@")), quoted: true)
     assert_equal ["a b"], exp.expand_word(word(part.call("*")), quoted: true)
     assert_equal ["prog"], exp.expand_word(word(part.call("0")), quoted: true)
+  end
+
+  def test_nounset_raises_but_defaults_still_work
+    variable = Sharky::AST::Part.new(type: :variable, value: "MISSING")
+    assert_raises(Sharky::Expansion::ParameterError) do
+      expansion(nounset: true).expand_word(word(variable), quoted: true)
+    end
+
+    default = Sharky::AST::Parameter.new(name: "MISSING", operator: :default, argument: "ok")
+    part = Sharky::AST::Part.new(type: :parameter, value: default)
+    assert_equal ["ok"], expansion(nounset: true).expand_word(word(part), quoted: true)
   end
 
   def test_brace_alternatives_and_nesting

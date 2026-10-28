@@ -9,10 +9,11 @@ module Sharky
     GLOB_MAGIC = "*?["
     ParameterError = Class.new(StandardError)
 
-    def initialize(env: {}, positional: [], script_name: "sharky", cwd: Dir.pwd, command_substitution: nil)
+    def initialize(env: {}, positional: [], script_name: "sharky", nounset: false, cwd: Dir.pwd, command_substitution: nil)
       @env = env
       @positional = Array(positional).map(&:to_s)
       @script_name = script_name.to_s
+      @nounset = nounset
       @cwd = cwd
       @command_substitution = command_substitution
     end
@@ -182,7 +183,7 @@ module Sharky
       Chunk.new(text: text.to_s, split: split, glob: glob, quoted_empty: quoted_empty)
     end
 
-    def parameter_value(name)
+    def parameter_value(name, nounset: @nounset)
       value =
         case name
         when "?" then @env.fetch("?", "0")
@@ -190,8 +191,16 @@ module Sharky
         when "!" then @env.fetch("!", "")
         when "#" then @positional.length.to_s
         when "@", "*" then @positional.join(" ")
-        when /\A\d+\z/ then @positional[name.to_i - 1].to_s
-        else @env.fetch(name, "")
+        when /\A\d+\z/
+          index = name.to_i - 1
+          if nounset && index >= @positional.length
+            raise ParameterError, "#{name}: unbound variable"
+          end
+          @positional[index].to_s
+        else
+          raise ParameterError, "#{name}: unbound variable" if nounset && !@env.key?(name)
+
+          @env.fetch(name, "")
         end
       value.to_s
     end
@@ -201,13 +210,18 @@ module Sharky
       when "#" then @positional.length.to_s
       when "@", "*" then @positional.join(" ")
       when "0" then @script_name
-      when /\A\d+\z/ then @positional[name.to_i - 1].to_s
+      when /\A\d+\z/
+        index = name.to_i - 1
+        raise ParameterError, "#{name}: unbound variable" if @nounset && index >= @positional.length
+
+        @positional[index].to_s
       else ""
       end
     end
 
     def evaluate_parameter(parameter, quoted:)
-      value = parameter_value(parameter.name)
+      no_error = [:default, :assign, :alternate, :error].include?(parameter.operator)
+      value = parameter_value(parameter.name, nounset: @nounset && !no_error)
       text =
         case parameter.operator
         when nil

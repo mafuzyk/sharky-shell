@@ -166,7 +166,13 @@ module Sharky
     end
 
     def expansion
-      Expansion.new(env: @env, positional: @positional, script_name: @script_name, cwd: @cwd)
+      Expansion.new(
+        env: @env,
+        positional: @positional,
+        script_name: @script_name,
+        nounset: option?(:nounset),
+        cwd: @cwd
+      )
     end
 
     def run_script_file(path, args = [])
