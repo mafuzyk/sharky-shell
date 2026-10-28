@@ -2,7 +2,7 @@
 
 module Sharky
   class Shell
-    attr_reader :env, :cwd, :terminal, :history, :jobs
+    attr_reader :env, :cwd, :terminal, :history, :jobs, :functions
     attr_accessor :stdin, :stdout, :stderr
     attr_writer :runtime
     attr_reader :last_status, :last_bg_pid, :shell_pgid, :foreground_pgid
@@ -21,6 +21,7 @@ module Sharky
       @z = z
       @z_loaded = !z.nil?
       @jobs = Jobs::Table.new
+      @functions = {}
       @last_status = 0
       @last_bg_pid = nil
       @exit_requested = false
@@ -60,8 +61,8 @@ module Sharky
       @job_control
     end
 
-    def run(source)
-      program = Parser.parse(source)
+    def run(source, compound: false)
+      program = Parser.parse(source, compound: compound)
       run_program(program)
     rescue ParseError => error
       report_parse_error(source, error)

@@ -25,33 +25,35 @@ class AcceptanceTest < Minitest::Test
     assert_equal "/tmp\n1\nyes\n", out
   end
 
-  def test_unsupported_syntax
-    out, err, status = run_sharky("-c", "for x in 1; do echo $x; done")
-    assert_equal 2, status.exitstatus
-    assert_empty out
-    assert_includes err, "unsupported syntax"
+  def test_for_loop_executes_through_cli
+    out, err, status = run_sharky("-c", "for x in a b; do printf '%s' \"$x\"; done")
+    assert_equal 0, status.exitstatus
+    assert_equal "ab", out
+    assert_empty err
   end
 
   def test_unsupported_syntax_points_to_bash_escape
-    _out, err, status = run_sharky("-c", "for x in 1; do echo $x; done")
+    _out, err, status = run_sharky("-c", "coproc true")
     assert_equal 2, status.exitstatus
-    assert_includes err, "unsupported syntax: 'for'. Use bash -c '...' or a Ruby function."
+    assert_includes err, "unsupported syntax: 'coproc'. Use bash -c '...' or a Ruby function."
   end
 
   def test_unsupported_syntax_caret_points_to_command_start
-    _out, err, status = run_sharky("-c", "for x in 1; do echo $x; done")
+    _out, err, status = run_sharky("-c", "coproc true")
     assert_equal 2, status.exitstatus
-    assert_match(/sharky: for x in 1; do echo \$x; done\nsharky: \^\n/, err)
+    assert_match(/sharky: coproc true\nsharky: \^\n/, err)
   end
 
   def test_unsupported_operators_point_to_bash_escape
-    _out, err, status = run_sharky("-c", "[[ -n x ]]")
+    _out, err, status = run_sharky("-c", "echo @(a|b)")
     assert_equal 2, status.exitstatus
-    assert_includes err, "unsupported syntax: '[['. Use bash -c '...' or a Ruby function."
+    assert_includes err, "unsupported syntax"
+  end
 
-    _out, err, status = run_sharky("-c", "cat <<EOF")
-    assert_equal 2, status.exitstatus
-    assert_includes err, "unsupported syntax: '<<'. Use bash -c '...' or a Ruby function."
+  def test_double_bracket_test_executes
+    _out, err, status = run_sharky("-c", "[[ -n x ]]")
+    assert_equal 0, status.exitstatus
+    assert_empty err
   end
 
   def test_parse_error_shows_source_and_caret

@@ -122,7 +122,7 @@ module Sharky
       )
       return run_script(shell, script, script_args, stderr) if script
 
-      shell.run(command)
+      shell.run(command, compound: true)
       shell.last_status
     end
 
@@ -279,7 +279,7 @@ module Sharky
 
             started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
             begin
-              shell.run(line)
+              shell.run(line, compound: true)
             rescue Interrupt
               shell.take_terminal
               stdout.write("^C\r\n")

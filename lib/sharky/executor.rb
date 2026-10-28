@@ -44,6 +44,7 @@ module Sharky
     end
 
     def execute_pipeline(pipeline, foreground:)
+      return execute_command(pipeline, foreground: foreground) unless pipeline.is_a?(AST::Pipeline)
       return execute_command(pipeline.commands.first, foreground: foreground) if pipeline.commands.length == 1
 
       execute_pipeline_commands(pipeline.commands, foreground: foreground)
@@ -55,9 +56,147 @@ module Sharky
         execute_simple(command, foreground: foreground)
       when AST::Subshell
         execute_subshell(command, foreground: foreground)
+      when AST::If
+        execute_if(command, foreground: foreground)
+      when AST::For
+        execute_for(command, foreground: foreground)
+      when AST::While
+        execute_while(command, foreground: foreground)
+      when AST::Group
+        execute_list(command.list, foreground: foreground)
+      when AST::Not
+        execute_not(command, foreground: foreground)
+      when AST::Arithmetic
+        execute_arithmetic(command)
+      when AST::TestCommand
+        execute_test(command)
+      when AST::FunctionDef
+        execute_function_definition(command)
       else
         unsupported
       end
+    end
+
+    def execute_if(command, foreground:)
+      command.branches.each do |condition, body|
+        return execute_list(body, foreground: foreground) if execute_list(condition, foreground: foreground).zero?
+      end
+      command.else_body ? execute_list(command.else_body, foreground: foreground) : 0
+    end
+
+    def execute_for(command, foreground:)
+      words = @shell.expansion.expand_words(command.words)
+      status = 0
+
+      words.each do |value|
+        @shell.env[command.name] = value
+        status = execute_list(command.body, foreground: foreground)
+        break if @shell.exit_requested?
+      end
+
+      status
+    end
+
+    def execute_while(command, foreground:)
+      status = 0
+      loop do
+        condition = execute_list(command.condition, foreground: foreground)
+        break if command.until_form ? condition.zero? : !condition.zero?
+        break if @shell.exit_requested?
+
+        status = execute_list(command.body, foreground: foreground)
+        break if @shell.exit_requested?
+      end
+      status
+    end
+
+    def execute_not(command, foreground:)
+      status = execute_pipeline(command.command, foreground: foreground)
+      status.zero? ? 1 : 0
+    end
+
+    def execute_arithmetic(command)
+      value = Arithmetic.evaluate(command.source, env: @shell.env)
+      @shell.mark_status(value.zero? ? 1 : 0)
+    end
+
+    def execute_test(command)
+      tokens = Shellwords.split(command.source)
+      @shell.mark_status(test_expression(tokens) ? 0 : 1)
+    rescue ArgumentError
+      @shell.stderr.puts("sharky: [[: bad expression")
+      @shell.mark_status(2)
+    end
+
+    def test_expression(tokens)
+      ors = split_test_logical(tokens, "||")
+      return ors.any? { |part| test_and(part) } if ors.length > 1
+      test_and(tokens)
+    end
+
+    def test_and(tokens)
+      ands = split_test_logical(tokens, "&&")
+      return ands.all? { |part| test_unary(part) } if ands.length > 1
+      test_unary(tokens)
+    end
+
+    def test_unary(tokens)
+      return true if tokens.empty?
+      return !test_unary(tokens[1..]) if tokens.first == "!"
+
+      operator = tokens.first
+      operand = tokens[1..]&.join(" ")
+      return tokens.first.to_s.length.positive? if tokens.length == 1
+      return !operand.to_s.empty? if operator == "-n"
+      return operand.to_s.empty? if operator == "-z"
+      return File.exist?(test_path(operand)) if %w[-e -a].include?(operator)
+      return File.file?(test_path(operand)) if operator == "-f"
+      return File.directory?(test_path(operand)) if operator == "-d"
+      return File.readable?(test_path(operand)) if operator == "-r"
+      return File.writable?(test_path(operand)) if operator == "-w"
+      return File.executable?(test_path(operand)) if operator == "-x"
+
+      left = tokens[0]
+      op = tokens[1]
+      right = tokens[2..]&.join(" ")
+      case op
+      when "==" then left == right
+      when "!=" then left != right
+      when "=~" then Regexp.new(right).match?(left)
+      when "-eq" then left.to_i == right.to_i
+      when "-ne" then left.to_i != right.to_i
+      when "-lt" then left.to_i < right.to_i
+      when "-le" then left.to_i <= right.to_i
+      when "-gt" then left.to_i > right.to_i
+      when "-ge" then left.to_i >= right.to_i
+      else !left.to_s.empty?
+      end
+    rescue RegexpError
+      false
+    end
+
+    def split_test_logical(tokens, operator)
+      parts = []
+      current = []
+      tokens.each do |token|
+        if token == operator
+          parts << current
+          current = []
+        else
+          current << token
+        end
+      end
+      parts << current
+      parts
+    end
+
+    def test_path(path)
+      File.expand_path(path.to_s, @shell.cwd)
+    end
+
+    def execute_function_definition(command)
+      @shell.functions[command.name] = command.body
+      @shell.mark_status(0)
     end
 
     def execute_simple(simple, foreground:)
@@ -94,6 +233,12 @@ module Sharky
       status =
         if function_error
           report_function_error(name, function_error)
+        elsif function.is_a?(AST::List)
+          with_assignments(values) do
+            with_redirections(fd_map, files) do
+              execute_list(function, foreground: foreground)
+            end
+          end
         elsif function
           execute_function(name, function, argv, values, fd_map, files)
         elsif builtin
@@ -115,7 +260,7 @@ module Sharky
 
     def function_for(name)
       runtime = @shell.runtime
-      runtime.commands[name] || runtime.commands[name.to_sym] || Functions.load(name, runtime)
+      @shell.functions[name] || runtime.commands[name] || runtime.commands[name.to_sym] || Functions.load(name, runtime)
     end
 
     def execute_function(name, block, argv, values, fd_map, files)
