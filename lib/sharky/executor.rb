@@ -172,6 +172,8 @@ module Sharky
         when :word then token.value
         when :and_if then "&&"
         when :or_if then "||"
+        when :redir_in then "<"
+        when :redir_out then ">"
         when :eof then nil
         else raise ArgumentError
         end
@@ -213,30 +215,36 @@ module Sharky
       return File.readable?(test_path(operand)) if operator == "-r"
       return File.writable?(test_path(operand)) if operator == "-w"
       return File.executable?(test_path(operand)) if operator == "-x"
+      return File.symlink?(test_path(operand)) if %w[-L -h].include?(operator)
+      return (File.size?(test_path(operand)) || 0).positive? if operator == "-s"
 
       left = words[0]
       op = words[1]
       right = words[2..]&.join(" ")
       case op
-      when "==", "!="
+      when "=", "==", "!="
         raise ArgumentError unless expanded.length == 3
 
         matched = File.fnmatch(expanded[2].last, left, File::FNM_DOTMATCH)
-        op == "==" ? matched : !matched
+        op == "!=" ? !matched : matched
       when "=~" then Regexp.new(right).match?(left)
+      when "<" then (left <=> right).negative?
+      when ">" then (left <=> right).positive?
       when "-eq" then left.to_i == right.to_i
       when "-ne" then left.to_i != right.to_i
       when "-lt" then left.to_i < right.to_i
       when "-le" then left.to_i <= right.to_i
       when "-gt" then left.to_i > right.to_i
       when "-ge" then left.to_i >= right.to_i
-      else !left.to_s.empty?
+      else raise ArgumentError
       end
     rescue RegexpError
       false
     end
 
     def expand_test_word(word)
+      return [word, word] if word.is_a?(String)
+
       text = +""
       pattern = +""
       word.parts.each do |part|

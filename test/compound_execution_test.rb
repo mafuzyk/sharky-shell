@@ -85,6 +85,19 @@ class CompoundExecutionTest < Minitest::Test
     assert_equal 1, run_compound("[[ -n x && -z y ]]")
   end
 
+  def test_double_bracket_rejects_unknown_operators
+    assert_equal 2, run_compound("[[ x BOGUS y ]]")
+    assert_match(/syntax error/, @stderr.string)
+  end
+
+  def test_double_bracket_supports_symlink_and_lexical_comparisons
+    assert_equal 1, run_compound("[[ -L definitely-missing ]]")
+    assert_equal 0, run_compound("[[ x = x ]]")
+    assert_equal 1, run_compound("[[ x = y ]]")
+    assert_equal 0, run_compound("[[ a < b ]]")
+    assert_equal 1, run_compound("[[ z < y ]]")
+  end
+
   def test_case_matches_first_arm_and_glob
     assert_equal 0, run_compound("case abc in a*) echo yes;; *) echo no;; esac")
     assert_equal "yes\n", @stdout.string
