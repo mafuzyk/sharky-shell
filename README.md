@@ -45,13 +45,19 @@ sharky
 {"schema_version":1,"status":0,"stdout":"hi\n","stderr":"","duration_ms":3,"cwd":"/tmp","env_delta":{"FOO":"bar"}}
 ~~~
 
-`sharky state --json` writes the current shell state:
+`sharky state --json` writes the current shell state without the environment:
+
+~~~json
+{"schema_version":1,"cwd":"/tmp","last_status":0,"pid":1234}
+~~~
+
+Pass `--env` to include the full environment explicitly:
 
 ~~~json
 {"schema_version":1,"cwd":"/tmp","env":{"PATH":"/usr/bin"},"last_status":0,"pid":1234}
 ~~~
 
-`env_delta` maps each changed environment name to its new value; a removed variable is `null`. `state.env` is the full environment and `pid` is the sharky process. JSON mode keeps stdout machine-readable: configuration warnings and other diagnostics go to stderr, while command stderr is captured in the envelope.
+The default omits environment variables so secrets are not written to logs or agent transcripts. With `--env`, `state.env` is the full environment. `env_delta` maps each changed environment name to its new value; a removed variable is `null`. `pid` is the sharky process. JSON mode keeps stdout machine-readable: configuration warnings and other diagnostics go to stderr, while command stderr is captured in the envelope.
 
 ## Configuration
 

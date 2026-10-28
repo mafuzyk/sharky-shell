@@ -105,9 +105,26 @@ class JsonTest < Minitest::Test
     assert_includes err, "config noise"
   end
 
-  def test_state_returns_the_current_shell_state
+  def test_state_omits_the_environment_by_default
     out, err, status = Dir.chdir(@tmp) do
-      run_sharky("state", "--json", env: json_env("SHARKY_JSON_STATE" => "present"))
+      run_sharky("state", "--json", env: json_env("SHARKY_JSON_SECRET" => "fake-secret"))
+    end
+
+    assert_equal 0, status.exitstatus
+    assert_equal "", err
+    payload = parse_only_object(out)
+    assert_equal %w[schema_version cwd last_status pid], payload.keys
+    refute_includes out, "fake-secret"
+    assert_equal 1, payload["schema_version"]
+    assert_equal @tmp, payload["cwd"]
+    assert_equal 0, payload["last_status"]
+    assert_kind_of Integer, payload["pid"]
+    assert_operator payload["pid"], :>, 0
+  end
+
+  def test_state_env_flag_includes_the_environment
+    out, err, status = Dir.chdir(@tmp) do
+      run_sharky("state", "--json", "--env", env: json_env("SHARKY_JSON_SECRET" => "fake-secret"))
     end
 
     assert_equal 0, status.exitstatus
@@ -116,11 +133,18 @@ class JsonTest < Minitest::Test
     assert_equal %w[schema_version cwd env last_status pid], payload.keys
     assert_equal 1, payload["schema_version"]
     assert_equal @tmp, payload["cwd"]
-    assert_equal "present", payload["env"]["SHARKY_JSON_STATE"]
-    assert_equal @tmp, payload["env"]["PWD"]
+    assert_equal "fake-secret", payload["env"]["SHARKY_JSON_SECRET"]
     assert_equal 0, payload["last_status"]
     assert_kind_of Integer, payload["pid"]
     assert_operator payload["pid"], :>, 0
+  end
+
+  def test_env_flag_requires_state
+    out, err, status = run_sharky("--env", env: json_env)
+
+    assert_equal 2, status.exitstatus
+    assert_equal "", out
+    assert_includes err, "--env is only supported with state"
   end
 
   def test_state_rejects_a_missing_json_flag

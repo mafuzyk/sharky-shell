@@ -8,12 +8,13 @@ module Sharky
   class CLI
     USAGE = <<~TEXT
       Usage: sharky [OPTIONS] [FILE.rb]
-             sharky state --json [--no-config]
+             sharky state --json [--env] [--no-config]
 
         -c COMMAND   run COMMAND and exit
         --no-config  do not load the configuration file
         -i           force interactive mode
         --json       print one JSON object for -c or state
+        --env        include the environment in state JSON
         state        print shell state as JSON (requires --json)
         --version    print the version
         --help       print this help
@@ -27,6 +28,7 @@ module Sharky
       load_config = true
       json = false
       state = false
+      state_env = false
       args = argv.dup
 
       until args.empty?
@@ -42,6 +44,8 @@ module Sharky
           load_config = false
         when "--json"
           json = true
+        when "--env"
+          state_env = true
         when "-i"
           interactive = true
         when "--version"
@@ -81,11 +85,15 @@ module Sharky
         stderr.puts("sharky: state requires --json")
         return 2
       end
+      if state_env && !state
+        stderr.puts("sharky: --env is only supported with state")
+        return 2
+      end
       if json && script
         stderr.puts("sharky: --json is only supported with -c or state")
         return 2
       end
-      return run_json_state(stdout: stdout, stderr: stderr, load_config: load_config) if state
+      return run_json_state(stdout: stdout, stderr: stderr, load_config: load_config, include_env: state_env) if state
 
       if script.nil? && command.nil?
         tty = stdin.respond_to?(:tty?) && stdin.tty?
@@ -135,17 +143,18 @@ module Sharky
       result.status
     end
 
-    def self.run_json_state(stdout:, stderr:, load_config:)
+    def self.run_json_state(stdout:, stderr:, load_config:, include_env:)
       session = Session.new(env: ENV.to_h, cwd: Dir.pwd)
       Sharky.session = session
       load_runtime_config(session.runtime, stderr) if load_config
-      write_json(stdout, {
+      payload = {
         schema_version: Result::SCHEMA_VERSION,
-        cwd: session.cwd,
-        env: session.env.dup,
-        last_status: session.last_status,
-        pid: Process.pid
-      })
+        cwd: session.cwd
+      }
+      payload[:env] = session.env.dup if include_env
+      payload[:last_status] = session.last_status
+      payload[:pid] = Process.pid
+      write_json(stdout, payload)
       0
     end
 
