@@ -1,7 +1,14 @@
 # frozen_string_literal: true
 
+require "shellwords"
+
 module Sharky
   module Builtins
+    SIGNALS = %w[
+      HUP INT QUIT ILL TRAP ABRT BUS FPE KILL USR1 SEGV USR2 PIPE ALRM TERM
+      CHLD CONT STOP TSTP TTIN TTOU URG XCPU XFSZ VTALRM PROF WINCH IO SYS
+    ].freeze
+
     TABLE = {
       "cd" => lambda do |shell, argv, _stdin|
         shell.cd(argv.first)
@@ -98,6 +105,9 @@ module Sharky
       end,
       "read" => lambda do |shell, argv, _stdin|
         Builtins.read_builtin(shell, argv)
+      end,
+      "trap" => lambda do |shell, argv, _stdin|
+        Builtins.trap_builtin(shell, argv)
       end
     }.freeze
 
@@ -395,6 +405,60 @@ module Sharky
         end
       end
       status
+    end
+
+    def self.trap_builtin(shell, argv)
+      if %w[-l -L].include?(argv.first)
+        shell.stdout.puts((["EXIT"] + SIGNALS).uniq.join(" "))
+        return 0
+      end
+
+      if argv.empty?
+        shell.traps.each do |signal, command|
+          shell.stdout.puts("trap -- '#{command}' #{signal}")
+        end
+        return 0
+      end
+
+      args = argv.dup
+      if args.first == "--"
+        args.shift
+      elsif args.first == "-"
+        args.shift
+        return 0 if args.empty?
+
+        signals = args.map { |name| normalize_signal(name) }
+        if signals.any?(&:nil?)
+          shell.stderr.puts("sharky: trap: invalid signal specification")
+          return 1
+        end
+        signals.each { |signal| shell.clear_trap(signal) }
+        return 0
+      end
+
+      action = args.shift
+      if action.nil?
+        shell.stderr.puts("sharky: trap: action required")
+        return 1
+      end
+
+      signals = args.map { |name| normalize_signal(name) }
+      if signals.empty? || signals.any?(&:nil?)
+        shell.stderr.puts("sharky: trap: invalid signal specification")
+        return 1
+      end
+
+      signals.each { |signal| shell.set_trap(signal, action) }
+      0
+    end
+
+    def self.normalize_signal(name)
+      signal = name.to_s.upcase
+      signal = "EXIT" if signal == "0"
+      signal = signal.delete_prefix("SIG")
+      return signal if signal == "EXIT" || SIGNALS.include?(signal)
+
+      nil
     end
 
     def self.read_builtin(shell, argv)

@@ -2,7 +2,7 @@
 
 module Sharky
   class Shell
-    attr_reader :env, :cwd, :terminal, :history, :jobs, :functions, :positional, :script_name, :options, :arrays
+    attr_reader :env, :cwd, :terminal, :history, :jobs, :functions, :positional, :script_name, :options, :arrays, :traps
     attr_accessor :stdin, :stdout, :stderr
     attr_writer :runtime
     attr_reader :last_status, :last_bg_pid, :shell_pgid, :foreground_pgid
@@ -17,6 +17,8 @@ module Sharky
       @positional_stack = []
       @options = {}
       @arrays = {}
+      @traps = {}
+      @exit_trap_ran = false
       @stdin = stdin
       @stdout = stdout
       @stderr = stderr
@@ -187,6 +189,26 @@ module Sharky
       @arrays[name] = array
     end
 
+    def set_trap(signal, command)
+      @traps[signal] = command
+    end
+
+    def clear_trap(signal)
+      @traps.delete(signal)
+    end
+
+    def run_exit_trap(original_status = @last_status)
+      return original_status if @exit_trap_ran
+
+      @exit_trap_ran = true
+      command = @traps["EXIT"]
+      return original_status if command.nil? || command.empty?
+
+      run(command, compound: true)
+      mark_status(original_status)
+      original_status
+    end
+
     def run_script_file(path, args = [])
       absolute = File.expand_path(path)
       source = File.read(absolute)
@@ -194,7 +216,9 @@ module Sharky
       previous_positional = @positional
       @script_name = absolute
       @positional = Array(args).map(&:to_s)
-      run(source, compound: true)
+      status = run(source, compound: true)
+      run_exit_trap(status)
+      status
     rescue SystemCallError => error
       @stderr.puts("sharky: #{path}: #{error.message}")
       mark_status(1)

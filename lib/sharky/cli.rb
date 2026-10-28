@@ -123,6 +123,7 @@ module Sharky
       return run_script(shell, script, script_args, stderr) if script
 
       shell.run(command, compound: true)
+      shell.run_exit_trap(shell.last_status)
       shell.last_status
     end
 
@@ -304,7 +305,7 @@ module Sharky
             break if shell.exit_requested?
           end
 
-          shell.last_status
+          shell.last_status.tap { shell.run_exit_trap(shell.last_status) }
         ensure
           history.save
           terminal.restore
