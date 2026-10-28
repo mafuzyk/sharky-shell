@@ -11,6 +11,7 @@ module Sharky
     Pipeline = Struct.new(:commands, keyword_init: true)
     Not = Struct.new(:command, :pos, keyword_init: true)
     Simple = Struct.new(:assignments, :words, :redirects, keyword_init: true)
+    Redirected = Struct.new(:command, :redirects, keyword_init: true)
     Subshell = Struct.new(:list, keyword_init: true)
     Assignment = Struct.new(:name, :value, :index, :array, :append, keyword_init: true)
     Redirect = Struct.new(:fd, :op, :target, keyword_init: true)

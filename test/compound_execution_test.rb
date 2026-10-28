@@ -161,6 +161,38 @@ class CompoundExecutionTest < Minitest::Test
     assert_equal "outerxouter", @stdout.string
   end
 
+  def test_compound_trailing_redirections
+    file = File.join(@tmp, "compound-out")
+    assert_equal 0, run_compound("if true; then echo redirected; fi > #{file}")
+    assert_equal "redirected\n", File.read(file)
+
+    assert_equal 0, run_compound("for x in a b; do echo \"$x\"; done >> #{file}")
+    assert_equal "redirected\na\nb\n", File.read(file)
+
+    assert_equal 0, run_compound("{ echo grouped; } > #{file}")
+    assert_equal "grouped\n", File.read(file)
+  end
+
+  def test_compound_redirection_preserves_status
+    file = File.join(@tmp, "compound-status")
+    assert_equal 1, run_compound("{ false; } > #{file}")
+    assert_equal "", File.read(file)
+  end
+
+  def test_compound_pipeline_and_background
+    run_compound("if true; then echo piped; fi | cat")
+    assert_includes @stdout.string, "piped"
+
+    reset_stdout
+    run_compound("for x in a b; do echo \"$x\"; done | wc -l")
+    assert_equal "2\n", @stdout.string
+
+    reset_stdout
+    file = File.join(@tmp, "background-compound")
+    assert_equal 0, run_compound("if true; then echo background; fi > #{file} & wait")
+    assert_equal "background\n", File.read(file)
+  end
+
   def test_default_shell_run_stays_legacy
     assert_equal 2, @shell.run("if true; then echo no; fi")
   end

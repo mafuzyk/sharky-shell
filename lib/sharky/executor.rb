@@ -65,6 +65,8 @@ module Sharky
         execute_simple(command, foreground: foreground)
       when AST::Subshell
         execute_subshell(command, foreground: foreground)
+      when AST::Redirected
+        execute_redirected(command, foreground: foreground)
       when AST::If
         execute_if(command, foreground: foreground)
       when AST::For
@@ -245,6 +247,20 @@ module Sharky
       end
 
       0
+    end
+
+    def execute_redirected(wrapped, foreground:)
+      redirections = build_redirections(wrapped.redirects)
+      return @shell.mark_status(1) unless redirections
+
+      fd_map, files = redirections
+      begin
+        with_redirections(fd_map, files) do
+          execute_command(wrapped.command, foreground: foreground)
+        end
+      ensure
+        close_files(files)
+      end
     end
 
     def execute_simple(simple, foreground:)

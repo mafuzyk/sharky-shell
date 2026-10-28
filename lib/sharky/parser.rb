@@ -175,17 +175,22 @@ module Sharky
     end
 
     def parse_command
-      return parse_arithmetic if @compound && at?(:arith_start)
-      return parse_test_command if @compound && at?(:test_start)
-      return parse_compound_command if compound_command?
+      command = if @compound && at?(:arith_start)
+                  parse_arithmetic
+                elsif @compound && at?(:test_start)
+                  parse_test_command
+                elsif compound_command?
+                  parse_compound_command
+                else
+                  check_reserved!
+                  at?(:lparen) ? parse_subshell : parse_simple_command
+                end
 
-      check_reserved!
+      return command if command.is_a?(AST::Simple) || command.is_a?(AST::Subshell)
 
-      if at?(:lparen)
-        parse_subshell
-      else
-        parse_simple_command
-      end
+      redirects = []
+      redirects << parse_redirect while REDIRECT_TYPES.include?(type)
+      redirects.empty? ? command : AST::Redirected.new(command: command, redirects: redirects)
     end
 
     def parse_arithmetic
