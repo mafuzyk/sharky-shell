@@ -26,7 +26,14 @@ jobs:
       - name: Unit, acceptance, conformance and PTY suite
         run: ruby test/run.rb
       - name: Warning check
-        run: ruby -w test/run.rb
+        run: |
+          warnings="$(mktemp)"
+          trap 'rm -f "$warnings"' EXIT
+          status=0
+          ruby -w test/run.rb 2>"$warnings" || status=$?
+          cat "$warnings" >&2
+          if [ "$status" -ne 0 ]; then exit "$status"; fi
+          if grep -q 'warning:' "$warnings"; then exit 1; fi
 
   test-arm64:
     name: Ruby 3.4 arm64 (best effort)

@@ -41,7 +41,7 @@ mkdir -p ~/.local/bin
 ln -s "$PWD/bin/sharky" ~/.local/bin/sharky
 ~~~
 
-Build a source tarball with `make dist`; the Arch recipe is `packaging/PKGBUILD`.
+Build a source tarball with `make dist`; it includes tests and benchmarks so `make test` also works from the extracted source. The Arch recipe is `packaging/PKGBUILD`.
 
 ## First run
 
@@ -104,35 +104,35 @@ Config errors print `sharky: config error in <file>: <message>` and the shell co
 
 ## Supported language
 
-sharky implements a small Bash-like subset at the prompt and in `sharky -c`:
+sharky implements a native Bash-like subset at the prompt, in `sharky -c`, and in `.sh` scripts:
 
-- single and double quotes, backslash escapes;
-- `$VAR`, `${VAR}`, `$?`, `$$`, `$!`, and tilde expansion;
-- globbing with `*`, `?` and `[...]`;
-- command substitution `$(...)`, including nesting;
-- pipes, redirects (`>`, `>>`, `<`, `2>`, `2>>`, `2>&1`, `&>`);
-- lists with `;`, `&&`, `||`, background `&`, and subshells `( ... )`;
-- comments and backslash-newline continuation.
+- single and double quotes, escapes, comments and backslash-newline continuation;
+- variables, positional parameters, parameter and tilde expansion, arithmetic expansion `$((...))` and arithmetic commands `((...))`;
+- indexed arrays, brace expansion, globbing and nested command substitution `$(...)`;
+- pipes, redirects, here-documents, here-strings, lists with `;`/`&&`/`||`, background jobs, subshells and brace groups;
+- `[[ ]]`, `if`/`elif`/`else`, `for`, `while`, `until`, `case`, shell functions, `break`, `continue`, `return`, `source`/`.`, `set -e/-u/-x`, `pipefail` and `trap` (EXIT actions execute).
 
-The following are not supported: arrays, `[[ ]]`, arithmetic expansion, brace expansion, here-documents, process substitution, extglob, shell functions, `if`/`for`/`while`/`case`, traps, `source` of Bash files, `set -e`, and custom `IFS`.
+This is not full Bash/POSIX compatibility. Unsupported features include associative arrays, array slices, process substitution, extglob, `coproc`, programmable completion, custom `IFS` and full `[[ =~ ]]` parity. Signal traps are stored, but only EXIT actions execute in v1.
 
 Unsupported reserved words and operators at command position produce:
 
 ~~~text
-sharky: unsupported syntax: 'for'. Use bash -c '...' or a Ruby function.
+sharky: unsupported syntax: 'coproc'. Use bash -c '...' or a Ruby function.
 ~~~
 
 The status is 2 and nothing runs. sharky never falls back to Bash silently.
 
-## Bash scripts
+## Shell scripts
 
-Bash remains the scripting language for `.sh` files:
+`.sh` files and scripts with a `#!/usr/bin/env sharky` shebang run through sharky's native parser:
 
 ~~~sh
-bash script.sh
+sharky script.sh arg1 arg2
 ~~~
 
-sharky does not intercept or emulate Bash scripts. An executable script without a shebang fails with status 126 and a hint to run `bash file` or add a shebang; it is not run by `/bin/sh`.
+The script path is `$0`; arguments are available as `$1`, `$2`, `$@` and `$#`. Use `source FILE [ARG...]` (or `. FILE`) to run a file in the current shell.
+
+For scripts that need unsupported Bash features, run `bash script.sh` explicitly. sharky never silently falls back to Bash or `/bin/sh`. Launching an executable script directly without a shebang fails with status 126 and a hint to select an interpreter or add a shebang.
 
 ## Ruby
 
@@ -151,15 +151,17 @@ machine (Arch Linux, NTFS checkout):
 | `bash -c true` | ~1 ms |
 | `fish --no-config -c true` | ~2 ms |
 | `ruby --disable-gems -e ''` | ~7 ms |
-| `Sharky::Prompt.render` (default) | ~0.003 ms median / p95 |
+| `Sharky::Prompt.render` (renderer only, prebuilt context) | ~0.003 ms median / p95 |
 | `sharky --no-config -c true` | ~42 ms |
 
 Fish's interactive startup is commonly in the 20–30 ms range; sharky is in that
 range, not Bash's. sharky does **not** claim to be the fastest shell. The v1
-budget is startup under 50 ms and prompt p95 under 20 ms, with no external
-process in the default path. Measured on the reference machine: startup median
-41.9 ms (`--no-config -c true`) and prompt p95 0.003 ms for the default prompt
-renderer; see `ruby bench/startup.rb` and `ruby bench/prompt.rb`.
+target is startup under 50 ms and interactive prompt p95 under 20 ms. Measured
+on the reference machine: startup median 41.9 ms (`--no-config -c true`) and
+renderer p95 0.003 ms with prebuilt context. The interactive prompt also runs
+`git status` for branch and dirty state, with a short cache and a timeout; that
+work is not included in the renderer measurement. `ruby bench/prompt.rb` measures
+rendering only, not the complete interactive prompt. See also `ruby bench/startup.rb`.
 
 ## Tests and benchmarks
 
@@ -167,6 +169,7 @@ renderer; see `ruby bench/startup.rb` and `ruby bench/prompt.rb`.
 ruby test/run.rb
 ruby bench/startup.rb
 ruby bench/parser.rb
+ruby bench/prompt.rb
 ruby bench/soak.rb
 ~~~
 

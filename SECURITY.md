@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-sharky is pre-1.0. Security reports are accepted for the current `main` branch
+Security reports are accepted for sharky 1.x on the maintained `v1` branch
 and the latest tagged release.
 
 ## Reporting a vulnerability

@@ -34,7 +34,7 @@ test:
 dist:
 	rm -rf "dist/$(DISTNAME)" "$(DISTFILE)"
 	mkdir -p "dist/$(DISTNAME)"
-	cp -R bin lib man packaging "dist/$(DISTNAME)/"
+	cp -R bin lib man packaging test bench .github "dist/$(DISTNAME)/"
 	cp README.md LICENSE CHANGELOG.md CONTRIBUTING.md SECURITY.md Makefile .editorconfig .gitattributes "dist/$(DISTNAME)/"
 	tar -czf "$(DISTFILE)" -C dist "$(DISTNAME)"
 	@printf 'created %s\n' "$(DISTFILE)"

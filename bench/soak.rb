@@ -57,14 +57,18 @@ Dir.mktmpdir("sharky-soak-") do |dir|
       Timeout.timeout(5) do
         output << reader.readpartial(4096) until output.match?(PROMPT)
       end
-      writer.write("if true; then printf pty-ok; fi\r")
+      output.clear
+      marker = "sharky-soak-#{round}-ok"
+      output_line = /(?:\A|\r?\n)#{Regexp.escape(marker)}\r?\n/n
+      writer.write("if true; then printf '\\n%s%s%s\\n' sharky- soak-#{round} -ok; fi\r")
       Timeout.timeout(5) do
-        output << reader.readpartial(4096) until output.match?(/pty-ok/)
+        until (line = output.match(output_line)) && output[line.end(0)..].match?(PROMPT)
+          output << reader.readpartial(4096)
+        end
       end
       writer.write("exit 0\r")
       _, status = Timeout.timeout(5) { Process.wait2(pid) }
       fail!("pty round #{round}: status #{status.exitstatus}") unless status.exitstatus.zero?
-      fail!("pty round #{round}: missing pty-ok") unless output.include?("pty-ok")
     rescue Timeout::Error
       fail!("pty round #{round}: timed out; got #{output.inspect}")
     ensure

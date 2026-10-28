@@ -1,4 +1,4 @@
-.TH SHARKY 1 "2026-10-28" "sharky 1.0.0" "User Commands"
+.TH SHARKY 1 "2026-10-28" "sharky 1.0.1" "User Commands"
 .SH NAME
 sharky \- Unix-first interactive shell written in Ruby
 .SH SYNOPSIS
@@ -61,11 +61,12 @@ subshells, background jobs, \fBif/elif/else\fR, \fBfor\fR, \fBwhile\fR,
 Builtins include \fBcd\fR, \fBpwd\fR, \fBexport\fR, \fBsource\fR, \fB.\fR,
 \fBset\fR, \fBread\fR, \fBshift\fR, \fBjobs\fR, \fBfg\fR, \fBbg\fR, \fBwait\fR,
 \fBkill\fR, \fBalias\fR, \fBunalias\fR, \fBtype\fR, \fBhistory\fR, \fBz\fR and
-\fBexit\fR.
+\fBexit\fR. Shell options include \fBset -e\fR (errexit), \fBset -u\fR
+(nounset), \fBset -x\fR (xtrace) and \fBset -o pipefail\fR.
 .PP
 Not supported in v1: full Bash/POSIX, \fBcoproc\fR, process substitution,
-extended globs, associative arrays, array slices, programmable completion,
-full \fB[[ =~ ]]\fR and login-shell installation.
+extended globs, associative arrays, array slices, custom \fBIFS\fR,
+programmable completion, full \fB[[ =~ ]]\fR parity and login-shell installation.
 .SH SCRIPTS
 A file named \fB*.sh\fR, or a file whose first line is
 \fB#!/usr/bin/env sharky\fR, runs through the native parser. The script path is

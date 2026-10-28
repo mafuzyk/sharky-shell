@@ -28,29 +28,74 @@ class InstallTest < Minitest::Test
     refute File.exist?(File.join(prefix, "share", "man", "man1", "sharky.1"))
   end
 
+  def test_arch_package_installs_from_the_cloned_repository_directory
+    srcdir = File.join(@tmp, "src")
+    source = File.join(srcdir, "sharky-shell")
+    copy_checkout(source)
+    pkgdir = File.join(@tmp, "package")
+
+    out, err, status = Open3.capture3(
+      { "srcdir" => srcdir, "pkgdir" => pkgdir },
+      "bash", "-e", "-c", 'source "$1"; package', "package-test",
+      File.join(source, "packaging", "PKGBUILD"), chdir: srcdir
+    )
+
+    assert status.success?, "Arch package failed: #{out}#{err}"
+    binary = File.join(pkgdir, "usr", "bin", "sharky")
+    assert File.executable?(binary)
+    version, err, status = Open3.capture3(binary, "--version")
+    assert status.success?, err
+    assert_equal "sharky 1.0.1\n", version
+  end
+
+  def test_dist_install_check_preserves_existing_artifacts
+    checkout = File.join(@tmp, "checkout")
+    copy_checkout(checkout)
+    artifact = File.join(checkout, "dist", "preexisting.tar.gz")
+    FileUtils.mkdir_p(File.dirname(artifact))
+    File.binwrite(artifact, "existing release artifact")
+
+    out, err, status = Open3.capture3(
+      RbConfig.ruby, "test/install_test.rb", "-n", "test_dist_tarball_installs", chdir: checkout
+    )
+
+    assert status.success?, "isolated dist install check failed: #{out}#{err}"
+    assert File.file?(artifact), "the install check removed a preexisting dist artifact"
+    assert_equal "existing release artifact", File.binread(artifact)
+  end
+
   def test_dist_tarball_installs
-    _out, err, status = Open3.capture3("make", "-s", "dist", chdir: ROOT)
+    checkout = File.join(@tmp, "checkout")
+    copy_checkout(checkout)
+    _out, err, status = Open3.capture3("make", "-s", "dist", chdir: checkout)
     assert status.success?, "dist failed: #{err}"
 
-    version = File.read(File.join(ROOT, "lib", "sharky", "version.rb"))[/VERSION\s*=\s*"([^"]+)"/, 1]
-    tarball = File.join(ROOT, "dist", "sharky-#{version}.tar.gz")
+    version = File.read(File.join(checkout, "lib", "sharky", "version.rb"))[/VERSION\s*=\s*"([^"]+)"/, 1]
+    tarball = File.join(checkout, "dist", "sharky-#{version}.tar.gz")
     assert File.file?(tarball)
 
-    Dir.mktmpdir("sharky-dist-") do |dir|
-      _out, err, status = Open3.capture3("tar", "-xzf", tarball, "-C", dir)
-      assert status.success?, "extract failed: #{err}"
+    _out, err, status = Open3.capture3("tar", "-xzf", tarball, "-C", @tmp)
+    assert status.success?, "extract failed: #{err}"
 
-      source = File.join(dir, "sharky-#{version}")
-      prefix = File.join(dir, "prefix")
-      _out, err, status = Open3.capture3("make", "-s", "install", "PREFIX=#{prefix}", chdir: source)
-      assert status.success?, "dist install failed: #{err}"
-
-      binary = File.join(prefix, "bin", "sharky")
-      out, err, status = Open3.capture3(binary, "-c", "printf packaged")
-      assert status.success?, err
-      assert_equal "packaged", out
+    source = File.join(@tmp, "sharky-#{version}")
+    %w[test/run.rb test/prompt_test.rb bench/prompt.rb bench/soak.rb].each do |entry|
+      assert File.file?(File.join(source, entry)), "the source tarball is missing #{entry}"
     end
-  ensure
-    FileUtils.rm_rf(File.join(ROOT, "dist"))
+    prefix = File.join(@tmp, "prefix")
+    _out, err, status = Open3.capture3("make", "-s", "install", "PREFIX=#{prefix}", chdir: source)
+    assert status.success?, "dist install failed: #{err}"
+
+    binary = File.join(prefix, "bin", "sharky")
+    out, err, status = Open3.capture3(binary, "-c", "printf packaged")
+    assert status.success?, err
+    assert_equal "packaged", out
+  end
+
+  private
+
+  def copy_checkout(target)
+    FileUtils.mkdir_p(target)
+    entries = %w[bin lib man packaging test bench .github README.md LICENSE CHANGELOG.md CONTRIBUTING.md SECURITY.md Makefile .editorconfig .gitattributes]
+    FileUtils.cp_r(entries.map { |entry| File.join(ROOT, entry) }, target)
   end
 end

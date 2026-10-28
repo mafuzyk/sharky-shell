@@ -7,6 +7,7 @@ require "rbconfig"
 ITERATIONS = 1000
 WARMUP = 50
 
+# Rendering only: Git and other context fields are precomputed.
 context = Sharky::Prompt::Context.new(
   cwd: Dir.pwd,
   home: ENV["HOME"],
@@ -36,5 +37,5 @@ samples = Array.new(ITERATIONS) do
   (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000
 end
 
-puts "prompt benchmark (n=#{ITERATIONS}, warmup=#{WARMUP})"
+puts "prompt renderer benchmark (n=#{ITERATIONS}, warmup=#{WARMUP}; excludes Git/context collection)"
 puts format("median %.3f ms  p95 %.3f ms", percentile(samples, 0.5), percentile(samples, 0.95))
