@@ -58,15 +58,18 @@ module Sharky
       end
 
       def current
-        @jobs.max_by(&:id)
+        @jobs.reject(&:done?).max_by(&:id)
       end
 
       def previous
-        @jobs.sort_by(&:id)[-2]
+        @jobs.reject(&:done?).sort_by(&:id)[-2]
       end
 
       def remove(job)
         job = find(job) unless job.is_a?(Job)
+        return unless job
+
+        job.pids.each { |pid| @statuses.delete(pid) }
         @jobs.delete(job)
       end
 
@@ -83,20 +86,22 @@ module Sharky
 
       def wait(job)
         job.pids.each do |pid|
-          next if @statuses[pid]
+          next if @statuses.key?(pid)
 
-          _, status = Process.waitpid2(pid, Process::WUNTRACED)
-          record(pid, status)
+          begin
+            _, status = Process.waitpid2(pid, Process::WUNTRACED)
+            record(pid, status)
+          rescue Errno::ECHILD
+            @statuses[pid] = nil
+          end
         end
         update(job)
-        status_for(job)
-      rescue Errno::ECHILD
         status_for(job)
       end
 
       def resume(job)
         Process.kill("CONT", -job.pgid)
-        job.pids.each { |pid| @statuses.delete(pid) }
+        job.pids.each { |pid| @statuses.delete(pid) if @statuses[pid]&.stopped? }
         job.state = :running
         job.status = nil
         job.notified = false
@@ -118,7 +123,7 @@ module Sharky
         if statuses.any? { |status| status&.stopped? }
           job.state = :stopped
           job.status = nil
-        elsif statuses.all?
+        elsif job.pids.all? { |pid| @statuses.key?(pid) }
           job.state = :done
           job.status = decode(statuses.last)
         end

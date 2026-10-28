@@ -47,6 +47,19 @@ class JobControlTest < Minitest::Test
     end
   end
 
+  def test_interactive_pipeline_honors_pipefail
+    with_cli do |reader, writer, pid|
+      wait_for(reader, PROMPT)
+      writer.write("set -o pipefail; false | true; printf 'pipe-status:%s\\n' \"$?\"\r")
+      output = read_until(reader, /pipe-status:\d\r?\n/)
+      assert_match(/pipe-status:1\r?\n/, output)
+      read_until(reader, PROMPT)
+
+      writer.write("exit 0\r")
+      assert_equal 0, wait_for_exit(pid).exitstatus
+    end
+  end
+
   def test_ctrl_z_stops_and_fg_resumes
     with_cli do |reader, writer, pid|
       wait_for(reader, PROMPT)
@@ -133,6 +146,14 @@ class JobControlTest < Minitest::Test
     end
   end
 
+  def test_closing_pty_sends_hup_to_running_jobs
+    assert_job_receives_hup_on_pty_close(stopped: false)
+  end
+
+  def test_closing_pty_continues_stopped_jobs_after_hup
+    assert_job_receives_hup_on_pty_close(stopped: true)
+  end
+
   def test_reap_records_stopped_background_job
     with_child do |pid|
       table = Sharky::Jobs::Table.new
@@ -163,6 +184,76 @@ class JobControlTest < Minitest::Test
     end
   end
 
+  def test_fg_waits_for_remaining_pipeline_members_after_a_child_was_reaped
+    exited_pid = fork { exit! 0 }
+    Process.wait(exited_pid)
+    remaining_pid = Process.spawn(RbConfig.ruby, "-e", "sleep 0.1; exit 7", pgroup: true)
+    shell = Sharky::Shell.new(env: @env, stdout: StringIO.new, stderr: StringIO.new)
+    shell.jobs.add(command: "true | sleep", pgid: remaining_pid, pids: [exited_pid, remaining_pid])
+
+    assert_equal 7, shell.fg_builtin([])
+    assert_raises(Errno::ECHILD) { Process.waitpid(remaining_pid, Process::WNOHANG) }
+  ensure
+    if remaining_pid
+      Process.kill("KILL", remaining_pid) rescue nil
+      Process.wait(remaining_pid) rescue nil
+    end
+  end
+
+  def test_resuming_a_pipeline_preserves_completed_member_status
+    stopped_pid = Process.spawn("sleep", "5", pgroup: true)
+    exited_pid = fork { exit! 7 }
+    table = Sharky::Jobs::Table.new
+    job = table.add(command: "sleep | false", pgid: stopped_pid, pids: [stopped_pid, exited_pid])
+    Process.kill("STOP", stopped_pid)
+    Timeout.timeout(5) do
+      loop do
+        table.reap
+        break if job.stopped? && !File.exist?("/proc/#{exited_pid}")
+        sleep 0.01
+      end
+    end
+
+    assert table.resume(job)
+    Process.kill("TERM", stopped_pid)
+    assert_equal 7, table.wait(job)
+    assert_predicate job, :done?
+  ensure
+    [stopped_pid, exited_pid].compact.each do |pid|
+      Process.kill("KILL", pid) rescue nil
+      Process.wait(pid) rescue nil
+    end
+  end
+
+  def test_fg_default_ignores_a_more_recent_completed_job
+    live_pid = Process.spawn(RbConfig.ruby, "-e", "sleep 0.1; exit 7", pgroup: true)
+    done_pid = fork { exit! 0 }
+    Process.wait(done_pid)
+    shell = Sharky::Shell.new(env: @env, stdout: StringIO.new, stderr: StringIO.new)
+    shell.jobs.add(command: "running", pgid: live_pid, pids: [live_pid])
+    shell.jobs.add(command: "done", pgid: done_pid, pids: [done_pid], state: :done, status: 0)
+
+    assert_equal 7, shell.fg_builtin([])
+  ensure
+    if live_pid
+      Process.kill("KILL", live_pid) rescue nil
+      Process.wait(live_pid) rescue nil
+    end
+  end
+
+  def test_jobs_removes_completed_entries_after_listing_them
+    shell = Sharky::Shell.new(env: @env, stdout: StringIO.new, stderr: StringIO.new)
+    assert_equal 0, shell.run("true & wait %1")
+    shell.stdout = StringIO.new
+    assert_equal 0, shell.run("jobs")
+    assert_match(/Done/, shell.stdout.string)
+
+    shell.stdout = StringIO.new
+    assert_equal 0, shell.run("jobs")
+    assert_empty shell.stdout.string
+    assert_empty shell.jobs.all
+  end
+
   def test_kill_accepts_numeric_signal
     with_child do |pid|
       shell = Sharky::Shell.new(
@@ -191,6 +282,41 @@ class JobControlTest < Minitest::Test
   end
 
   private
+
+  def assert_job_receives_hup_on_pty_close(stopped:)
+    pgid = nil
+    marker = File.join(@tmp, "received-hup")
+    ready = File.join(@tmp, "child-ready")
+    script = File.join(@tmp, "hup-child.rb")
+    File.write(script, <<~RUBY)
+      Signal.trap("HUP") { File.write(#{marker.dump}, "HUP"); exit }
+      File.write(#{ready.dump}, Process.pid.to_s)
+      sleep
+    RUBY
+    with_cli do |reader, writer, pid|
+      wait_for(reader, PROMPT)
+      writer.write("#{RbConfig.ruby} #{script} &\r")
+      output = read_until(reader, /\[\d+\] \d+\r?\n/)
+      pgid = output.match(/\[\d+\] (\d+)\r?\n/)[1].to_i
+      Timeout.timeout(5) { sleep 0.01 until File.exist?(ready) }
+      if stopped
+        writer.write("kill -STOP %1\rjobs\r")
+        read_until(reader, /Stopped[^\r\n]*hup-child\.rb/)
+      end
+
+      writer.close
+      reader.close
+      assert_equal Signal.list["HUP"], wait_for_exit(pid).termsig
+      begin
+        Timeout.timeout(2) { sleep 0.01 until File.exist?(marker) }
+      rescue Timeout::Error
+        flunk "background job did not receive HUP#{stopped ? ' and CONT' : ''} on PTY close"
+      end
+      assert_equal "HUP", File.read(marker)
+    end
+  ensure
+    Process.kill("KILL", -pgid) rescue nil if pgid
+  end
 
   def with_child
     pid = Process.spawn("sleep", "5", pgroup: true)

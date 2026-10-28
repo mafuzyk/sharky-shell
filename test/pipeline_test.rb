@@ -60,6 +60,20 @@ class PipelineTest < Minitest::Test
     assert_equal "5\n", @out.string
   end
 
+  def test_group_input_redirect_reaches_external_commands
+    File.write(File.join(@tmp, "input.txt"), "hello")
+
+    assert_equal 0, @shell.run('{ wc -c; } < input.txt', compound: true)
+    assert_equal "5\n", @out.string
+  end
+
+  def test_if_input_redirect_reaches_external_commands
+    File.write(File.join(@tmp, "input.txt"), "hello")
+
+    assert_equal 0, @shell.run('if true; then wc -c; fi < input.txt', compound: true)
+    assert_equal "5\n", @out.string
+  end
+
   def test_stderr_and_both_redirects
     file = File.join(@tmp, "both.txt")
     assert_equal 2, @shell.run("ls /definitely-not-here 2>&1")

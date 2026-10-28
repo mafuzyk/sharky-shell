@@ -31,6 +31,15 @@ class InteractiveTest < Minitest::Test
     end
   end
 
+  def test_interactive_exit_trap_can_override_exit_status
+    with_cli do |reader, writer, pid|
+      wait_for(reader, PROMPT)
+      writer.write("trap 'exit 42' EXIT; exit 5\r")
+
+      assert_equal 42, wait_for_exit(pid).exitstatus
+    end
+  end
+
   def test_ctrl_c_clears_line_and_ctrl_d_exits
     with_cli do |reader, writer, pid|
       wait_for(reader, PROMPT)
@@ -206,6 +215,23 @@ class InteractiveTest < Minitest::Test
 
       writer.write("printf 'starship-ok\\n'\r")
       assert_includes read_until(reader, /starship-ok[\s\S]*STARSHIP> /), "starship-ok"
+
+      writer.write("\x04")
+      assert_equal 0, wait_for_exit(pid).exitstatus
+    end
+  end
+
+  def test_starship_prompt_receives_the_current_shell_environment
+    command = File.join(@tmp, "shell-starship")
+    File.write(command, "#!/bin/sh\nprintf '%s> ' \"${SHARKY_PROMPT_LABEL:-initial}\"\n")
+    File.chmod(0o755, command)
+    write_config("Sharky.starship(command: #{command.dump}, timeout: 1)")
+
+    with_cli(config: true, dir: @tmp) do |reader, writer, pid|
+      wait_for(reader, /initial> /)
+      writer.write("export SHARKY_PROMPT_LABEL=updated; printf 'env-updated\\n'\r")
+      output = read_until(reader, /env-updated\r?\n[^\n]*> /)
+      assert_match(/updated> /, output)
 
       writer.write("\x04")
       assert_equal 0, wait_for_exit(pid).exitstatus

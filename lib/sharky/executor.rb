@@ -12,10 +12,6 @@ module Sharky
       program.lines.each do |line|
         status = execute_list(line.list, foreground: foreground)
         break if @shell.exit_requested?
-        if @shell.option?(:errexit) && !status.zero?
-          @shell.request_exit(status)
-          break
-        end
       end
       status
     end
@@ -23,6 +19,8 @@ module Sharky
     private
 
     def execute_list(list, foreground:, errexit: true)
+      previous_suppression = @shell.errexit_suppressed
+      @shell.errexit_suppressed = true unless errexit
       status = 0
       list.entries.each do |kind, and_ors|
         and_or = and_ors.first
@@ -30,37 +28,47 @@ module Sharky
 
         status = kind == :async ? start_async(and_or) : execute_and_or(and_or, foreground: foreground)
         break if @shell.exit_requested?
-        if errexit && @shell.option?(:errexit) && !status.zero?
-          @shell.request_exit(status)
-          break
-        end
       end
       status
+    ensure
+      @shell.errexit_suppressed = previous_suppression
     end
 
     def execute_and_or(and_or, foreground:)
-      status = execute_pipeline(and_or.first, foreground: foreground)
+      rest = Array(and_or.rest)
+      status = execute_pipeline(and_or.first, foreground: foreground, errexit: rest.empty?)
       return status if @shell.exit_requested?
 
-      Array(and_or.rest).each do |operator, pipeline|
-        break if operator == :and && status != 0
-        break if operator == :or && status.zero?
+      rest.each_with_index do |(operator, pipeline), index|
+        next if operator == :and && status != 0
+        next if operator == :or && status.zero?
 
-        status = execute_pipeline(pipeline, foreground: foreground)
+        status = execute_pipeline(pipeline, foreground: foreground, errexit: index == rest.length - 1)
         break if @shell.exit_requested?
       end
       status
     end
 
-    def execute_pipeline(pipeline, foreground:)
-      return execute_command(pipeline, foreground: foreground) unless pipeline.is_a?(AST::Pipeline)
-      return execute_command(pipeline.commands.first, foreground: foreground) if pipeline.commands.length == 1
-
-      execute_pipeline_commands(pipeline.commands, foreground: foreground)
+    def execute_pipeline(pipeline, foreground:, errexit: true)
+      previous_suppression = @shell.errexit_suppressed
+      @shell.errexit_suppressed = true if !errexit || pipeline.is_a?(AST::Not)
+      status = if !pipeline.is_a?(AST::Pipeline)
+                 execute_command(pipeline, foreground: foreground)
+               elsif pipeline.commands.length == 1
+                 execute_command(pipeline.commands.first, foreground: foreground)
+               else
+                 execute_pipeline_commands(pipeline.commands, foreground: foreground)
+               end
+      if @shell.option?(:errexit) && !@shell.errexit_suppressed && !status.zero?
+        @shell.request_exit(status)
+      end
+      @shell.mark_status(status)
+    ensure
+      @shell.errexit_suppressed = previous_suppression
     end
 
     def execute_command(command, foreground:)
-      case command
+      status = case command
       when AST::Simple
         execute_simple(command, foreground: foreground)
       when AST::Subshell
@@ -88,6 +96,7 @@ module Sharky
       else
         unsupported
       end
+      @shell.mark_status(status)
     end
 
     def execute_if(command, foreground:)
@@ -158,10 +167,18 @@ module Sharky
     end
 
     def execute_test(command)
-      tokens = Shellwords.split(command.source)
+      tokens = Lexer.new(command.source).tokenize.filter_map do |token|
+        case token.type
+        when :word then token.value
+        when :and_if then "&&"
+        when :or_if then "||"
+        when :eof then nil
+        else raise ArgumentError
+        end
+      end
       @shell.mark_status(test_expression(tokens) ? 0 : 1)
-    rescue ArgumentError
-      @shell.stderr.puts("sharky: [[: bad expression")
+    rescue ArgumentError, LexError
+      @shell.stderr.puts("sharky: [[: syntax error: bad expression")
       @shell.mark_status(2)
     end
 
@@ -178,12 +195,16 @@ module Sharky
     end
 
     def test_unary(tokens)
-      return true if tokens.empty?
-      return !test_unary(tokens[1..]) if tokens.first == "!"
+      raise ArgumentError if tokens.empty?
 
-      operator = tokens.first
-      operand = tokens[1..]&.join(" ")
-      return tokens.first.to_s.length.positive? if tokens.length == 1
+      return !test_unary(tokens[1..]) if word_text(tokens.first) == "!"
+
+      expanded = tokens.map { |word| expand_test_word(word) }
+      words = expanded.map(&:first)
+
+      operator = words.first
+      operand = words[1..]&.join(" ")
+      return words.first.to_s.length.positive? if words.length == 1
       return !operand.to_s.empty? if operator == "-n"
       return operand.to_s.empty? if operator == "-z"
       return File.exist?(test_path(operand)) if %w[-e -a].include?(operator)
@@ -193,12 +214,15 @@ module Sharky
       return File.writable?(test_path(operand)) if operator == "-w"
       return File.executable?(test_path(operand)) if operator == "-x"
 
-      left = tokens[0]
-      op = tokens[1]
-      right = tokens[2..]&.join(" ")
+      left = words[0]
+      op = words[1]
+      right = words[2..]&.join(" ")
       case op
-      when "==" then left == right
-      when "!=" then left != right
+      when "==", "!="
+        raise ArgumentError unless expanded.length == 3
+
+        matched = File.fnmatch(expanded[2].last, left, File::FNM_DOTMATCH)
+        op == "==" ? matched : !matched
       when "=~" then Regexp.new(right).match?(left)
       when "-eq" then left.to_i == right.to_i
       when "-ne" then left.to_i != right.to_i
@@ -210,6 +234,21 @@ module Sharky
       end
     rescue RegexpError
       false
+    end
+
+    def expand_test_word(word)
+      text = +""
+      pattern = +""
+      word.parts.each do |part|
+        value = @shell.expansion.expand_assignment(AST::Word.new(parts: [part]))
+        text << value
+        pattern << if [:single, :double, :escaped].include?(part.type)
+                     value.gsub(/[\\*?\[\]]/) { |char| "\\#{char}" }
+                   else
+                     value
+                   end
+      end
+      [text, pattern]
     end
 
     def split_test_logical(tokens, operator)
@@ -264,11 +303,7 @@ module Sharky
     end
 
     def execute_simple(simple, foreground:)
-      redirections = build_redirections(simple.redirects)
-      return @shell.mark_status(1) unless redirections
-
-      fd_map, files = redirections
-
+      @shell.command_substitution_status = nil
       values = {}
       simple.assignments.each do |assignment|
         if assignment.array
@@ -288,10 +323,14 @@ module Sharky
       words = expand_aliases(words)
       @shell.stderr.puts("+ #{words.join(" ")}") if @shell.option?(:xtrace) && !words.empty?
 
+      redirections = build_redirections(simple.redirects)
+      return @shell.mark_status(1) unless redirections
+
+      fd_map, files = redirections
       if words.empty?
         values.each { |name, value| @shell.export(name, value) }
         close_files(files)
-        return @shell.mark_status(0)
+        return @shell.mark_status(@shell.command_substitution_status || 0)
       end
 
       name = words.first
@@ -338,6 +377,8 @@ module Sharky
 
       @shell.clear_pending_signal if builtin || ruby_builtin
       @shell.mark_status(status)
+    ensure
+      close_files(files) if files
     end
 
     def function_for(name)
@@ -510,12 +551,7 @@ module Sharky
       status = if control
                  wait_foreground(pids, command: command_text_for_pipeline(commands), pgid: pgid)
                else
-                 statuses = pids.map { |pid| decode_status(Process.waitpid2(pid).last) }
-                 if @shell.option?(:pipefail)
-                   statuses.reverse.find { |code| !code.zero? } || 0
-                 else
-                   statuses.last
-                 end
+                 pipeline_status(pids.map { |pid| Process.waitpid2(pid).last })
                end
       copy_output(out_thread, err_thread)
       status
@@ -700,7 +736,17 @@ module Sharky
       fd_map = {}
       files = []
 
-      redirects.each do |redirect|
+      expanded = redirects.map do |redirect|
+        target = case redirect.op
+                 when :dup then redirect.target
+                 when :heredoc then heredoc_body(redirect.target)
+                 when :here_string then "#{@shell.expansion.expand_assignment(redirect.target)}\n"
+                 else File.expand_path(@shell.expansion.expand_assignment(redirect.target), @shell.cwd)
+                 end
+        [redirect, target]
+      end
+
+      expanded.each do |redirect, target|
         if redirect.op == :dup
           target = fd_map[redirect.target] || base_stream(redirect.target)
           unless target
@@ -714,20 +760,14 @@ module Sharky
 
         if [:heredoc, :here_string].include?(redirect.op)
           file = Tempfile.new("sharky-redirect")
-          body = if redirect.op == :heredoc
-                   heredoc_body(redirect.target)
-                 else
-                   "#{@shell.expansion.expand_assignment(redirect.target)}\n"
-                 end
-          file.write(body)
-          file.rewind
           files << file
+          file.write(target)
+          file.rewind
           fd_map[redirect.fd || 0] = file
           next
         end
 
-        path = @shell.expansion.expand_assignment(redirect.target)
-        path = File.expand_path(path, @shell.cwd)
+        path = target
         file = case redirect.op
                when :out
                  File.open(path, File::WRONLY | File::CREAT | File::TRUNC, 0o666)
@@ -752,11 +792,13 @@ module Sharky
         end
       end
 
+      complete = true
       [fd_map, files]
     rescue SystemCallError => error
-      close_files(files)
       @shell.stderr.puts("sharky: #{error.message}")
       nil
+    ensure
+      close_files(files) unless complete
     end
 
     def heredoc_body(document)
@@ -855,6 +897,7 @@ module Sharky
     end
 
     def redirect_standard_streams(out_writer, err_writer)
+      $stdin.reopen(@shell.stdin) if real_io?(@shell.stdin)
       $stdout = STDOUT unless real_io?($stdout)
       $stderr = STDERR unless real_io?($stderr)
       $stdout.reopen(out_writer || @shell.stdout)
@@ -972,7 +1015,7 @@ module Sharky
       end
 
       @shell.take_terminal
-      decode_status(statuses.last)
+      pipeline_status(statuses)
     rescue Errno::ECHILD
       @shell.take_terminal
       1
@@ -1078,6 +1121,11 @@ module Sharky
       stream.respond_to?(:fileno) && stream.fileno
     rescue IOError, NotImplementedError
       false
+    end
+
+    def pipeline_status(statuses)
+      codes = statuses.map { |status| decode_status(status) }
+      @shell.option?(:pipefail) ? (codes.reverse.find { |code| !code.zero? } || 0) : codes.last
     end
 
     def decode_status(status)

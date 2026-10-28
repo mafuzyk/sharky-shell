@@ -305,7 +305,7 @@ module Sharky
             break if shell.exit_requested?
           end
 
-          shell.last_status.tap { shell.run_exit_trap(shell.last_status) }
+          shell.run_exit_trap(shell.last_status)
         ensure
           history.save
           terminal.restore
@@ -319,6 +319,7 @@ module Sharky
         next unless Signal.list.key?(signal)
 
         previous[signal] = Signal.trap(signal) do
+          shell.hangup_jobs if signal == "HUP"
           terminal.restore
           Signal.trap(signal, "DEFAULT")
           Process.kill(signal, Process.pid)
@@ -390,7 +391,7 @@ module Sharky
       prompt = runtime.prompt
       if prompt.nil? && runtime.starship
         begin
-          return Starship.prompt(context, **runtime.starship)
+          return Starship.prompt(context, **runtime.starship, env: shell.env)
         rescue Starship::Error
           # Fall through to the theme layout or built-in prompt.
         end

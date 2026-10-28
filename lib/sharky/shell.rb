@@ -3,7 +3,7 @@
 module Sharky
   class Shell
     attr_reader :env, :cwd, :terminal, :history, :jobs, :functions, :positional, :script_name, :options, :arrays, :traps
-    attr_accessor :stdin, :stdout, :stderr
+    attr_accessor :stdin, :stdout, :stderr, :command_substitution_status, :errexit_suppressed
     attr_writer :runtime
     attr_reader :last_status, :last_bg_pid, :shell_pgid, :foreground_pgid
     attr_accessor :pending_signal, :reap_requested, :redraw_requested
@@ -182,20 +182,30 @@ module Sharky
 
     def capture_command(program)
       reader, writer = IO.pipe
+      err_reader, err_writer = IO.pipe
       pid = fork do
         reader.close
+        err_reader.close
         $stdout.reopen(writer)
+        $stderr.reopen(err_writer)
         @stdout = writer
+        @stderr = err_writer
         status = Executor.new(self).execute(program, foreground: false)
         writer.close
+        err_writer.close
         exit!(status)
       end
 
       writer.close
+      err_writer.close
+      errors = Thread.new { err_reader.read }
       output = reader.read
-      reader.close
-      Process.waitpid(pid)
+      _, process_status = Process.waitpid2(pid)
+      @stderr.write(errors.value)
+      @command_substitution_status = decode_wait_status(process_status)
       output
+    ensure
+      [reader, writer, err_reader, err_writer].each { |io| io.close if io && !io.closed? }
     end
 
     def set_array(name, values, append: false)
@@ -223,9 +233,14 @@ module Sharky
       command = @traps["EXIT"]
       return original_status if command.nil? || command.empty?
 
-      run(command, compound: true)
-      mark_status(original_status)
-      original_status
+      original_exit = @exit_requested
+      @exit_requested = false
+      begin
+        run(command, compound: true)
+        @exit_requested ? @last_status : mark_status(original_status)
+      ensure
+        @exit_requested ||= original_exit
+      end
     end
 
     def run_script_file(path, args = [])
@@ -237,7 +252,6 @@ module Sharky
       @positional = Array(args).map(&:to_s)
       status = run(source, compound: true)
       run_exit_trap(status)
-      status
     rescue SystemCallError => error
       @stderr.puts("sharky: #{path}: #{error.message}")
       mark_status(1)
@@ -322,6 +336,19 @@ module Sharky
       false
     end
 
+    def hangup_jobs
+      groups = @jobs.all.reject(&:done?).to_h { |job| [job.pgid, job.stopped?] }
+      groups[@foreground_pgid] = false if @foreground_pgid && !groups.key?(@foreground_pgid)
+      groups.each do |pgid, stopped|
+        begin
+          Process.kill("HUP", -pgid)
+          Process.kill("CONT", -pgid) if stopped
+        rescue SystemCallError
+          nil
+        end
+      end
+    end
+
     def clear_pending_signal
       @pending_signal = nil
     end
@@ -344,7 +371,7 @@ module Sharky
 
     def jobs_builtin(_argv)
       reap_jobs
-      @jobs.all.each do |job|
+      @jobs.all.dup.each do |job|
         state = case job.state
                 when :running then "Running"
                 when :stopped then "Stopped"
@@ -352,11 +379,13 @@ module Sharky
                 end
         @stdout.puts("[#{job.id}] #{state} #{job.pgid} #{job.command}")
         job.notified = true unless job.running?
+        @jobs.remove(job) if job.done?
       end
       0
     end
 
     def fg_builtin(argv)
+      reap_jobs
       target = argv.first
       job = target ? @jobs.find(target) : @jobs.current
       return no_such_job("fg", target) unless job

@@ -1,5 +1,6 @@
 require_relative "test_helper"
 require "shellwords"
+require "json"
 
 class CLIScriptTest < Minitest::Test
   def script(name, content, mode: 0o644)
@@ -73,6 +74,26 @@ class CLIScriptTest < Minitest::Test
 
     assert_equal 1, status.exitstatus
     assert_equal "", out
+  end
+
+  def test_json_captures_stderr_from_command_substitution
+    command = 'printf \'%s\' "$(printf diagnostic >&2; printf result)"'
+    out, err, status = run_sharky("--no-config", "--json", "-c", command)
+
+    assert_equal 0, status.exitstatus
+    assert_empty err
+    payload = JSON.parse(out)
+    assert_equal "result", payload.fetch("stdout")
+    assert_equal "diagnostic", payload.fetch("stderr")
+  end
+
+  def test_incomplete_pattern_comparison_reports_syntax_error_without_crashing
+    out, err, status = run_sharky("--no-config", "-c", "[[ value == ]]")
+
+    assert_equal 2, status.exitstatus
+    assert_empty out
+    assert_match(/syntax error/, err)
+    refute_match(/IndexError|executor\.rb/, err)
   end
 
   def test_read_consumes_cli_stdin

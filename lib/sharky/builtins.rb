@@ -463,21 +463,32 @@ module Sharky
 
     def self.read_builtin(shell, argv)
       args = argv.dup
-      args.shift if args.first == "-r"
+      raw = args.first == "-r"
+      args.shift if raw
       names = args.empty? ? ["REPLY"] : args
-      line = shell.stdin.gets
-      return 1 if line.nil?
-
-      fields = line.chomp.split(/\s+/)
-      names.each_with_index do |name, index|
-        value = if index == names.length - 1
-                  fields[index..].to_a.join(" ")
-                else
-                  fields[index].to_s
-                end
-        shell.env[name] = value
+      tokens = []
+      status = 1
+      while (line = shell.stdin.gets)
+        parts = raw ? line.chars : line.scan(/\\.|./m)
+        if !raw && parts.last == "\\\n"
+          tokens.concat(parts[0...-1])
+          next
+        end
+        tokens.concat(parts)
+        status = line.end_with?("\n") ? 0 : 1
+        break
       end
-      0
+      tokens.pop if tokens.last == "\n"
+      separator = ->(token) { token && " \t\n".include?(token) }
+      tokens.shift while separator.call(tokens.first)
+      tokens.pop while separator.call(tokens.last)
+      names.each_with_index do |name, index|
+        count = index == names.length - 1 ? tokens.length : (tokens.index(&separator) || tokens.length)
+        value = tokens.shift(count).join
+        shell.env[name] = raw ? value : value.gsub(/\\(.)/m, '\1')
+        tokens.shift while separator.call(tokens.first)
+      end
+      status
     end
 
     def self.source_builtin(shell, argv)
