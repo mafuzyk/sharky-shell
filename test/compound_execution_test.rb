@@ -53,7 +53,8 @@ class CompoundExecutionTest < Minitest::Test
   def test_group_and_not
     run_compound("{ echo group; }")
     assert_equal "group\n", @stdout.string
-    @stdout.string = ""
+    @stdout.truncate(0)
+    @stdout.rewind
     assert_equal 0, run_compound("! false")
     assert_equal 1, run_compound("! true")
   end
@@ -76,6 +77,35 @@ class CompoundExecutionTest < Minitest::Test
     assert_equal 0, run_compound("[[ a == a ]]")
     assert_equal 1, run_compound("[[ a != a ]]")
     assert_equal 1, run_compound("[[ -n x && -z y ]]")
+  end
+
+  def test_case_matches_first_arm_and_glob
+    assert_equal 0, run_compound("case abc in a*) echo yes;; *) echo no;; esac")
+    assert_equal "yes\n", @stdout.string
+    @stdout.truncate(0)
+    @stdout.rewind
+    assert_equal 0, run_compound("case zzz in a*) echo yes;; esac")
+    assert_equal "", @stdout.string
+  end
+
+  def test_here_document_feeds_stdin
+    run_compound("cat <<EOF\nhello\nEOF\n")
+    assert_equal "hello\n", @stdout.string
+  end
+
+  def test_here_document_quoted_delimiter_does_not_expand
+    @shell.env["X"] = "world"
+    run_compound("cat <<'EOF'\nhello $X\nEOF\n")
+    assert_equal "hello $X\n", @stdout.string
+    @stdout.truncate(0)
+    @stdout.rewind
+    run_compound("cat <<EOF\nhello $X\nEOF\n")
+    assert_equal "hello world\n", @stdout.string
+  end
+
+  def test_here_string_appends_newline
+    run_compound("cat <<< hello")
+    assert_equal "hello\n", @stdout.string
   end
 
   def test_default_shell_run_stays_legacy

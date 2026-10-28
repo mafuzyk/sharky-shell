@@ -1,4 +1,5 @@
 require "shellwords"
+require "tempfile"
 
 module Sharky
   class Executor
@@ -70,6 +71,8 @@ module Sharky
         execute_arithmetic(command)
       when AST::TestCommand
         execute_test(command)
+      when AST::Case
+        execute_case(command, foreground: foreground)
       when AST::FunctionDef
         execute_function_definition(command)
       else
@@ -197,6 +200,19 @@ module Sharky
     def execute_function_definition(command)
       @shell.functions[command.name] = command.body
       @shell.mark_status(0)
+    end
+
+    def execute_case(command, foreground:)
+      word = @shell.expansion.expand_word(command.word).first.to_s
+
+      command.arms.each do |patterns, body|
+        matched = patterns.any? do |pattern|
+          File.fnmatch(@shell.expansion.expand_word(pattern).first.to_s, word, File::FNM_DOTMATCH)
+        end
+        return execute_list(body, foreground: foreground) if matched
+      end
+
+      0
     end
 
     def execute_simple(simple, foreground:)
@@ -624,6 +640,20 @@ module Sharky
           next
         end
 
+        if [:heredoc, :here_string].include?(redirect.op)
+          file = Tempfile.new("sharky-redirect")
+          body = if redirect.op == :heredoc
+                   heredoc_body(redirect.target)
+                 else
+                   "#{@shell.expansion.expand_assignment(redirect.target)}\n"
+                 end
+          file.write(body)
+          file.rewind
+          files << file
+          fd_map[redirect.fd || 0] = file
+          next
+        end
+
         path = @shell.expansion.expand_assignment(redirect.target)
         path = File.expand_path(path, @shell.cwd)
         file = case redirect.op
@@ -655,6 +685,22 @@ module Sharky
       close_files(files)
       @shell.stderr.puts("sharky: #{error.message}")
       nil
+    end
+
+    def heredoc_body(document)
+      return document.body.to_s if document.quoted
+
+      expand_heredoc(document.body.to_s)
+    end
+
+    def expand_heredoc(text)
+      escaped = text.gsub("\\", "\\\\\\\\").gsub('"', '\\"')
+      word = Lexer.new(%Q{"#{escaped}"}).tokenize.first&.value
+      return text unless word
+
+      @shell.expansion.expand_word(word, quoted: true).first.to_s
+    rescue LexError
+      text
     end
 
     def with_process_state
