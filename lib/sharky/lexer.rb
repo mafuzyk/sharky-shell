@@ -20,8 +20,10 @@ module Sharky
     NAME_START = /\A[A-Za-z_]\z/
     NAME_CHAR = /\A[A-Za-z0-9_]\z/
 
-    def initialize(source)
+    def initialize(source, compound: false)
       @source = source
+      # Opt-in until the parser consumes compound tokens instead of rejecting them.
+      @compound = compound
       @pos = 0
       @tokens = []
     end
@@ -42,8 +44,16 @@ module Sharky
         when "#"
           skip_comment
         when ";"
-          add(:semi)
-          @pos += 1
+          if @compound && peek == ";" && peek(2) == "&"
+            add(:case_continue)
+            @pos += 3
+          elsif @compound && peek == "&"
+            add(:case_break)
+            @pos += 2
+          else
+            add(:semi)
+            @pos += 1
+          end
         when "&"
           scan_ampersand
         when "|"
@@ -55,11 +65,56 @@ module Sharky
             @pos += 1
           end
         when "("
-          add(:lparen)
-          @pos += 1
+          if @compound && peek == "("
+            add(:arith_start)
+            @pos += 2
+          else
+            add(:lparen)
+            @pos += 1
+          end
         when ")"
-          add(:rparen)
-          @pos += 1
+          if @compound && peek == ")"
+            add(:arith_end)
+            @pos += 2
+          else
+            add(:rparen)
+            @pos += 1
+          end
+        when "!"
+          if @compound && bang_delimiter?
+            add(:bang)
+            @pos += 1
+          else
+            add_word
+          end
+        when "{"
+          if @compound && group_delimiter?
+            add(:lbrace)
+            @pos += 1
+          else
+            add_word
+          end
+        when "}"
+          if @compound && group_delimiter?
+            add(:rbrace)
+            @pos += 1
+          else
+            add_word
+          end
+        when "["
+          if @compound && peek == "["
+            add(:test_start)
+            @pos += 2
+          else
+            add_word
+          end
+        when "]"
+          if @compound && peek == "]"
+            add(:test_end)
+            @pos += 2
+          else
+            add_word
+          end
         when ">"
           scan_output_redirect(nil)
         when "<"
@@ -93,6 +148,20 @@ module Sharky
       OPERATOR_CHARS.include?(char)
     end
 
+    def bang_delimiter?
+      nxt = peek
+      nxt.nil? || (operator_char?(nxt) && nxt != "(")
+    end
+
+    def group_delimiter?
+      nxt = peek
+      nxt.nil? || operator_char?(nxt)
+    end
+
+    def word_break?(char)
+      operator_char?(char) || (@compound && char == "]" && peek == "]")
+    end
+
     def add(type, value = nil, pos: @pos)
       @tokens << Token.new(type: type, value: value, pos: pos)
     end
@@ -115,6 +184,9 @@ module Sharky
       if peek == "&"
         add(:and_if)
         @pos += 2
+      elsif peek == ">" && peek(2) == ">" && @compound
+        add(:redir_both_append)
+        @pos += 3
       elsif peek == ">"
         add(:redir_both)
         @pos += 2
@@ -161,8 +233,21 @@ module Sharky
 
     def scan_input_redirect(fd)
       pos = @pos
-      add(:redir_in, fd, pos: pos)
-      @pos += 1
+      if @compound && peek == "<" && peek(2) == "<"
+        add(:here_string, fd, pos: pos)
+        @pos += 3
+      elsif @compound && peek == "<"
+        if peek(2) == "-"
+          add(:heredoc_strip, fd, pos: pos)
+          @pos += 3
+        else
+          add(:heredoc, fd, pos: pos)
+          @pos += 2
+        end
+      else
+        add(:redir_in, fd, pos: pos)
+        @pos += 1
+      end
     end
 
     def scan_word
@@ -170,7 +255,7 @@ module Sharky
       parts = []
 
       while (char = current)
-        break if operator_char?(char)
+        break if word_break?(char)
 
         case char
         when "'"
