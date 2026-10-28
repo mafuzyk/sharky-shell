@@ -32,11 +32,11 @@ class CLIScriptTest < Minitest::Test
 
   def test_source_persists_env_and_sets_source_args
     sourced = script("lib.sh", "SOURCED=yes\nprintf 's:%s' \"$1\"\n")
-    command = "source #{Shellwords.escape(sourced)} arg; printf '|%s' \"$SOURCED\""
+    command = "source #{Shellwords.escape(sourced)} arg; printf '|%s|%s' \"$SOURCED\" \"$1\""
     out, err, status = run_sharky("-c", command)
 
     assert_equal 0, status.exitstatus
-    assert_equal "s:arg|yes", out
+    assert_equal "s:arg|yes|", out
     assert_empty err
   end
 
