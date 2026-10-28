@@ -103,6 +103,23 @@ sharky does not intercept or emulate Bash scripts. An executable script without 
 - `Sharky.sh("line")` and `Sharky.capture("line")` use the parser and executor.
 - `Sharky.cwd`, `Sharky.env`, `Sharky.last_status` and `Sharky.pid` expose shell state.
 
+## Performance
+
+Startup is dominated by the Ruby VM, not by shell work. On the reference
+machine (Arch Linux, NTFS checkout):
+
+| Command | Median |
+| --- | ---: |
+| `bash -c true` | ~1 ms |
+| `fish --no-config -c true` | ~2 ms |
+| `ruby --disable-gems -e ''` | ~7 ms |
+| `sharky --no-config -c true` | ~36 ms |
+
+Fish's interactive startup is commonly in the 20–30 ms range; sharky is in that
+range, not Bash's. sharky does **not** claim to be the fastest shell. The v1
+budget is startup under 50 ms and prompt p95 under 20 ms, with no external
+process in the default path.
+
 ## Tests and benchmarks
 
 ~~~sh
