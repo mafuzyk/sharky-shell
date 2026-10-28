@@ -78,7 +78,7 @@ class LexerTest < Minitest::Test
 
   def test_compound_test_delimiters
     assert_equal [:test_start, :word, :word, :test_end, :eof], compound_lex("[[ -n x ]]").map(&:type)
-    assert_equal [:test_start, :word, :test_end, :eof], compound_lex("[[x]]").map(&:type)
+    assert_equal [:word, :eof], compound_lex("[[x]]").map(&:type)
   end
 
   def test_single_brackets_stay_words

@@ -41,6 +41,27 @@ class ExpansionTest < Minitest::Test
     assert_equal [File.join(@tmp, "*.nope")], expansion.expand_word(word(lit(File.join(@tmp, "*.nope"))))
   end
 
+  def test_escaped_glob_characters_stay_literal
+    File.write(File.join(@tmp, "lexer.rb"), "")
+    parsed = Sharky::Lexer.new(%q{lexer.\?\?}).tokenize.first.value
+
+    assert_equal ["lexer.??"], expansion.expand_word(parsed)
+  end
+
+  def test_escaped_braces_stay_literal
+    parsed = Sharky::Lexer.new(%q(\{a,b\})).tokenize.first.value
+
+    assert_equal ["{a,b}"], expansion.expand_word(parsed)
+  end
+
+  def test_escaped_characters_do_not_disable_neighboring_globs
+    File.write(File.join(@tmp, "a?.txt"), "")
+    File.write(File.join(@tmp, "ab.txt"), "")
+    parsed = Sharky::Lexer.new(%q{*\?.txt}).tokenize.first.value
+
+    assert_equal ["a?.txt"], expansion.expand_word(parsed)
+  end
+
   def test_tilde_and_command_substitution
     prog = Sharky::AST::Program.new(lines: [])
     assert_equal [@tmp], expansion(env: { "HOME" => @tmp }).expand_word(word(Sharky::AST::Part.new(type: :tilde, value: "")))
@@ -63,6 +84,14 @@ class ExpansionTest < Minitest::Test
     assert_equal ["value"], expansion(env: { "X" => "value" }).expand_word(word(parameter("X")), quoted: true)
     assert_equal ["fallback"], expansion(env: {}).expand_word(word(parameter("X", operator: :default, argument: "fallback")), quoted: true)
     assert_equal ["value"], expansion(env: { "X" => "value" }).expand_word(word(parameter("X", operator: :default, argument: "fallback")), quoted: true)
+  end
+
+  def test_quoted_closing_braces_do_not_end_parameter_expansion
+    single = Sharky::Lexer.new(%q(${X:-'}'})).tokenize.first.value
+    double = Sharky::Lexer.new(%q(${X:-"}"})).tokenize.first.value
+
+    assert_equal ["}"], expansion.expand_word(single)
+    assert_equal ["}"], expansion.expand_word(double)
   end
 
   def test_braced_parameter_assign_and_alternate

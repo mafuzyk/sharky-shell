@@ -58,9 +58,10 @@ class ParserTest < Minitest::Test
 
   def test_subshell_and_redirect_descriptor
     program = parse("(cd /tmp; pwd) 2>&1")
-    simple = program.lines.first.list.entries.first[1].first.commands.first
-    assert_instance_of Sharky::AST::Subshell, simple
-    redirect = simple.list.entries.last[1].first.commands.first.redirects.first
+    redirected = first_command(program)
+    assert_instance_of Sharky::AST::Redirected, redirected
+    assert_instance_of Sharky::AST::Subshell, redirected.command
+    redirect = redirected.redirects.first
     assert_equal [2, 1], [redirect.fd, redirect.target]
   end
 

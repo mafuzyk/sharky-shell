@@ -35,6 +35,12 @@ class CompoundExecutionTest < Minitest::Test
     assert_equal "nested\n", @stdout.string
   end
 
+  def test_multiple_assignments_without_a_command_persist
+    assert_equal 0, run_compound(%q{A=1 B=2; printf '%s|%s\n' "$A" "$B"})
+    assert_equal "1|2\n", @stdout.string
+    assert_equal "", @stderr.string
+  end
+
   def test_for_loop
     run_compound("for x in a b; do printf '%s' \"$x\"; done")
     assert_equal "ab", @stdout.string
@@ -93,6 +99,12 @@ class CompoundExecutionTest < Minitest::Test
     assert_equal "hello\n", @stdout.string
   end
 
+  def test_here_document_body_is_not_lexed_as_shell_syntax
+    assert_equal 0, run_compound("cat <<'EOF'\n'\nEOF\nprintf after")
+    assert_equal "'\nafter", @stdout.string
+    assert_equal "", @stderr.string
+  end
+
   def test_here_document_quoted_delimiter_does_not_expand
     @shell.env["X"] = "world"
     run_compound("cat <<'EOF'\nhello $X\nEOF\n")
@@ -101,6 +113,20 @@ class CompoundExecutionTest < Minitest::Test
     @stdout.rewind
     run_compound("cat <<EOF\nhello $X\nEOF\n")
     assert_equal "hello world\n", @stdout.string
+  end
+
+  def test_here_document_unquoted_variable_delimiter_is_literal
+    @shell.env["X"] = "EOF"
+
+    status = run_compound(<<~SH)
+      cat <<$X
+      hi
+      $X
+    SH
+
+    assert_equal 0, status
+    assert_equal "hi\n", @stdout.string
+    assert_equal "", @stderr.string
   end
 
   def test_here_string_appends_newline
@@ -161,6 +187,12 @@ class CompoundExecutionTest < Minitest::Test
     assert_equal "outerxouter", @stdout.string
   end
 
+  def test_subshell_redirect_covers_every_command
+    assert_equal 0, run_compound("(printf a; printf b) >/dev/null")
+    assert_equal "", @stdout.string
+    assert_equal "", @stderr.string
+  end
+
   def test_compound_trailing_redirections
     file = File.join(@tmp, "compound-out")
     assert_equal 0, run_compound("if true; then echo redirected; fi > #{file}")
@@ -191,6 +223,49 @@ class CompoundExecutionTest < Minitest::Test
     file = File.join(@tmp, "background-compound")
     assert_equal 0, run_compound("if true; then echo background; fi > #{file} & wait")
     assert_equal "background\n", File.read(file)
+  end
+
+  def test_command_substitution_inherits_compound_mode
+    assert_equal 0, run_compound(%q{printf '%s\n' "$(if true; then printf yes; fi)"})
+    assert_equal "yes\n", @stdout.string
+    assert_equal "", @stderr.string
+  end
+
+  def test_and_or_allows_newlines_after_the_operator
+    assert_equal 0, run_compound("true &&\nprintf yes; false ||\nprintf no")
+    assert_equal "yesno", @stdout.string
+    assert_equal "", @stderr.string
+  end
+
+  def test_pipeline_allows_newlines_after_the_operator
+    assert_equal 0, run_compound("printf piped |\ncat")
+    assert_equal "piped", @stdout.string
+    assert_equal "", @stderr.string
+  end
+
+  def test_subshell_accepts_multiple_lines
+    assert_equal 0, run_compound("(\nprintf a\n\nprintf b\n)")
+    assert_equal "ab", @stdout.string
+    assert_equal "", @stderr.string
+  end
+
+  def test_adjacent_subshell_closers_are_not_arithmetic_delimiters
+    assert_equal 0, run_compound("( (printf nested))")
+    assert_equal "nested", @stdout.string
+    assert_equal 0, run_compound("((1 + ((2))))")
+    assert_equal "", @stderr.string
+  end
+
+  def test_bang_and_open_brace_can_be_command_arguments
+    assert_equal 0, run_compound(%q(printf '%s\n' ! {))
+    assert_equal "!\n{\n", @stdout.string
+    assert_equal "", @stderr.string
+  end
+
+  def test_double_brackets_inside_an_argument_are_not_a_test_command
+    assert_equal 0, run_compound(%q{printf '%s\n' [[foo]]})
+    assert_equal "[[foo]]\n", @stdout.string
+    assert_equal "", @stderr.string
   end
 
   def test_default_shell_run_stays_legacy

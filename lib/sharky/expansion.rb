@@ -152,7 +152,7 @@ module Sharky
       case part.type
       when :literal
         [chunk(part.value, split: false, glob: !quoted)]
-      when :single
+      when :single, :escaped
         [chunk(part.value, split: false, glob: false, quoted_empty: part.value.empty?)]
       when :double
         inner = part.value.flat_map { |child| expand_part(child, quoted: true) }

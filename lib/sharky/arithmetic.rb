@@ -59,7 +59,7 @@ module Sharky
     def parse_or
       value = parse_and
       while accept("||")
-        right = parse_and
+        right = with_short_circuit(truthy?(value)) { parse_and }
         value = truthy?(value) || truthy?(right) ? 1 : 0
       end
       value
@@ -68,15 +68,33 @@ module Sharky
     def parse_and
       value = parse_comparison
       while accept("&&")
-        right = parse_comparison
+        right = with_short_circuit(!truthy?(value)) { parse_comparison }
         value = truthy?(value) && truthy?(right) ? 1 : 0
       end
       value
     end
 
+    def with_short_circuit(skip)
+      previous = @skipping
+      @skipping ||= skip
+      yield
+    ensure
+      @skipping = previous
+    end
+
     def parse_comparison
+      value = parse_relation
+      while (operator = current) && %w[== !=].include?(operator)
+        advance
+        right = parse_relation
+        value = compare(value, operator, right)
+      end
+      value
+    end
+
+    def parse_relation
       value = parse_add
-      while (operator = current) && %w[== != < <= > >=].include?(operator)
+      while (operator = current) && %w[< <= > >=].include?(operator)
         advance
         right = parse_add
         value = compare(value, operator, right)
@@ -99,14 +117,16 @@ module Sharky
       while (token = current) && %w[* / %].include?(token)
         advance
         right = parse_unary
+        next if @skipping
+
         case token
         when "*" then value *= right
         when "/"
           error("division by zero") if right.zero?
-          value /= right
+          value = value.quo(right).truncate
         when "%"
           error("division by zero") if right.zero?
-          value %= right
+          value = value.remainder(right)
         end
       end
       value

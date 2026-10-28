@@ -26,6 +26,7 @@ module Sharky
       @compound = compound
       @pos = 0
       @tokens = []
+      @heredocs = []
     end
 
     def tokenize
@@ -41,6 +42,7 @@ module Sharky
         when "\n"
           add(:newline)
           @pos += 1
+          skip_heredoc_bodies
         when "#"
           skip_comment
         when ";"
@@ -65,18 +67,22 @@ module Sharky
             @pos += 1
           end
         when "("
-          if @compound && peek == "("
+          if @compound && peek == "(" && @arithmetic_depth.nil?
             add(:arith_start)
+            @arithmetic_depth = 0
             @pos += 2
           else
+            @arithmetic_depth += 1 if @arithmetic_depth
             add(:lparen)
             @pos += 1
           end
         when ")"
-          if @compound && peek == ")"
+          if @arithmetic_depth == 0 && peek == ")"
             add(:arith_end)
+            @arithmetic_depth = nil
             @pos += 2
           else
+            @arithmetic_depth -= 1 if @arithmetic_depth&.positive?
             add(:rparen)
             @pos += 1
           end
@@ -102,15 +108,17 @@ module Sharky
             add_word
           end
         when "["
-          if @compound && peek == "["
+          if @compound && peek == "[" && (peek(2).nil? || operator_char?(peek(2)))
             add(:test_start)
+            @test_command = true
             @pos += 2
           else
             add_word
           end
         when "]"
-          if @compound && peek == "]"
+          if @test_command && peek == "]"
             add(:test_end)
+            @test_command = false
             @pos += 2
           else
             add_word
@@ -159,7 +167,7 @@ module Sharky
     end
 
     def word_break?(char)
-      operator_char?(char) || (@compound && char == "]" && peek == "]")
+      operator_char?(char) || (@test_command && char == "]" && peek == "]")
     end
 
     def add(type, value = nil, pos: @pos)
@@ -168,8 +176,33 @@ module Sharky
 
     def add_word
       start = @pos
+      redirect = @tokens.last
       word = scan_word
+      if [:heredoc, :heredoc_strip].include?(redirect&.type)
+        delimiter = word.parts.map do |part|
+          part.type == :double ? part.value.map(&:value).join : part.value
+        end.join
+        @heredocs << [delimiter, redirect.type == :heredoc_strip]
+      end
       add(:word, word, pos: start)
+    end
+
+    def skip_heredoc_bodies
+      @heredocs.each do |delimiter, strip_tabs|
+        while @pos < @source.length
+          line_end = @source.index("\n", @pos) || @source.length
+          line = @source[@pos...line_end]
+          line = line.sub(/\A\t+/, "") if strip_tabs
+          @pos = line_end
+          if line == delimiter
+            add(:newline) if current == "\n"
+            @pos += 1 if current == "\n"
+            break
+          end
+          @pos += 1 if current == "\n"
+        end
+      end
+      @heredocs.clear
     end
 
     def skip_blanks
@@ -311,7 +344,7 @@ module Sharky
       if char == "\n"
         @pos += 1
       else
-        append_literal(parts, char)
+        parts << AST::Part.new(type: :escaped, value: char, pos: pos)
         @pos += 1
       end
     end
@@ -416,9 +449,19 @@ module Sharky
       start = @pos + 1
       index = start
       depth = 0
+      quote = nil
 
       while index < @source.length
-        if @source[index] == "$" && @source[index + 1] == "{"
+        char = @source[index]
+        if char == "\\" && quote != "'"
+          index += 2
+        elsif quote
+          quote = nil if char == quote
+          index += 1
+        elsif ["'", '"'].include?(char)
+          quote = char
+          index += 1
+        elsif char == "$" && @source[index + 1] == "{"
           depth += 1
           index += 2
         elsif @source[index] == "}"

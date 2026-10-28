@@ -149,6 +149,7 @@ module Sharky
       while at?(:and_if, :or_if)
         op = at?(:and_if) ? :and : :or
         advance
+        skip_newlines
         rest << [op, parse_pipeline]
       end
 
@@ -162,7 +163,10 @@ module Sharky
       end
 
       commands = [parse_command]
-      commands << parse_command while consume(:pipe)
+      while consume(:pipe)
+        skip_newlines
+        commands << parse_command
+      end
 
       AST::Pipeline.new(commands: commands)
     end
@@ -186,7 +190,7 @@ module Sharky
                   at?(:lparen) ? parse_subshell : parse_simple_command
                 end
 
-      return command if command.is_a?(AST::Simple) || command.is_a?(AST::Subshell)
+      return command if command.is_a?(AST::Simple)
 
       redirects = []
       redirects << parse_redirect while REDIRECT_TYPES.include?(type)
@@ -529,7 +533,7 @@ module Sharky
           word = token.value
           assignment = assignment_for(word)
 
-          if words.empty? && assignments.empty? && assignment
+          if words.empty? && assignment
             advance
             assignment.array = parse_array_elements if at?(:lparen)
             assignments << assignment
@@ -538,6 +542,11 @@ module Sharky
             advance
             words << convert_word(word)
           end
+        elsif !words.empty? && at?(:bang, :lbrace)
+          token = advance
+          text = token.type == :bang ? "!" : "{"
+          part = AST::Part.new(type: :literal, value: text, pos: token.pos)
+          words << AST::Word.new(parts: [part], pos: token.pos)
         elsif REDIRECT_TYPES.include?(type)
           redirects << parse_redirect
         else
@@ -558,7 +567,14 @@ module Sharky
 
     def parse_subshell
       advance
+      skip_newlines
       list = parse_list
+      while at?(:newline)
+        skip_newlines
+        break if at?(:rparen, :eof)
+
+        list.entries.concat(parse_list.entries)
+      end
 
       unless at?(:rparen)
         raise ParseError.new("unclosed subshell", pos: current.pos, incomplete: true) if at?(:eof, :newline)
@@ -567,26 +583,7 @@ module Sharky
       end
       advance
 
-      redirects = []
-      redirects << parse_redirect while REDIRECT_TYPES.include?(type)
-      subshell = AST::Subshell.new(list: list)
-      attach_redirects(subshell, redirects)
-      subshell
-    end
-
-    def attach_redirects(subshell, redirects)
-      return if redirects.empty?
-
-      entry = subshell.list.entries.last
-      return unless entry
-
-      command = entry[1].first.commands.last
-      case command
-      when AST::Simple
-        command.redirects.concat(redirects)
-      when AST::Subshell
-        attach_redirects(command, redirects)
-      end
+      AST::Subshell.new(list: list)
     end
 
     def parse_redirect
@@ -620,12 +617,13 @@ module Sharky
     end
 
     def heredoc_delimiter(word)
-      delimiter = word.parts.map do |part|
-        part.type == :double ? part.value.map(&:value).join : part.value
-      end.join
       raw_end = current&.pos || @source.length
-      raw = @source[word.pos...raw_end]
+      raw = @source[word.pos...raw_end].to_s.strip
       quoted = raw.include?("'") || raw.include?('"') || raw.include?("\\")
+      if raw.length >= 2 && ["'", '"'].include?(raw[0]) && raw[-1] == raw[0]
+        raw = raw[1...-1]
+      end
+      delimiter = raw.gsub(/\\(.)/m, '\1')
       [delimiter, quoted]
     end
 
@@ -746,7 +744,7 @@ module Sharky
     def convert_part(part)
       case part.type
       when :cmdsub
-        AST::Part.new(type: :cmdsub, value: self.class.parse(part.value), pos: part.pos)
+        AST::Part.new(type: :cmdsub, value: self.class.parse(part.value, compound: @compound), pos: part.pos)
       when :double
         inner = part.value.map { |child| convert_part(child) }
         AST::Part.new(type: :double, value: inner, pos: part.pos)
