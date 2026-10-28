@@ -108,6 +108,37 @@ class CompoundExecutionTest < Minitest::Test
     assert_equal "hello\n", @stdout.string
   end
 
+  def reset_stdout
+    @stdout.truncate(0)
+    @stdout.rewind
+  end
+
+  def test_break_and_continue
+    run_compound("for x in a b c; do [ \"$x\" = b ] && break; printf '%s' \"$x\"; done")
+    assert_equal "a", @stdout.string
+    reset_stdout
+
+    run_compound("for x in a b c; do [ \"$x\" = b ] && continue; printf '%s' \"$x\"; done")
+    assert_equal "ac", @stdout.string
+  end
+
+  def test_break_two_levels
+    run_compound("for x in a b; do for y in 1 2; do break 2; done; echo no; done; echo done")
+    assert_equal "done\n", @stdout.string
+  end
+
+  def test_return_from_function
+    assert_equal 7, run_compound("f() { echo before; return 7; echo after; }; f")
+    assert_equal "before\n", @stdout.string
+  end
+
+  def test_control_flow_misuse_is_status_one
+    assert_equal 1, run_compound("break")
+    assert_match(/break: only meaningful in a loop/, @stderr.string)
+    assert_equal 1, run_compound("return 3")
+    assert_match(/return: only meaningful in a function/, @stderr.string)
+  end
+
   def test_default_shell_run_stays_legacy
     assert_equal 2, @shell.run("if true; then echo no; fi")
   end

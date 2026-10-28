@@ -93,7 +93,19 @@ module Sharky
 
       words.each do |value|
         @shell.env[command.name] = value
-        status = execute_list(command.body, foreground: foreground)
+        begin
+          status = execute_list(command.body, foreground: foreground)
+        rescue ControlFlow::Continue => signal
+          signal.levels -= 1
+          raise if signal.levels.positive?
+
+          next
+        rescue ControlFlow::Break => signal
+          signal.levels -= 1
+          raise if signal.levels.positive?
+
+          break
+        end
         break if @shell.exit_requested?
       end
 
@@ -107,7 +119,19 @@ module Sharky
         break if command.until_form ? condition.zero? : !condition.zero?
         break if @shell.exit_requested?
 
-        status = execute_list(command.body, foreground: foreground)
+        begin
+          status = execute_list(command.body, foreground: foreground)
+        rescue ControlFlow::Continue => signal
+          signal.levels -= 1
+          raise if signal.levels.positive?
+
+          next
+        rescue ControlFlow::Break => signal
+          signal.levels -= 1
+          raise if signal.levels.positive?
+
+          break
+        end
         break if @shell.exit_requested?
       end
       status
@@ -250,10 +274,14 @@ module Sharky
         if function_error
           report_function_error(name, function_error)
         elsif function.is_a?(AST::List)
-          with_assignments(values) do
-            with_redirections(fd_map, files) do
-              execute_list(function, foreground: foreground)
+          begin
+            with_assignments(values) do
+              with_redirections(fd_map, files) do
+                execute_list(function, foreground: foreground)
+              end
             end
+          rescue ControlFlow::Return => signal
+            signal.status
           end
         elsif function
           execute_function(name, function, argv, values, fd_map, files)
@@ -299,6 +327,8 @@ module Sharky
       end
       @shell.stdout.flush if @shell.stdout.respond_to?(:flush)
       status
+    rescue ControlFlow::Return => signal
+      signal.status
     rescue StandardError, ScriptError => error
       report_function_error(name, error)
     ensure

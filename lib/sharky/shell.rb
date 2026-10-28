@@ -73,6 +73,15 @@ module Sharky
     rescue Arithmetic::Error => error
       @stderr.puts("sharky: #{error.message}")
       mark_status(1)
+    rescue ControlFlow::Break
+      @stderr.puts("sharky: break: only meaningful in a loop")
+      mark_status(1)
+    rescue ControlFlow::Continue
+      @stderr.puts("sharky: continue: only meaningful in a loop")
+      mark_status(1)
+    rescue ControlFlow::Return
+      @stderr.puts("sharky: return: only meaningful in a function")
+      mark_status(1)
     ensure
       reap_jobs
     end

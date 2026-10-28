@@ -74,6 +74,15 @@ module Sharky
       rescue ArgumentError
         shell.stderr.puts("sharky: exit: #{argv.first}: numeric argument required")
         shell.request_exit(2)
+      end,
+      "break" => lambda do |shell, argv, _stdin|
+        Builtins.break_builtin(shell, argv)
+      end,
+      "continue" => lambda do |shell, argv, _stdin|
+        Builtins.continue_builtin(shell, argv)
+      end,
+      "return" => lambda do |shell, argv, _stdin|
+        Builtins.return_builtin(shell, argv)
       end
     }.freeze
 
@@ -298,6 +307,42 @@ module Sharky
       end
       status
     end
+
+    def self.break_builtin(shell, argv)
+      levels = control_level(shell, "break", argv)
+      return 1 unless levels
+
+      raise ControlFlow::Break.new(levels)
+    end
+
+    def self.continue_builtin(shell, argv)
+      levels = control_level(shell, "continue", argv)
+      return 1 unless levels
+
+      raise ControlFlow::Continue.new(levels)
+    end
+
+    def self.return_builtin(shell, argv)
+      status = argv.empty? ? shell.last_status : Integer(argv.first, 10)
+      raise ControlFlow::Return.new(status)
+    rescue ArgumentError
+      shell.stderr.puts("sharky: return: #{argv.first}: numeric argument required")
+      1
+    end
+
+    def self.control_level(shell, name, argv)
+      return 1 if argv.empty?
+
+      level = Integer(argv.first, 10)
+      return level if level.positive?
+
+      shell.stderr.puts("sharky: #{name}: #{argv.first}: invalid level")
+      nil
+    rescue ArgumentError
+      shell.stderr.puts("sharky: #{name}: #{argv.first}: numeric argument required")
+      nil
+    end
+    private_class_method :control_level
 
     def self.executable_path(shell, name)
       if name.include?("/")
