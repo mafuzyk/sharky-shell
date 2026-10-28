@@ -164,9 +164,11 @@ process in the default path.
 ruby test/run.rb
 ruby bench/startup.rb
 ruby bench/parser.rb
+ruby bench/soak.rb
 ~~~
 
-Benchmarks print their results and do not assert in CI.
+The suite includes a Bash conformance matrix and PTY tests. Benchmarks print
+their results; the CI soak job runs repeated command and PTY sessions.
 
 ## Roadmap
 

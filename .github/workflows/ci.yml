@@ -4,6 +4,7 @@ on:
   push:
     branches: [main, v1]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -22,7 +23,32 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ matrix.ruby }}
-      - name: Unit, acceptance and PTY suite
+      - name: Unit, acceptance, conformance and PTY suite
         run: ruby test/run.rb
       - name: Warning check
         run: ruby -w test/run.rb
+
+  test-arm64:
+    name: Ruby 3.4 arm64 (best effort)
+    runs-on: ubuntu-24.04-arm
+    continue-on-error: true
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+      - name: Unit, acceptance, conformance and PTY suite
+        run: ruby test/run.rb
+
+  soak:
+    name: soak
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+      - name: Repeated process and PTY soak
+        run: ruby bench/soak.rb
