@@ -28,7 +28,7 @@ make install PREFIX="$HOME/.local"
 make install DESTDIR="$pkgdir" PREFIX=/usr
 ~~~
 
-This installs `bin/sharky`, `lib/sharky.rb` and `lib/sharky/*.rb`; the installed binary no longer depends on the source checkout. Remove with:
+This installs `bin/sharky`, `lib/sharky.rb`, `lib/sharky/*.rb` and `man/man1/sharky.1`; the installed binary no longer depends on the source checkout. Read the manual with `man sharky` (or `man -l man/sharky.1` from a checkout). Remove with:
 
 ~~~sh
 make uninstall PREFIX="$HOME/.local"
@@ -40,6 +40,8 @@ For a throwaway checkout without installing, symlink `bin/sharky` and keep the s
 mkdir -p ~/.local/bin
 ln -s "$PWD/bin/sharky" ~/.local/bin/sharky
 ~~~
+
+Build a source tarball with `make dist`; the Arch recipe is `packaging/PKGBUILD`.
 
 ## First run
 

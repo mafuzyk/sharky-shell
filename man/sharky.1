@@ -1,0 +1,115 @@
+.TH SHARKY 1 "2026-10-28" "sharky 0.1.0" "User Commands"
+.SH NAME
+sharky \- Unix-first interactive shell written in Ruby
+.SH SYNOPSIS
+.B sharky
+[\fB\-\-no-config\fR] [\fB\-i\fR]
+.br
+.B sharky
+\fB\-c\fR \fICOMMAND\fR [\fIARG\fR...]
+.br
+.B sharky
+\fISCRIPT\fR [\fIARG\fR...]
+.br
+.B sharky
+\fB\-\-version\fR | \fB\-\-help\fR
+.br
+.B sharky
+\fB\-\-json\fR \fB\-c\fR \fICOMMAND\fR
+.br
+.B sharky
+\fBstate\fR [\fB\-\-json\fR] [\fB\-\-env\fR]
+.SH DESCRIPTION
+.B sharky
+is an interactive shell that owns its parser, expansion engine, executor,
+editor, prompt, completion and job control. Commands run as real Unix
+processes. It is written in Ruby 3.4 using only the standard library and
+default gems.
+.PP
+A native Bash-like subset is supported in \fB\-c\fR, in scripts ending in
+\fB.sh\fR, through a \fB#!/usr/bin/env sharky\fR shebang, and in the interactive
+editor. Login-shell support is deliberately post-v1.
+.SH OPTIONS
+.TP
+.B \-c \fICOMMAND\fR
+Run one shell command string and exit with its status.
+.TP
+.B \-i
+Start interactively (requires a TTY).
+.TP
+.B \-\-no-config
+Do not load the configuration directory.
+.TP
+.B \-\-json
+With \fB\-c\fR, emit one JSON object on stdout containing status, stdout,
+stderr, duration, cwd and environment delta.
+.TP
+.B \-\-version
+Print the version and exit.
+.TP
+.B \-\-help
+Print usage and exit.
+.SH LANGUAGE SUBSET
+Supported: quoting, variables, positional parameters, parameter expansion
+(defaults, assignment, alternate, length, trim, substitution), arithmetic
+expansion and commands, brace expansion, indexed arrays, globs, command
+substitution, lists, pipes, redirects, here-documents, here-strings,
+subshells, background jobs, \fBif/elif/else\fR, \fBfor\fR, \fBwhile\fR,
+\fBuntil\fR, \fBcase\fR, functions, groups, \fB!\fR, \fB[[ ]]\fR, \fBtrap\fR
+(EXIT action executes), \fBbreak\fR, \fBcontinue\fR and \fBreturn\fR.
+.PP
+Builtins include \fBcd\fR, \fBpwd\fR, \fBexport\fR, \fBsource\fR, \fB.\fR,
+\fBset\fR, \fBread\fR, \fBshift\fR, \fBjobs\fR, \fBfg\fR, \fBbg\fR, \fBwait\fR,
+\fBkill\fR, \fBalias\fR, \fBunalias\fR, \fBtype\fR, \fBhistory\fR, \fBz\fR and
+\fBexit\fR.
+.PP
+Not supported in v1: full Bash/POSIX, \fBcoproc\fR, process substitution,
+extended globs, associative arrays, array slices, programmable completion,
+full \fB[[ =~ ]]\fR and login-shell installation.
+.SH SCRIPTS
+A file named \fB*.sh\fR, or a file whose first line is
+\fB#!/usr/bin/env sharky\fR, runs through the native parser. The script path is
+\fB$0\fR; arguments become \fB$1\fR, \fB$2\fR, ...; \fB$#\fR is the count.
+\fBsource FILE [ARG...]\fR (or \fB. FILE\fR) runs a file in the current shell.
+.SH CONFIGURATION
+The configuration directory is \fB$SHARKY_CONFIG\fR or
+\fB${XDG_CONFIG_HOME:-~/.config}/sharky\fR. It contains \fBsharky.rb\fR,
+\fBthemes/*.toml\fR and \fBfunctions/*.rb\fR. \fBinit.rb\fR is accepted as a
+legacy fallback.
+.SH ENVIRONMENT
+.TP
+.B SHARKY_CONFIG
+Override the configuration directory.
+.TP
+.B SHARKY_DEBUG
+Set to \fB1\fR for Ruby script backtraces.
+.SH FILES
+.TP
+.I ~/.config/sharky/sharky.rb
+User configuration.
+.TP
+.I ~/.local/share/sharky/history
+Command history.
+.SH JSON
+\fBsharky --json -c CMD\fR writes exactly one object:
+.nf
+{"schema_version":1,"status":0,"stdout":"","stderr":"",
+ "duration_ms":1,"cwd":"/tmp","env_delta":{}}
+.fi
+\fBsharky state --json\fR writes schema_version, cwd, last_status and pid.
+Pass \fB--env\fR to include the full environment explicitly; it is omitted by
+default so secrets do not leak into logs.
+.SH JOBS
+Background commands are launched in their own process group. \fBjobs\fR
+lists them, \fBfg\fR/\fBbg\fR resume them, \fBkill %N\fR signals a job and
+\fBwait\fR reaps it. Ctrl-Z stops the foreground group; Ctrl-C interrupts it.
+.SH LIMITATIONS
+This is not a Bash replacement. Unsupported syntax is rejected with status 2
+and a precise message; sharky never silently invokes Bash for a script.
+Signal traps are stored but only the EXIT trap runs in v1.
+.SH SEE ALSO
+.BR bash (1),
+.BR sh (1),
+.BR ruby (1)
+.SH AUTHOR
+sharky is distributed under GPL-3.0-only.
