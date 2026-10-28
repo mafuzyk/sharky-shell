@@ -18,14 +18,28 @@ sharky is not a login shell in v0.1. Start it from Bash or another shell and tes
 
 ## Install
 
-Put `bin/sharky` on `PATH` with a symlink or a small wrapper:
+Install into a prefix (default `/usr/local`):
+
+~~~sh
+make install
+# user-local:
+make install PREFIX="$HOME/.local"
+# packaging:
+make install DESTDIR="$pkgdir" PREFIX=/usr
+~~~
+
+This installs `bin/sharky`, `lib/sharky.rb` and `lib/sharky/*.rb`; the installed binary no longer depends on the source checkout. Remove with:
+
+~~~sh
+make uninstall PREFIX="$HOME/.local"
+~~~
+
+For a throwaway checkout without installing, symlink `bin/sharky` and keep the source tree in place:
 
 ~~~sh
 mkdir -p ~/.local/bin
 ln -s "$PWD/bin/sharky" ~/.local/bin/sharky
 ~~~
-
-Make sure `~/.local/bin` is on `PATH`. The source checkout must stay in place because `bin/sharky` loads `lib/` from it.
 
 ## First run
 
