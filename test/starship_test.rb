@@ -48,6 +48,47 @@ class StarshipTest < Minitest::Test
     assert_equal File.realpath(@tmp), File.realpath(record["cwd"])
   end
 
+  def test_explicit_environment_is_used_without_inheriting_removed_variables
+    marker = "SHARKY_STARSHIP_MARKER"
+    removed = "SHARKY_STARSHIP_REMOVED"
+    previous = [ENV[marker], ENV[removed]]
+    ENV[marker] = "ruby"
+    ENV[removed] = "not-in-shell"
+    config = File.join(@tmp, "explicit.toml")
+    env = {
+      "HOME" => File.join(@tmp, "shell-home"),
+      "PWD" => "/stale-directory",
+      marker => "shell",
+      "STARSHIP_SHELL" => "bash",
+      "STARSHIP_CONFIG" => "old.toml"
+    }
+    write_fake(body: <<~RUBY)
+      #!#{RbConfig.ruby}
+      require "json"
+      STDOUT.write(JSON.generate(
+        "home" => ENV["HOME"], "pwd" => ENV["PWD"], "cwd" => Dir.pwd,
+        "marker" => ENV[#{marker.dump}], "removed" => ENV[#{removed.dump}],
+        "shell" => ENV["STARSHIP_SHELL"], "config" => ENV["STARSHIP_CONFIG"]
+      ))
+    RUBY
+
+    output = JSON.parse(Sharky::Starship.prompt(@context, command: @fake, env: env, config: config))
+
+    assert_equal env["HOME"], output["home"]
+    assert_equal @tmp, output["pwd"]
+    assert_equal File.realpath(@tmp), File.realpath(output["cwd"])
+    assert_equal "shell", output["marker"]
+    assert_nil output["removed"]
+    assert_equal "sharky", output["shell"]
+    assert_equal config, output["config"]
+    assert_equal "/stale-directory", env["PWD"]
+    assert_equal "bash", env["STARSHIP_SHELL"]
+    assert_equal "old.toml", env["STARSHIP_CONFIG"]
+    assert_equal "ruby", ENV[marker]
+  ensure
+    ENV[marker], ENV[removed] = previous if previous
+  end
+
   def test_omits_config_when_not_given
     write_fake
 
@@ -127,6 +168,29 @@ class StarshipTest < Minitest::Test
     assert_match(/timed out/, error.message)
     assert_operator monotonic - started, :<, 2
     assert wait_until { !alive?(record["child"]) }
+  end
+
+  def test_timeout_covers_readers_after_the_parent_exits
+    write_fake(body: <<~RUBY)
+      #!#{RbConfig.ruby}
+      require "json"
+      child = Process.spawn("sleep", "2")
+      File.write(#{@record.dump}, JSON.generate("child" => child))
+      puts "partial prompt"
+    RUBY
+    started = monotonic
+
+    error = assert_raises(Sharky::Starship::Error) do
+      Sharky::Starship.prompt(@context, command: @fake, timeout: 0.12)
+    end
+
+    assert_match(/timed out/, error.message)
+    assert_operator monotonic - started, :<, 0.6
+    assert wait_until { !alive?(record["child"]) }
+  ensure
+    if File.file?(@record)
+      Process.kill("KILL", record["child"]) rescue Errno::ESRCH
+    end
   end
 
   def test_requiring_the_module_does_not_spawn_starship

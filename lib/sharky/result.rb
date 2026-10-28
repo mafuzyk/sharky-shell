@@ -11,7 +11,7 @@ module Sharky
         stderr: stderr,
         duration_ms: duration_ms,
         cwd: cwd,
-        env_delta: env_delta.freeze,
+        env_delta: env_delta.to_h { |name, value| [name.dup.freeze, value&.dup&.freeze] }.freeze,
         schema_version: schema_version
       )
     end

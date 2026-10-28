@@ -113,6 +113,32 @@ class PromptTest < Minitest::Test
     assert_equal 1, first[:staged]
   end
 
+  def test_git_info_drains_large_stdout_and_stderr_while_waiting
+    git_dir = File.join(@tmp, ".git")
+    FileUtils.mkdir_p(git_dir)
+    File.write(File.join(git_dir, "HEAD"), "ref: refs/heads/fallback\n")
+    status_file = File.join(@tmp, "status")
+    records = "1 .M N... 100644 100644 100644 #{'a' * 40} #{'b' * 40} tracked\n" * 2000
+    File.write(status_file, "# branch.head large\n" + records)
+    fake = File.join(@tmp, "git")
+    File.write(fake, <<~RUBY)
+      #!#{RbConfig.ruby}
+      output = File.binread(#{status_file.dump})
+      STDOUT.write(output)
+      STDERR.write(output)
+    RUBY
+    File.chmod(0755, fake)
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+
+    info = Sharky::Prompt::Git.new(@tmp, git_command: fake).info
+
+    assert_equal "large", info[:branch]
+    assert_equal true, info[:dirty]
+    assert_equal 2000, info[:modified]
+    assert_equal 0, info[:staged]
+    assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 0.3
+  end
+
   def test_git_info_follows_worktree_gitdir_file
     git_dir = File.join(@tmp, "real-git")
     FileUtils.mkdir_p(File.join(git_dir, "refs", "heads"))

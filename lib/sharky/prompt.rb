@@ -112,6 +112,7 @@ module Sharky
       end
 
       def query_status
+        deadline = monotonic + TIMEOUT_SECONDS
         out_reader, out_writer = IO.pipe
         err_reader, err_writer = IO.pipe
         pid = Process.spawn(
@@ -122,13 +123,23 @@ module Sharky
         out_writer.close
         err_writer.close
 
-        status = wait_for(pid)
+        out_thread = Thread.new { out_reader.read }
+        err_thread = Thread.new { err_reader.read }
+        status = wait_for(pid, deadline)
         return nil unless status&.success?
 
-        parse_status(out_reader.read)
+        [out_thread, err_thread].each do |thread|
+          remaining = deadline - monotonic
+          unless remaining.positive? && thread.join(remaining)
+            kill_process_group(pid)
+            return nil
+          end
+        end
+        parse_status(out_thread.value)
       rescue SystemCallError, ArgumentError
         nil
       ensure
+        [out_thread, err_thread].compact.each { |thread| thread.kill.join }
         close_io(out_reader)
         close_io(out_writer)
         close_io(err_reader)
@@ -157,8 +168,7 @@ module Sharky
         info
       end
 
-      def wait_for(pid)
-        deadline = monotonic + TIMEOUT_SECONDS
+      def wait_for(pid, deadline)
         loop do
           result = Process.waitpid2(pid, Process::WNOHANG)
           return result[1] if result

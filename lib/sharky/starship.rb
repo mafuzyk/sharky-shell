@@ -26,8 +26,11 @@ module Sharky
         false
       end
 
-      def prompt(context, command: "starship", config: nil, timeout: DEFAULT_TIMEOUT)
-        env = { "STARSHIP_SHELL" => "sharky" }
+      def prompt(context, command: "starship", config: nil, timeout: DEFAULT_TIMEOUT, env: ENV.to_h)
+        cwd = context.cwd
+        cwd = Dir.pwd if cwd.nil? || cwd.to_s.empty?
+        cwd = File.expand_path(cwd)
+        env = env.merge("STARSHIP_SHELL" => "sharky", "PWD" => cwd)
         env["STARSHIP_CONFIG"] = config.to_s if config
         args = [
           "prompt",
@@ -35,7 +38,7 @@ module Sharky
           "--cmd-duration", context.duration_ms.to_i.to_s,
           "--jobs", context.jobs_count.to_i.to_s
         ]
-        output, error, status = capture(command, args, env, context.cwd, timeout)
+        output, error, status = capture(command, args, env, cwd, timeout)
 
         unless status.success?
           message = "starship prompt failed with exit status #{status.exitstatus || status.termsig}"
@@ -55,29 +58,25 @@ module Sharky
       end
 
       def capture(command, args, env, cwd, timeout)
-        output = +""
-        error = +""
-        status = nil
-        cwd = Dir.pwd if cwd.nil? || cwd.to_s.empty?
-
-        Open3.popen3(env, command, *args, chdir: cwd, pgroup: true) do |stdin, stdout, stderr, wait_thread|
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + Float(timeout)
+        Open3.popen3(env, command, *args, chdir: cwd, pgroup: true, unsetenv_others: true) do |stdin, stdout, stderr, wait_thread|
           stdin.close
           out_reader = Thread.new { stdout.read }
           err_reader = Thread.new { stderr.read }
+          threads = [wait_thread, out_reader, err_reader]
           begin
-            unless wait_thread.join(Float(timeout))
-              kill_group(wait_thread.pid)
-              wait_thread.join
-              raise Error, "starship prompt timed out after #{timeout}s"
+            threads.each do |thread|
+              remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+              unless remaining.positive? && thread.join(remaining)
+                raise Error, "starship prompt timed out after #{timeout}s"
+              end
             end
-            status = wait_thread.value
+            [out_reader.value, err_reader.value, wait_thread.value]
           ensure
-            output = out_reader.value
-            error = err_reader.value
+            kill_group(wait_thread.pid) if threads.any?(&:alive?)
+            [out_reader, err_reader].each { |thread| thread.kill.join }
           end
         end
-
-        [output, error, status]
       end
 
       def kill_group(pid)
