@@ -48,6 +48,17 @@ class CLIScriptTest < Minitest::Test
     assert_match(/source: .*not found/, err)
   end
 
+  def test_source_persists_cwd
+    sub = File.join(@tmp, "sub")
+    Dir.mkdir(sub)
+    sourced = script("cwd.sh", "cd ..\n")
+    out, err, status = run_sharky("-c", "cd #{Shellwords.escape(sub)}; source #{Shellwords.escape(sourced)}; pwd")
+
+    assert_equal 0, status.exitstatus
+    assert_equal "#{@tmp}\n", out
+    assert_empty err
+  end
+
   def test_ruby_script_still_runs
     path = script("legacy.rb", "puts 'ruby'\n")
     out, err, status = run_sharky(path)
