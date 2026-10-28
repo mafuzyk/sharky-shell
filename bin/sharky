@@ -1,0 +1,6 @@
+#!/usr/bin/env -S ruby --disable-gems
+Process.setproctitle("sharky")
+$LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
+require "sharky"
+
+exit Sharky::CLI.new(ARGV).run

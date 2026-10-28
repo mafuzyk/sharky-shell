@@ -1,0 +1,19 @@
+[prompt]
+separator = "none"
+leading = "none"
+trailing = "none"
+padding = 0
+
+[styles]
+arch = "137;180;250"
+ink = "30;30;46"
+
+[[lines]]
+suffix = "> "
+
+[[segments]]
+line = 1
+text = "layout {os} {arch} {cwd_base}"
+bg = "arch"
+fg = "ink"
+when = "always"

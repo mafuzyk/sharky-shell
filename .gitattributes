@@ -1,0 +1,7 @@
+* text=auto eol=lf
+*.rb text
+*.toml text
+*.md text
+*.yml text
+*.yaml text
+LICENSE text
