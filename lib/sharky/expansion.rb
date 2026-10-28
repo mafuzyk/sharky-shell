@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative "arithmetic"
+
 module Sharky
   class Expansion
     Chunk = Struct.new(:text, :split, :glob, :quoted_empty, keyword_init: true)
@@ -43,6 +45,9 @@ module Sharky
         [chunk(text, split: !quoted, glob: !quoted, quoted_empty: quoted && text.empty?)]
       when :parameter
         evaluate_parameter(part.value, quoted: quoted)
+      when :arithmetic
+        text = Arithmetic.evaluate(part.value.source, env: @env).to_s
+        [chunk(text, split: !quoted, glob: !quoted, quoted_empty: quoted && text.empty?)]
       when :cmdsub
         text = command_substitution(part.value)
         [chunk(text, split: !quoted, glob: !quoted, quoted_empty: quoted && text.empty?)]

@@ -61,11 +61,11 @@ class AcceptanceTest < Minitest::Test
     assert_includes err, "^"
   end
 
-  def test_arithmetic_expansion_is_rejected_without_executing
+  def test_arithmetic_expansion_is_supported
     out, err, status = run_sharky("-c", "echo $((1 + 2))")
-    assert_equal 2, status.exitstatus
-    assert_empty out
-    assert_includes err, "unsupported syntax"
+    assert_equal 0, status.exitstatus
+    assert_equal "3\n", out
+    assert_empty err
   end
 
   def test_extglob_is_rejected_without_executing

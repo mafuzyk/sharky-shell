@@ -69,6 +69,9 @@ module Sharky
     rescue Expansion::ParameterError => error
       @stderr.puts("sharky: #{error.message}")
       mark_status(1)
+    rescue Arithmetic::Error => error
+      @stderr.puts("sharky: #{error.message}")
+      mark_status(1)
     ensure
       reap_jobs
     end

@@ -64,4 +64,9 @@ class ShellTest < Minitest::Test
     assert_equal "", @shell.stdout.string
     assert_match(/MISSING: oops/, @shell.stderr.string)
   end
+
+  def test_arithmetic_error_is_reported_without_crashing
+    assert_equal 1, @shell.run("echo $((1 / 0))")
+    assert_match(/division by zero/, @shell.stderr.string)
+  end
 end

@@ -385,13 +385,10 @@ module Sharky
         scan_braced_variable(pos)
       when "("
         if peek == "("
-          raise LexError.new(
-            "unsupported syntax: '$(('. Use bash -c '...' or a Ruby function.",
-            pos: pos
-          )
+          scan_arithmetic_expansion(pos)
+        else
+          scan_command_substitution(pos)
         end
-
-        scan_command_substitution(pos)
       when "?", "$", "!"
         @pos += 1
         AST::Part.new(type: :special, value: char, pos: pos)
@@ -455,6 +452,37 @@ module Sharky
                  end
 
       AST::Parameter.new(name: match[1], operator: operator, argument: match[3], pos: pos)
+    end
+
+    def scan_arithmetic_expansion(pos)
+      @pos += 2
+      start = @pos
+      depth = 0
+
+      while @pos < @source.length
+        case @source[@pos]
+        when "("
+          depth += 1
+          @pos += 1
+        when ")"
+          if depth.zero? && @source[@pos + 1] == ")"
+            source = @source[start...@pos].to_s.strip
+            @pos += 2
+            return AST::Part.new(
+              type: :arithmetic,
+              value: AST::ArithmeticExpansion.new(source: source, pos: pos),
+              pos: pos
+            )
+          end
+
+          depth -= 1 if depth.positive?
+          @pos += 1
+        else
+          @pos += 1
+        end
+      end
+
+      raise LexError.new("unclosed arithmetic expansion", pos: pos, incomplete: true)
     end
 
     def scan_command_substitution(pos)

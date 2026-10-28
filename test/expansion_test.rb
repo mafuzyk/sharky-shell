@@ -91,4 +91,14 @@ class ExpansionTest < Minitest::Test
     assert_equal [], expansion(env: {}).expand_word(word(parameter("X", operator: :default, argument: "")))
     assert_equal ["a", "b"], expansion(env: { "X" => "a b" }).expand_word(word(parameter("X")))
   end
+
+  def test_arithmetic_expansion
+    part = Sharky::AST::Part.new(
+      type: :arithmetic,
+      value: Sharky::AST::ArithmeticExpansion.new(source: "1 + 2 * 3")
+    )
+
+    assert_equal ["7"], expansion.expand_word(word(part), quoted: true)
+    assert_equal ["7"], expansion.expand_word(word(part))
+  end
 end

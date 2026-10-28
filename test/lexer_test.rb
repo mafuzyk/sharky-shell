@@ -85,9 +85,12 @@ class LexerTest < Minitest::Test
     assert_equal [:word, :word, :word, :word, :eof], compound_lex("[ -f x ]").map(&:type)
   end
 
-  def test_double_paren_in_command_substitution_is_still_rejected
-    error = assert_raises(Sharky::LexError) { compound_lex("echo $((1 + 2))") }
-    assert_includes error.message, "unsupported syntax: '$(('"
+  def test_arithmetic_expansion_is_a_part
+    tokens = compound_lex("echo $((1 + 2))")
+    part = tokens[1].value.parts.first
+
+    assert_equal :arithmetic, part.type
+    assert_equal "1 + 2", part.value.source
   end
 
   def test_compound_here_doc_and_here_string
@@ -151,6 +154,19 @@ class LexerTest < Minitest::Test
 
   def test_unclosed_braced_parameter_is_incomplete
     error = assert_raises(Sharky::LexError) { lex("${X:-oops") }
+    assert error.incomplete?
+  end
+
+  def test_arithmetic_expansion_part
+    token = lex("echo $((1 + (2 * 3)))")[1]
+    part = token.value.parts.first
+
+    assert_equal :arithmetic, part.type
+    assert_equal "1 + (2 * 3)", part.value.source
+  end
+
+  def test_unclosed_arithmetic_expansion_is_incomplete
+    error = assert_raises(Sharky::LexError) { lex("echo $((1 + 2)") }
     assert error.incomplete?
   end
 end

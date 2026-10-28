@@ -24,6 +24,7 @@ module Sharky
     FunctionDef = Struct.new(:name, :body, :pos, keyword_init: true)
     Group = Struct.new(:list, :pos, keyword_init: true)
     Arithmetic = Struct.new(:source, :pos, keyword_init: true)
+    ArithmeticExpansion = Struct.new(:source, :pos, keyword_init: true)
     TestCommand = Struct.new(:source, :double_bracket, :pos, keyword_init: true)
     HereDoc = Struct.new(:delimiter, :strip_tabs, :quoted, :body, :pos, keyword_init: true)
   end
