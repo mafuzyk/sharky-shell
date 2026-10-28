@@ -255,7 +255,18 @@ module Sharky
 
       values = {}
       simple.assignments.each do |assignment|
-        values[assignment.name] = @shell.expansion.expand_assignment(assignment.value)
+        if assignment.array
+          elements = assignment.array.flat_map { |word| @shell.expansion.expand_word(word) }
+          @shell.set_array(assignment.name, elements, append: assignment.append)
+        elsif assignment.index
+          @shell.set_array_element(
+            assignment.name,
+            assignment.index,
+            @shell.expansion.expand_assignment(assignment.value)
+          )
+        else
+          values[assignment.name] = @shell.expansion.expand_assignment(assignment.value)
+        end
       end
       words = @shell.expansion.expand_words(simple.words)
       words = expand_aliases(words)

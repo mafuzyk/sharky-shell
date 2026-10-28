@@ -9,11 +9,12 @@ module Sharky
     GLOB_MAGIC = "*?["
     ParameterError = Class.new(StandardError)
 
-    def initialize(env: {}, positional: [], script_name: "sharky", nounset: false, cwd: Dir.pwd, command_substitution: nil)
+    def initialize(env: {}, positional: [], script_name: "sharky", nounset: false, arrays: {}, cwd: Dir.pwd, command_substitution: nil)
       @env = env
       @positional = Array(positional).map(&:to_s)
       @script_name = script_name.to_s
       @nounset = nounset
+      @arrays = arrays
       @cwd = cwd
       @command_substitution = command_substitution
     end
@@ -183,7 +184,15 @@ module Sharky
       Chunk.new(text: text.to_s, split: split, glob: glob, quoted_empty: quoted_empty)
     end
 
-    def parameter_value(name, nounset: @nounset)
+    def parameter_value(name, nounset: @nounset, index: nil)
+      if @arrays.key?(name)
+        array = @arrays[name]
+        return array.join(" ") if ["@", "*"].include?(index)
+        return array[index.to_i].to_s if index
+
+        return array.first.to_s
+      end
+
       value =
         case name
         when "?" then @env.fetch("?", "0")
@@ -221,7 +230,16 @@ module Sharky
 
     def evaluate_parameter(parameter, quoted:)
       no_error = [:default, :assign, :alternate, :error].include?(parameter.operator)
-      value = parameter_value(parameter.name, nounset: @nounset && !no_error)
+      if parameter.operator == :length && parameter.index && @arrays.key?(parameter.name)
+        text = @arrays[parameter.name].length.to_s
+        return [chunk(text, split: !quoted, glob: !quoted, quoted_empty: quoted && text.empty?)]
+      end
+
+      value = parameter_value(
+        parameter.name,
+        nounset: @nounset && !no_error,
+        index: parameter.index
+      )
       text =
         case parameter.operator
         when nil

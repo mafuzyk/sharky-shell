@@ -526,6 +526,7 @@ module Sharky
 
           if words.empty? && assignments.empty? && assignment
             advance
+            assignment.array = parse_array_elements if at?(:lparen)
             assignments << assignment
           else
             check_reserved_word!(token) if words.empty?
@@ -675,6 +676,29 @@ module Sharky
       )
     end
 
+    def parse_array_elements
+      advance
+      skip_newlines
+      elements = []
+
+      until at?(:rparen)
+        if at?(:eof)
+          raise ParseError.new("unclosed array assignment", pos: current.pos, incomplete: true)
+        end
+
+        if at?(:word)
+          elements << convert_word(advance.value)
+        elsif at?(:newline)
+          advance
+          skip_newlines
+        else
+          raise syntax_error("expected array element but found #{describe(current)}")
+        end
+      end
+      advance
+      elements
+    end
+
     def assignment_for(word)
       first = word.parts.first
       return nil unless first && first.type == :literal
@@ -682,7 +706,19 @@ module Sharky
       index = first.value.index("=")
       return nil unless index
 
-      name = first.value[0...index]
+      prefix = first.value[0...index]
+      element_index = nil
+      append = false
+
+      if (match = /\A([A-Za-z_][A-Za-z0-9_]*)\[(\d+)\]\z/.match(prefix))
+        name = match[1]
+        element_index = match[2]
+      elsif prefix.end_with?("+")
+        name = prefix[0...-1]
+        append = true
+      else
+        name = prefix
+      end
       return nil unless name.match?(NAME)
 
       rest = first.value[(index + 1)..]
@@ -692,7 +728,9 @@ module Sharky
 
       AST::Assignment.new(
         name: name,
-        value: AST::Word.new(parts: parts, pos: first.pos + index + 1)
+        value: AST::Word.new(parts: parts, pos: first.pos + index + 1),
+        index: element_index,
+        append: append
       )
     end
 
@@ -759,7 +797,8 @@ module Sharky
     end
 
     def function_definition?
-      return false unless at?(:word) && literal_word(current)
+      word = at?(:word) ? literal_word(current) : nil
+      return false if word.nil? || word.include?("=")
 
       peek_token&.type == :lparen && peek_token(2)&.type == :rparen
     end

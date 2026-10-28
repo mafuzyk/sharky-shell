@@ -2,7 +2,7 @@
 
 module Sharky
   class Shell
-    attr_reader :env, :cwd, :terminal, :history, :jobs, :functions, :positional, :script_name, :options
+    attr_reader :env, :cwd, :terminal, :history, :jobs, :functions, :positional, :script_name, :options, :arrays
     attr_accessor :stdin, :stdout, :stderr
     attr_writer :runtime
     attr_reader :last_status, :last_bg_pid, :shell_pgid, :foreground_pgid
@@ -16,6 +16,7 @@ module Sharky
       @script_name = script_name.to_s
       @positional_stack = []
       @options = {}
+      @arrays = {}
       @stdin = stdin
       @stdout = stdout
       @stderr = stderr
@@ -171,8 +172,19 @@ module Sharky
         positional: @positional,
         script_name: @script_name,
         nounset: option?(:nounset),
+        arrays: @arrays,
         cwd: @cwd
       )
+    end
+
+    def set_array(name, values, append: false)
+      @arrays[name] = append ? Array(@arrays[name]) + Array(values) : Array(values)
+    end
+
+    def set_array_element(name, index, value)
+      array = Array(@arrays[name])
+      array[index.to_i] = value
+      @arrays[name] = array
     end
 
     def run_script_file(path, args = [])

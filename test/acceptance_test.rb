@@ -84,10 +84,11 @@ class AcceptanceTest < Minitest::Test
     assert_includes err, "unexpected"
   end
 
-  def test_array_assignment_executes_nothing
-    out, _err, status = run_sharky("-c", "x=(1 2)")
-    assert_equal 2, status.exitstatus
-    assert_empty out
+  def test_array_assignment_executes
+    out, err, status = run_sharky("-c", "x=(1 2); printf '%s' \"${x[1]}\"")
+    assert_equal 0, status.exitstatus
+    assert_equal "2", out
+    assert_empty err
   end
 
   def test_unknown_command

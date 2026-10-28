@@ -439,6 +439,14 @@ module Sharky
     end
 
     def parse_parameter(content, pos)
+      if (match = /\A#([A-Za-z_][A-Za-z0-9_]*)\[([^\]]+)\]\z/.match(content))
+        return AST::Parameter.new(name: match[1], operator: :length, argument: nil, index: match[2], pos: pos)
+      end
+
+      if (match = /\A([A-Za-z_][A-Za-z0-9_]*)\[([^\]]+)\]\z/.match(content))
+        return AST::Parameter.new(name: match[1], operator: nil, argument: nil, index: match[2], pos: pos)
+      end
+
       if content.start_with?("#") && content.length > 1
         return AST::Parameter.new(name: content[1..], operator: :length, argument: nil, pos: pos)
       end
