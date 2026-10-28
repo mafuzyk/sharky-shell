@@ -392,8 +392,16 @@ module Sharky
       when "?", "$", "!"
         @pos += 1
         AST::Part.new(type: :special, value: char, pos: pos)
+      when "@", "*", "#"
+        @pos += 1
+        AST::Part.new(type: :positional, value: char, pos: pos)
       else
-        if char && char.match?(NAME_START)
+        if char && char.match?(/\d/)
+          start = @pos
+          @pos += 1
+          @pos += 1 while current && current.match?(/\d/)
+          AST::Part.new(type: :positional, value: @source[start...@pos], pos: pos)
+        elsif char && char.match?(NAME_START)
           start = @pos
           @pos += 1
           @pos += 1 while current && current.match?(NAME_CHAR)
@@ -433,6 +441,10 @@ module Sharky
     def parse_parameter(content, pos)
       if content.start_with?("#") && content.length > 1
         return AST::Parameter.new(name: content[1..], operator: :length, argument: nil, pos: pos)
+      end
+
+      if content.match?(/\A(?:\d+|[@*#?$!])\z/)
+        return AST::Parameter.new(name: content, operator: nil, argument: nil, pos: pos)
       end
 
       match = /\A([A-Za-z_][A-Za-z0-9_]*)(?:(:-|:=|:\?|:\+|##|#|%%|%|\/\/|\/)(.*))?\z/m.match(content)

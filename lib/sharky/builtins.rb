@@ -83,6 +83,9 @@ module Sharky
       end,
       "return" => lambda do |shell, argv, _stdin|
         Builtins.return_builtin(shell, argv)
+      end,
+      "shift" => lambda do |shell, argv, _stdin|
+        Builtins.shift_builtin(shell, argv)
       end
     }.freeze
 
@@ -343,6 +346,14 @@ module Sharky
       nil
     end
     private_class_method :control_level
+
+    def self.shift_builtin(shell, argv)
+      count = argv.empty? ? 1 : Integer(argv.first, 10)
+      shell.shift(count)
+    rescue ArgumentError
+      shell.stderr.puts("sharky: shift: #{argv.first}: numeric argument required")
+      1
+    end
 
     def self.executable_path(shell, name)
       if name.include?("/")

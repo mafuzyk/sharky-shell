@@ -9,8 +9,10 @@ module Sharky
     GLOB_MAGIC = "*?["
     ParameterError = Class.new(StandardError)
 
-    def initialize(env: {}, cwd: Dir.pwd, command_substitution: nil)
+    def initialize(env: {}, positional: [], script_name: "sharky", cwd: Dir.pwd, command_substitution: nil)
       @env = env
+      @positional = Array(positional).map(&:to_s)
+      @script_name = script_name.to_s
       @cwd = cwd
       @command_substitution = command_substitution
     end
@@ -157,6 +159,9 @@ module Sharky
       when :variable, :special
         text = parameter_value(part.value)
         [chunk(text, split: !quoted, glob: !quoted, quoted_empty: quoted && text.empty?)]
+      when :positional
+        text = positional_value(part.value)
+        [chunk(text, split: !quoted, glob: !quoted, quoted_empty: quoted && text.empty?)]
       when :parameter
         evaluate_parameter(part.value, quoted: quoted)
       when :arithmetic
@@ -183,9 +188,22 @@ module Sharky
         when "?" then @env.fetch("?", "0")
         when "$" then @env.fetch("$", Process.pid.to_s)
         when "!" then @env.fetch("!", "")
+        when "#" then @positional.length.to_s
+        when "@", "*" then @positional.join(" ")
+        when /\A\d+\z/ then @positional[name.to_i - 1].to_s
         else @env.fetch(name, "")
         end
       value.to_s
+    end
+
+    def positional_value(name)
+      case name
+      when "#" then @positional.length.to_s
+      when "@", "*" then @positional.join(" ")
+      when "0" then @script_name
+      when /\A\d+\z/ then @positional[name.to_i - 1].to_s
+      else ""
+      end
     end
 
     def evaluate_parameter(parameter, quoted:)

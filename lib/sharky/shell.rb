@@ -2,16 +2,19 @@
 
 module Sharky
   class Shell
-    attr_reader :env, :cwd, :terminal, :history, :jobs, :functions
+    attr_reader :env, :cwd, :terminal, :history, :jobs, :functions, :positional, :script_name
     attr_accessor :stdin, :stdout, :stderr
     attr_writer :runtime
     attr_reader :last_status, :last_bg_pid, :shell_pgid, :foreground_pgid
     attr_accessor :pending_signal, :reap_requested, :redraw_requested
 
     def initialize(env: ENV.to_h, cwd: Dir.pwd, stdin: $stdin, stdout: $stdout, stderr: $stderr, terminal: nil,
-                   history: nil, runtime: nil, z: nil)
+                   history: nil, runtime: nil, z: nil, positional: [], script_name: "sharky")
       @env = env.to_h.dup
       @cwd = File.expand_path(cwd)
+      @positional = Array(positional).map(&:to_s)
+      @script_name = script_name.to_s
+      @positional_stack = []
       @stdin = stdin
       @stdout = stdout
       @stderr = stderr
@@ -162,7 +165,26 @@ module Sharky
     end
 
     def expansion
-      Expansion.new(env: @env, cwd: @cwd)
+      Expansion.new(env: @env, positional: @positional, script_name: @script_name, cwd: @cwd)
+    end
+
+    def with_positional(values)
+      @positional_stack << @positional
+      @positional = Array(values).map(&:to_s)
+      yield
+    ensure
+      @positional = @positional_stack.pop || []
+    end
+
+    def shift(count = 1)
+      count = Integer(count, 10) if count.is_a?(String)
+      count = count.to_i
+      return 1 if count.negative? || count > @positional.length
+
+      @positional.shift(count)
+      0
+    rescue ArgumentError
+      1
     end
 
     def track_foreground(pgid)

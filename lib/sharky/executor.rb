@@ -275,9 +275,11 @@ module Sharky
           report_function_error(name, function_error)
         elsif function.is_a?(AST::List)
           begin
-            with_assignments(values) do
-              with_redirections(fd_map, files) do
-                execute_list(function, foreground: foreground)
+            @shell.with_positional(argv) do
+              with_assignments(values) do
+                with_redirections(fd_map, files) do
+                  execute_list(function, foreground: foreground)
+                end
               end
             end
           rescue ControlFlow::Return => signal

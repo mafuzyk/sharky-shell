@@ -10,8 +10,14 @@ class ExpansionTest < Minitest::Test
     Sharky::AST::Part.new(type: :literal, value: text)
   end
 
-  def expansion(env: {}, command_substitution: ->(_program) { "" })
-    Sharky::Expansion.new(env: env, cwd: @tmp, command_substitution: command_substitution)
+  def expansion(env: {}, positional: [], script_name: "sharky", command_substitution: ->(_program) { "" })
+    Sharky::Expansion.new(
+      env: env,
+      positional: positional,
+      script_name: script_name,
+      cwd: @tmp,
+      command_substitution: command_substitution
+    )
   end
 
   def test_quoted_empty_stays_and_unquoted_empty_disappears
@@ -100,6 +106,17 @@ class ExpansionTest < Minitest::Test
 
     assert_equal ["7"], expansion.expand_word(word(part), quoted: true)
     assert_equal ["7"], expansion.expand_word(word(part))
+  end
+
+  def test_positional_parameters
+    part = ->(value) { Sharky::AST::Part.new(type: :positional, value: value) }
+    exp = expansion(positional: %w[a b], script_name: "prog")
+
+    assert_equal ["a"], exp.expand_word(word(part.call("1")), quoted: true)
+    assert_equal ["2"], exp.expand_word(word(part.call("#")), quoted: true)
+    assert_equal ["a b"], exp.expand_word(word(part.call("@")), quoted: true)
+    assert_equal ["a b"], exp.expand_word(word(part.call("*")), quoted: true)
+    assert_equal ["prog"], exp.expand_word(word(part.call("0")), quoted: true)
   end
 
   def test_brace_alternatives_and_nesting

@@ -139,6 +139,28 @@ class CompoundExecutionTest < Minitest::Test
     assert_match(/return: only meaningful in a function/, @stderr.string)
   end
 
+  def test_function_arguments_and_shift
+    assert_equal 0, run_compound("f() { printf '%s|%s' \"$1\" \"$2\"; }; f a b")
+    assert_equal "a|b", @stdout.string
+    reset_stdout
+
+    run_compound("f() { printf '%s' \"$#\"; }; f a b")
+    assert_equal "2", @stdout.string
+    reset_stdout
+
+    run_compound("f() { shift; printf '%s' \"$1\"; }; f a b")
+    assert_equal "b", @stdout.string
+  end
+
+  def test_shift_past_end_status
+    assert_equal 1, run_compound("f() { shift 3; }; f a")
+  end
+
+  def test_nested_function_restores_positional
+    run_compound("f() { printf '%s' \"$1\"; g x; printf '%s' \"$1\"; }; g() { printf '%s' \"$1\"; }; f outer")
+    assert_equal "outerxouter", @stdout.string
+  end
+
   def test_default_shell_run_stays_legacy
     assert_equal 2, @shell.run("if true; then echo no; fi")
   end

@@ -169,4 +169,20 @@ class LexerTest < Minitest::Test
     error = assert_raises(Sharky::LexError) { lex("echo $((1 + 2)") }
     assert error.incomplete?
   end
+
+  def test_positional_parameter_parts
+    tokens = lex("$0 $1 $# $@ $*")
+    parts = tokens.select { |token| token.type == :word }.map { |token| token.value.parts.first }
+
+    assert_equal Array.new(5, :positional), parts.map(&:type)
+    assert_equal ["0", "1", "#", "@", "*"], parts.map(&:value)
+  end
+
+  def test_braced_positional_part
+    token = lex("${1}").first
+    parameter = token.value.parts.first.value
+
+    assert_equal "1", parameter.name
+    assert_nil parameter.operator
+  end
 end
