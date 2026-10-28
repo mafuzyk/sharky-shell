@@ -1,15 +1,20 @@
 # frozen_string_literal: true
 
+require "json"
 require "socket"
+require "stringio"
 
 module Sharky
   class CLI
     USAGE = <<~TEXT
       Usage: sharky [OPTIONS] [FILE.rb]
+             sharky state --json [--no-config]
 
         -c COMMAND   run COMMAND and exit
         --no-config  do not load the configuration file
         -i           force interactive mode
+        --json       print one JSON object for -c or state
+        state        print shell state as JSON (requires --json)
         --version    print the version
         --help       print this help
     TEXT
@@ -20,6 +25,8 @@ module Sharky
       script_args = []
       interactive = false
       load_config = true
+      json = false
+      state = false
       args = argv.dup
 
       until args.empty?
@@ -33,6 +40,8 @@ module Sharky
           command = args.shift
         when "--no-config"
           load_config = false
+        when "--json"
+          json = true
         when "-i"
           interactive = true
         when "--version"
@@ -46,6 +55,10 @@ module Sharky
             stderr.puts("sharky: unknown option: #{arg}")
             return 2
           end
+          if arg == "state" && script.nil? && !state
+            state = true
+            next
+          end
           script = arg
           script_args = args.dup
           args.clear
@@ -56,6 +69,23 @@ module Sharky
         stderr.puts("sharky: cannot use -c with a script")
         return 2
       end
+      if state && command
+        stderr.puts("sharky: cannot use state with -c")
+        return 2
+      end
+      if state && script
+        stderr.puts("sharky: cannot use state with a script")
+        return 2
+      end
+      if state && !json
+        stderr.puts("sharky: state requires --json")
+        return 2
+      end
+      if json && script
+        stderr.puts("sharky: --json is only supported with -c or state")
+        return 2
+      end
+      return run_json_state(stdout: stdout, stderr: stderr, load_config: load_config) if state
 
       if script.nil? && command.nil?
         tty = stdin.respond_to?(:tty?) && stdin.tty?
@@ -64,6 +94,7 @@ module Sharky
         stderr.puts("sharky: no command given")
         return 1
       end
+      return run_json_command(command, stdin: stdin, stdout: stdout, stderr: stderr, load_config: load_config) if json
 
       runtime = Runtime.new
       if load_config
@@ -85,6 +116,52 @@ module Sharky
 
       shell.run(command)
       shell.last_status
+    end
+
+    def self.run_json_command(command, stdin:, stdout:, stderr:, load_config:)
+      session = Session.new(env: ENV.to_h, cwd: Dir.pwd, stdin: stdin)
+      Sharky.session = session
+      load_runtime_config(session.runtime, stderr) if load_config
+      result = session.run(command)
+      write_json(stdout, {
+        schema_version: result.schema_version,
+        status: result.status,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        duration_ms: result.duration_ms,
+        cwd: result.cwd,
+        env_delta: result.env_delta
+      })
+      result.status
+    end
+
+    def self.run_json_state(stdout:, stderr:, load_config:)
+      session = Session.new(env: ENV.to_h, cwd: Dir.pwd)
+      Sharky.session = session
+      load_runtime_config(session.runtime, stderr) if load_config
+      write_json(stdout, {
+        schema_version: Result::SCHEMA_VERSION,
+        cwd: session.cwd,
+        env: session.env.dup,
+        last_status: session.last_status,
+        pid: Process.pid
+      })
+      0
+    end
+
+    def self.load_runtime_config(runtime, stderr)
+      captured = StringIO.new
+      previous_stdout = $stdout
+      $stdout = captured
+      warnings = Config.new.load_into(runtime)
+      warnings.each { |warning| stderr.puts(warning) }
+    ensure
+      $stdout = previous_stdout
+      stderr.write(captured.string) unless captured.string.empty?
+    end
+
+    def self.write_json(io, payload)
+      io.puts(JSON.generate(payload))
     end
 
     def self.run_script(shell, path, args, stderr)
@@ -301,7 +378,8 @@ module Sharky
       "localhost"
     end
 
-    private_class_method :run_interactive, :with_terminal_signals, :theme_for, :build_prompt, :ssh?, :user, :host
+    private_class_method :run_json_command, :run_json_state, :load_runtime_config, :write_json,
+                         :run_interactive, :with_terminal_signals, :theme_for, :build_prompt, :ssh?, :user, :host
 
     def initialize(argv, stdin: $stdin, stdout: $stdout, stderr: $stderr)
       @argv = argv.dup

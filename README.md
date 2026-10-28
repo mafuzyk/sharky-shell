@@ -37,6 +37,22 @@ sharky
 
 `-c` runs one command string and exits with its status. With no arguments, sharky starts interactively and requires a TTY. `--no-config` skips the configuration file.
 
+## Machine-readable output
+
+`sharky --json -c COMMAND` writes exactly one JSON object to stdout and exits with the command status:
+
+~~~json
+{"schema_version":1,"status":0,"stdout":"hi\n","stderr":"","duration_ms":3,"cwd":"/tmp","env_delta":{"FOO":"bar"}}
+~~~
+
+`sharky state --json` writes the current shell state:
+
+~~~json
+{"schema_version":1,"cwd":"/tmp","env":{"PATH":"/usr/bin"},"last_status":0,"pid":1234}
+~~~
+
+`env_delta` maps each changed environment name to its new value; a removed variable is `null`. `state.env` is the full environment and `pid` is the sharky process. JSON mode keeps stdout machine-readable: configuration warnings and other diagnostics go to stderr, while command stderr is captured in the envelope.
+
 ## Configuration
 
 The configuration directory is `$SHARKY_CONFIG`, or `${XDG_CONFIG_HOME:-~/.config}/sharky`:
