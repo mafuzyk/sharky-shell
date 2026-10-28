@@ -92,6 +92,12 @@ module Sharky
       end,
       "shift" => lambda do |shell, argv, _stdin|
         Builtins.shift_builtin(shell, argv)
+      end,
+      "set" => lambda do |shell, argv, _stdin|
+        Builtins.set_builtin(shell, argv)
+      end,
+      "read" => lambda do |shell, argv, _stdin|
+        Builtins.read_builtin(shell, argv)
       end
     }.freeze
 
@@ -352,6 +358,63 @@ module Sharky
       nil
     end
     private_class_method :control_level
+
+    def self.set_builtin(shell, argv)
+      args = argv.dup
+      if args.first == "--"
+        args.shift
+        shell.positional = args
+        return 0
+      end
+
+      if args.empty?
+        shell.stdout.puts(shell.active_options.join(" ")) unless shell.active_options.empty?
+        return 0
+      end
+
+      status = 0
+      until args.empty?
+        argument = args.shift
+        if %w[-e +e -u +u -x +x].include?(argument)
+          name = { "e" => :errexit, "u" => :nounset, "x" => :xtrace }.fetch(argument[1])
+          shell.set_option(name, argument.start_with?("-"))
+        elsif %w[-o +o].include?(argument)
+          name = args.shift
+          if name.nil?
+            shell.stderr.puts("sharky: set: #{argument}: option name required")
+            status = 1
+          elsif name == "pipefail"
+            shell.set_option(:pipefail, argument == "-o")
+          else
+            shell.stderr.puts("sharky: set: #{name}: invalid option name")
+            status = 1
+          end
+        else
+          shell.stderr.puts("sharky: set: #{argument}: invalid option")
+          status = 1
+        end
+      end
+      status
+    end
+
+    def self.read_builtin(shell, argv)
+      args = argv.dup
+      args.shift if args.first == "-r"
+      names = args.empty? ? ["REPLY"] : args
+      line = shell.stdin.gets
+      return 1 if line.nil?
+
+      fields = line.chomp.split(/\s+/)
+      names.each_with_index do |name, index|
+        value = if index == names.length - 1
+                  fields[index..].to_a.join(" ")
+                else
+                  fields[index].to_s
+                end
+        shell.env[name] = value
+      end
+      0
+    end
 
     def self.source_builtin(shell, argv)
       if argv.empty?

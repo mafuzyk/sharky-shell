@@ -2,7 +2,7 @@
 
 module Sharky
   class Shell
-    attr_reader :env, :cwd, :terminal, :history, :jobs, :functions, :positional, :script_name
+    attr_reader :env, :cwd, :terminal, :history, :jobs, :functions, :positional, :script_name, :options
     attr_accessor :stdin, :stdout, :stderr
     attr_writer :runtime
     attr_reader :last_status, :last_bg_pid, :shell_pgid, :foreground_pgid
@@ -15,6 +15,7 @@ module Sharky
       @positional = Array(positional).map(&:to_s)
       @script_name = script_name.to_s
       @positional_stack = []
+      @options = {}
       @stdin = stdin
       @stdout = stdout
       @stderr = stderr
@@ -199,6 +200,22 @@ module Sharky
       yield
     ensure
       @positional = @positional_stack.pop || []
+    end
+
+    def positional=(values)
+      @positional = Array(values).map(&:to_s)
+    end
+
+    def option?(name)
+      @options[name.to_sym] == true
+    end
+
+    def set_option(name, value)
+      @options[name.to_sym] = value
+    end
+
+    def active_options
+      @options.select { |_name, value| value }.keys
     end
 
     def shift(count = 1)

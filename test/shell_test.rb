@@ -69,4 +69,45 @@ class ShellTest < Minitest::Test
     assert_equal 1, @shell.run("echo $((1 / 0))")
     assert_match(/division by zero/, @shell.stderr.string)
   end
+
+  def test_set_positional_parameters
+    assert_equal 0, @shell.run("set -- a b")
+    assert_equal %w[a b], @shell.positional
+    assert_equal 0, @shell.run(%q{printf '%s|%s' "$1" "$#"})
+    assert_equal "a|2", @shell.stdout.string
+  end
+
+  def test_set_e_stops_after_failure
+    assert_equal 1, @shell.run("set -e; false; printf no")
+    assert_equal "", @shell.stdout.string
+    assert @shell.exit_requested?
+  end
+
+  def test_set_plus_e_continues
+    assert_equal 0, @shell.run("set +e; false; printf yes")
+    assert_equal "yes", @shell.stdout.string
+  end
+
+  def test_read_assigns_multiple_variables
+    @shell.stdin = StringIO.new("hello world rest\n")
+    assert_equal 0, @shell.run("read A B")
+    assert_equal "hello", @shell.env["A"]
+    assert_equal "world rest", @shell.env["B"]
+  end
+
+  def test_read_eof_and_raw
+    @shell.stdin = StringIO.new("")
+    assert_equal 1, @shell.run("read -r A")
+    @shell.stdin = StringIO.new("literal\\n\n")
+    assert_equal 0, @shell.run("read -r A")
+    assert_equal "literal\\n", @shell.env["A"]
+  end
+
+  def test_set_prints_options_and_rejects_unknown
+    assert_equal 0, @shell.run("set -e")
+    assert_equal 0, @shell.run("set")
+    assert_includes @shell.stdout.string, "errexit"
+    assert_equal 1, @shell.run("set -Z")
+    assert_match(/invalid option/, @shell.stderr.string)
+  end
 end

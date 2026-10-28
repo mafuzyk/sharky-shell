@@ -12,13 +12,17 @@ module Sharky
       program.lines.each do |line|
         status = execute_list(line.list, foreground: foreground)
         break if @shell.exit_requested?
+        if @shell.option?(:errexit) && !status.zero?
+          @shell.request_exit(status)
+          break
+        end
       end
       status
     end
 
     private
 
-    def execute_list(list, foreground:)
+    def execute_list(list, foreground:, errexit: true)
       status = 0
       list.entries.each do |kind, and_ors|
         and_or = and_ors.first
@@ -26,6 +30,10 @@ module Sharky
 
         status = kind == :async ? start_async(and_or) : execute_and_or(and_or, foreground: foreground)
         break if @shell.exit_requested?
+        if errexit && @shell.option?(:errexit) && !status.zero?
+          @shell.request_exit(status)
+          break
+        end
       end
       status
     end
@@ -82,7 +90,7 @@ module Sharky
 
     def execute_if(command, foreground:)
       command.branches.each do |condition, body|
-        return execute_list(body, foreground: foreground) if execute_list(condition, foreground: foreground).zero?
+        return execute_list(body, foreground: foreground) if execute_list(condition, foreground: foreground, errexit: false).zero?
       end
       command.else_body ? execute_list(command.else_body, foreground: foreground) : 0
     end
@@ -115,7 +123,7 @@ module Sharky
     def execute_while(command, foreground:)
       status = 0
       loop do
-        condition = execute_list(command.condition, foreground: foreground)
+        condition = execute_list(command.condition, foreground: foreground, errexit: false)
         break if command.until_form ? condition.zero? : !condition.zero?
         break if @shell.exit_requested?
 

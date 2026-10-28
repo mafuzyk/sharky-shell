@@ -67,4 +67,19 @@ class CLIScriptTest < Minitest::Test
     assert_equal "ruby\n", out
     assert_empty err
   end
+
+  def test_set_e_stops_a_cli_script
+    out, _err, status = run_sharky("-c", "set -e; false; echo no")
+
+    assert_equal 1, status.exitstatus
+    assert_equal "", out
+  end
+
+  def test_read_consumes_cli_stdin
+    out, err, status = run_sharky("-c", "read x; printf '%s' \"$x\"", stdin: "hello\n")
+
+    assert_equal 0, status.exitstatus
+    assert_equal "hello", out
+    assert_empty err
+  end
 end
