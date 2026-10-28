@@ -96,6 +96,10 @@ Sharky.command :hello do |argv, _stdin|
   puts "hello #{argv.first || 'world'}"
   0
 end
+
+Sharky.complete "deploy" do |word, _line, _cursor|
+  %w[staging production].grep(/\A#{Regexp.escape(word)}/)
+end
 ~~~
 
 Config errors print `sharky: config error in <file>: <message>` and the shell continues with defaults. Configuration and function files are user-owned Ruby and run with your privileges.
@@ -112,7 +116,7 @@ sharky implements a native Bash-like subset at the prompt, in `sharky -c`, and i
 - pipes, redirects, here-documents, here-strings, lists with `;`/`&&`/`||`, background jobs, subshells and brace groups;
 - `[[ ]]`, `if`/`elif`/`else`, `for`, `while`, `until`, `case`, shell functions, `break`, `continue`, `return`, `source`/`.`, `set -e/-u/-x`, `pipefail` and `trap` (EXIT actions execute).
 
-This is not full Bash/POSIX compatibility. Unsupported features include associative arrays, array slices, process substitution, extglob, `coproc`, programmable completion, custom `IFS` and full `[[ =~ ]]` parity. Signal traps are stored, but only EXIT actions execute in v1.
+This is not full Bash/POSIX compatibility. Unsupported features include associative arrays, array slices, process substitution, extglob, `coproc`, custom `IFS` and full `[[ =~ ]]` parity. Bash `complete`/`compgen` are not emulated; Ruby configs can register a completion block with `Sharky.complete`, but context detection and quote/escape insertion there are still limited. Signal traps are stored, but only EXIT actions execute in v1.
 
 Unsupported reserved words and operators at command position produce:
 

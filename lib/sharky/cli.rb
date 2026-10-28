@@ -5,7 +5,7 @@ require "stringio"
 module Sharky
   class CLI
     USAGE = <<~TEXT
-      Usage: sharky [OPTIONS] [FILE.rb]
+      Usage: sharky [OPTIONS] [FILE.rb|FILE.sh]
              sharky state --json [--env] [--no-config]
 
         -c COMMAND   run COMMAND and exit

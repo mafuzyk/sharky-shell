@@ -18,6 +18,12 @@ versioning.
 - Command status is now recorded for pipelines, subshells, conditionals and
   negations; `&&`/`||` mixed lists and suppressed `set -e` contexts behave like
   Bash; EXIT traps run all actions and honor an explicit `exit` status.
+- Session, JSON and the Ruby facade now use the compound parser, matching the
+  normal `-c` entry point.
+- `[[ ]]` rejects unknown operators, supports symlink and lexical predicates,
+  and no longer returns true for an unsupported expression.
+- `type` recognizes functions defined by the native parser; editor history Down
+  moves toward newer entries; docs describe the existing Ruby completion hook.
 - Job-control fixes for partially reaped `fg` pipelines, pipefail, HUP cleanup of
   running/stopped jobs, default `fg` selection and done-job pruning.
 - Compound stdin reaches external commands; command-substitution stderr reaches

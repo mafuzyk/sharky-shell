@@ -66,7 +66,9 @@ Builtins include \fBcd\fR, \fBpwd\fR, \fBexport\fR, \fBsource\fR, \fB.\fR,
 .PP
 Not supported in v1: full Bash/POSIX, \fBcoproc\fR, process substitution,
 extended globs, associative arrays, array slices, custom \fBIFS\fR,
-programmable completion, full \fB[[ =~ ]]\fR parity and login-shell installation.
+Bash \fBcomplete\fR/\fBcompgen\fR emulation, full \fB[[ =~ ]]\fR parity and
+login-shell installation. Ruby configuration files may register a completion
+block with \fBSharky.complete\fR.
 .SH SCRIPTS
 A file named \fB*.sh\fR, or a file whose first line is
 \fB#!/usr/bin/env sharky\fR, runs through the native parser. The script path is
