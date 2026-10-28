@@ -78,7 +78,7 @@ module Sharky
     end
 
     def sh(source)
-      active_shell.run(source.to_s)
+      active_shell.run(source.to_s, compound: true)
     end
 
     def capture(source)
@@ -89,7 +89,7 @@ module Sharky
         previous = shell.stdout
         begin
           shell.stdout = file
-          shell.run(source.to_s)
+          shell.run(source.to_s, compound: true)
           file.flush
           file.rewind
           file.read

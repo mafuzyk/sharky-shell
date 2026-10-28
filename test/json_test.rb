@@ -89,7 +89,7 @@ class JsonTest < Minitest::Test
     assert_equal 2, status.exitstatus
     payload = parse_only_object(out)
     assert_equal 2, payload["status"]
-    assert_includes payload["stderr"], "unsupported syntax"
+    assert_includes payload["stderr"], "unclosed compound command"
   end
 
   def test_c_keeps_config_output_out_of_stdout

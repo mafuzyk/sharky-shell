@@ -76,7 +76,7 @@ module Sharky
 
       begin
         started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        status = current_shell.run(source.to_s)
+        status = current_shell.run(source.to_s, compound: true)
         duration_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000).round
 
         Result.new(

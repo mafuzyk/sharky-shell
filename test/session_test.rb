@@ -70,13 +70,21 @@ class SessionTest < Minitest::Test
     assert_nil @session.env["SHARKY_SESSION_TEST"]
   end
 
+  def test_run_uses_compound_parser
+    result = @session.run("if true; then printf yes; fi")
+
+    assert_equal 0, result.status
+    assert_equal "yes", result.stdout
+    assert_equal "", result.stderr
+  end
+
   def test_run_returns_status_two_for_parse_errors
     result = @session.run("if")
 
     assert_equal 2, result.status
     assert_equal "", result.stdout
     assert_includes result.stderr, "sharky:"
-    assert_includes result.stderr, "unsupported syntax"
+    assert_includes result.stderr, "unclosed compound command"
   end
 
   def test_run_restores_shell_streams
@@ -134,6 +142,14 @@ class SessionTest < Minitest::Test
     assert_nil other.runtime.prompt
     assert_empty other.runtime.theme
     refute other.runtime.commands.key?("facade_command")
+  end
+
+  def test_facade_uses_compound_parser
+    Sharky.session = @session
+
+    assert_equal 0, Sharky.sh("if true; then printf compound; fi")
+    assert_equal "compound", @session.shell.stdout.string
+    assert_equal "captured", Sharky.capture("if true; then printf captured; fi")
   end
 
   def test_facade_runs_commands_in_current_session_shell
