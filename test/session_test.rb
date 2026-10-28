@@ -5,11 +5,13 @@ require "stringio"
 class SessionTest < Minitest::Test
   def setup
     super
-    @session = Sharky::Session.new(
-      env: { "PATH" => "/usr/bin:/bin", "HOME" => @tmp },
-      cwd: @tmp,
-      stdin: StringIO.new
-    )
+    @previous_session = Sharky.session if Sharky.respond_to?(:session)
+    @session = build_session
+  end
+
+  def teardown
+    Sharky.session = @previous_session if Sharky.respond_to?(:session=)
+    super
   end
 
   def test_run_returns_structured_success_result
@@ -77,6 +79,16 @@ class SessionTest < Minitest::Test
     assert_includes result.stderr, "unsupported syntax"
   end
 
+  def test_run_restores_shell_streams
+    stdout = @session.shell.stdout
+    stderr = @session.shell.stderr
+
+    @session.run("printf output")
+
+    assert_same stdout, @session.shell.stdout
+    assert_same stderr, @session.shell.stderr
+  end
+
   def test_session_owns_its_engine_and_works_without_global_runtime
     assert_instance_of Sharky::Shell, @session.shell
     assert_instance_of Sharky::Runtime, @session.runtime
@@ -91,11 +103,7 @@ class SessionTest < Minitest::Test
   end
 
   def test_sessions_do_not_share_env_or_cwd
-    other = Sharky::Session.new(
-      env: { "PATH" => "/usr/bin:/bin", "HOME" => @tmp },
-      cwd: @tmp,
-      stdin: StringIO.new
-    )
+    other = build_session
     target = File.join(@tmp, "sub")
     Dir.mkdir(target)
 
@@ -104,5 +112,86 @@ class SessionTest < Minitest::Test
 
     assert_nil other.env["SHARKY_SESSION_ONLY"]
     assert_equal @tmp, other.cwd
+  end
+
+  def test_facade_delegates_runtime_config_to_current_session
+    other = build_session
+    Sharky.session = @session
+
+    assert_same @session, Sharky.session
+    assert_same @session.runtime, Sharky.runtime
+
+    Sharky.alias "facade_alias", "printf facade"
+    Sharky.prompt = ->(_context) { "FACADE> " }
+    Sharky.theme = { error: "31" }
+    Sharky.command("facade_command") { 0 }
+
+    assert_equal "printf facade", @session.runtime.aliases["facade_alias"]
+    assert_equal "FACADE> ", @session.runtime.prompt.call(nil)
+    assert_equal "31", @session.runtime.theme[:error]
+    assert @session.runtime.commands.key?("facade_command")
+    assert_nil other.runtime.aliases["facade_alias"]
+    assert_nil other.runtime.prompt
+    assert_empty other.runtime.theme
+    refute other.runtime.commands.key?("facade_command")
+  end
+
+  def test_facade_runs_commands_in_current_session_shell
+    Sharky.session = @session
+
+    assert_equal 0, Sharky.sh("printf facade")
+    assert_equal "facade", @session.shell.stdout.string
+    assert_equal 0, Sharky.last_status
+    assert_equal "cap", Sharky.capture("printf cap")
+    assert_equal "facade", @session.shell.stdout.string
+  end
+
+  def test_facade_exposes_current_session_state
+    Sharky.session = @session
+    target = File.join(@tmp, "sub")
+    Dir.mkdir(target)
+
+    Sharky.sh("cd #{target}; export SHARKY_FACADE_STATE=present")
+
+    assert_equal target, Sharky.cwd
+    assert_equal target, @session.cwd
+    assert_equal "present", Sharky.env["SHARKY_FACADE_STATE"]
+  end
+
+  def test_facade_switches_between_isolated_sessions
+    other = build_session
+    target = File.join(@tmp, "sub")
+    Dir.mkdir(target)
+    Sharky.session = @session
+    Sharky.alias "only_current", "printf one"
+    Sharky.sh("cd #{target}; export SHARKY_ONLY_CURRENT=one")
+
+    Sharky.session = other
+
+    assert_same other, Sharky.session
+    assert_same other.runtime, Sharky.runtime
+    assert_nil other.runtime.aliases["only_current"]
+    assert_nil Sharky.env["SHARKY_ONLY_CURRENT"]
+    assert_equal @tmp, Sharky.cwd
+    refute_same @session.runtime, other.runtime
+    refute_same @session.shell, other.shell
+  end
+
+  def test_runtime_assignment_reactivates_its_session
+    Sharky.session = nil
+    Sharky.runtime = @session.runtime
+
+    assert_same @session, Sharky.session
+    assert_same @session.runtime, Sharky.runtime
+  end
+
+  private
+
+  def build_session
+    Sharky::Session.new(
+      env: { "PATH" => "/usr/bin:/bin", "HOME" => @tmp },
+      cwd: @tmp,
+      stdin: StringIO.new
+    )
   end
 end

@@ -2,7 +2,7 @@
 
 module Sharky
   class Runtime
-    attr_accessor :prompt, :starship, :theme, :theme_layout, :config_dir, :shell
+    attr_accessor :prompt, :starship, :theme, :theme_layout, :config_dir, :shell, :session
     attr_reader :aliases, :abbreviations, :bindings, :commands, :completions, :cache_generation
 
     def initialize
@@ -12,6 +12,7 @@ module Sharky
       @theme_layout = nil
       @config_dir = nil
       @shell = nil
+      @session = nil
       @aliases = {}
       @abbreviations = {}
       @bindings = {}

@@ -30,7 +30,7 @@ module Sharky
     end
 
     def load_into(runtime)
-      Sharky.runtime = runtime
+      Sharky.session = Session.from_runtime(runtime)
       runtime.config_dir = @config_dir
 
       config = File.join(@config_dir, CONFIG_FILE)

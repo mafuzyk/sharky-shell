@@ -1,13 +1,28 @@
 # frozen_string_literal: true
 
 require_relative "runtime"
+require_relative "session"
 
 module Sharky
   class << self
-    attr_accessor :runtime
+    def session
+      Session.current
+    end
+
+    def session=(session)
+      Session.current = session
+    end
+
+    def runtime
+      session&.runtime
+    end
+
+    def runtime=(runtime)
+      self.session = runtime && Session.from_runtime(runtime)
+    end
 
     def prompt
-      @runtime&.prompt
+      runtime&.prompt
     end
 
     def prompt=(callable)
@@ -24,7 +39,7 @@ module Sharky
     end
 
     def theme(name = nil)
-      return @runtime&.theme if name.nil?
+      return runtime&.theme if name.nil?
       return self.theme = name if name.is_a?(Hash)
 
       load_theme(name)
@@ -131,11 +146,11 @@ module Sharky
     end
 
     def runtime!
-      @runtime || raise(RuntimeError, "Sharky runtime is not initialized")
+      session&.runtime || raise(RuntimeError, "Sharky runtime is not initialized")
     end
 
     def active_shell
-      runtime!.shell || raise(RuntimeError, "Sharky shell is not initialized")
+      session&.shell || raise(RuntimeError, "Sharky shell is not initialized")
     end
   end
 end

@@ -42,6 +42,24 @@ class ConfigTest < Minitest::Test
     assert_equal "31", runtime.theme[:error]
   end
 
+  def test_load_into_uses_the_runtime_session
+    config_dir = File.join(@tmp, "sharky")
+    FileUtils.mkdir_p(config_dir)
+    File.write(File.join(config_dir, "sharky.rb"), "Sharky.alias 'session_alias', 'printf session'\n")
+    session = Sharky::Session.new(
+      env: { "PATH" => "/usr/bin:/bin", "HOME" => @tmp },
+      cwd: @tmp,
+      stdin: StringIO.new
+    )
+    Sharky.session = session
+
+    warnings = Sharky::Config.new(dir: config_dir).load_into(session.runtime)
+
+    assert_empty warnings
+    assert_same session, Sharky.session
+    assert_equal "printf session", session.runtime.aliases["session_alias"]
+  end
+
   def test_prompt_preset_installs_builtin_callable
     runtime = Sharky::Runtime.new
     Sharky.runtime = runtime
