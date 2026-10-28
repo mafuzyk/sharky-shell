@@ -221,6 +221,19 @@ class ConfigTest < Minitest::Test
     assert_includes shell.stdout.string, "sh: /"
   end
 
+  def test_type_reports_native_function
+    shell = Sharky::Shell.new(
+      env: { "PATH" => "/usr/bin:/bin" },
+      cwd: @tmp,
+      stdout: StringIO.new,
+      stderr: StringIO.new
+    )
+    shell.functions["native_fn"] = Sharky::AST::List.new(entries: [])
+
+    assert_equal 0, shell.run("type native_fn")
+    assert_includes shell.stdout.string, "native_fn: function"
+  end
+
   def test_api_setters_require_a_runtime
     old = Sharky.runtime
     Sharky.runtime = nil

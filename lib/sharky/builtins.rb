@@ -321,6 +321,8 @@ module Sharky
           shell.stdout.puts("#{name}: aliased to #{aliases[name]}")
         elsif shell.runtime.commands.key?(name) || shell.runtime.commands.key?(name.to_sym)
           shell.stdout.puts("#{name}: function")
+        elsif shell.functions.key?(name)
+          shell.stdout.puts("#{name}: function")
         elsif Builtins.lookup(name)
           shell.stdout.puts("#{name}: shell builtin")
         elsif (path = executable_path(shell, name))
