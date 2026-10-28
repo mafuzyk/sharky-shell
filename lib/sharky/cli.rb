@@ -161,7 +161,22 @@ module Sharky
     end
 
     def self.write_json(io, payload)
-      io.puts(JSON.generate(payload))
+      io.puts(JSON.generate(normalize_utf8(payload)))
+    end
+
+    def self.normalize_utf8(value)
+      case value
+      when String
+        value.dup.force_encoding(Encoding::UTF_8).scrub
+      when Hash
+        value.each_with_object({}) do |(key, item), normalized|
+          normalized[normalize_utf8(key)] = normalize_utf8(item)
+        end
+      when Array
+        value.map { |item| normalize_utf8(item) }
+      else
+        value
+      end
     end
 
     def self.run_script(shell, path, args, stderr)
@@ -379,7 +394,8 @@ module Sharky
     end
 
     private_class_method :run_json_command, :run_json_state, :load_runtime_config, :write_json,
-                         :run_interactive, :with_terminal_signals, :theme_for, :build_prompt, :ssh?, :user, :host
+                         :normalize_utf8, :run_interactive, :with_terminal_signals, :theme_for,
+                         :build_prompt, :ssh?, :user, :host
 
     def initialize(argv, stdin: $stdin, stdout: $stdout, stderr: $stderr)
       @argv = argv.dup

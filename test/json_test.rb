@@ -59,6 +59,19 @@ class JsonTest < Minitest::Test
     assert_equal "present", parse_only_object(out)["env_delta"]["SHARKY_JSON_TEST"]
   end
 
+  def test_c_sanitizes_non_utf8_output_and_preserves_status
+    out, err, status = run_sharky(
+      "--json", "-c", "/usr/bin/printf '\\377'; /usr/bin/printf '\\376' >&2", env: json_env
+    )
+
+    assert_equal 0, status.exitstatus
+    assert_equal "", err
+    payload = parse_only_object(out)
+    assert_equal 0, payload["status"]
+    assert_equal "\uFFFD", payload["stdout"]
+    assert_equal "\uFFFD", payload["stderr"]
+  end
+
   def test_c_keeps_stdout_valid_json_for_an_unknown_command
     out, err, status = run_sharky("--json", "-c", "definitely-not-a-command", env: json_env)
 
