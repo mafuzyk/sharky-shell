@@ -343,7 +343,7 @@ module Sharky
     end
 
     def complete?
-      Parser.parse(@buffer.text)
+      Parser.parse(@buffer.text, compound: true)
       true
     rescue ParseError => error
       !error.incomplete?

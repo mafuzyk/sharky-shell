@@ -94,7 +94,7 @@ module Sharky
 
     def error_index(text)
       source = text.gsub(Editor::NEWLINE_GLYPH, "\n")
-      Parser.parse(source)
+      Parser.parse(source, compound: true)
       nil
     rescue ParseError => error
       position = error.pos

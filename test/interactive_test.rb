@@ -315,6 +315,44 @@ class InteractiveTest < Minitest::Test
     reader.close rescue nil
   end
 
+  public
+
+  def test_compound_command_uses_multiline_continuation
+    with_cli do |reader, writer, pid|
+      wait_for(reader, PROMPT)
+      writer.write("if true; then\r")
+      writer.write("echo compound-ok\r")
+      writer.write("fi\r")
+
+      output = read_until(reader, /compound-ok/).dup.force_encoding(Encoding::UTF_8)
+      assert_includes output, "compound-ok"
+      refute_includes output, "sharky:"
+      wait_for(reader, PROMPT)
+
+      writer.write("\x04")
+      assert_equal 0, wait_for_exit(pid).exitstatus
+    end
+  end
+
+  def test_here_doc_uses_multiline_continuation
+    with_cli do |reader, writer, pid|
+      wait_for(reader, PROMPT)
+      writer.write("cat <<EOF\r")
+      writer.write("hello-heredoc\r")
+      writer.write("EOF\r")
+
+      output = read_until(reader, /hello-heredoc/).dup.force_encoding(Encoding::UTF_8)
+      assert_includes output, "hello-heredoc"
+      refute_includes output, "sharky:"
+      wait_for(reader, PROMPT)
+
+      writer.write("\x04")
+      assert_equal 0, wait_for_exit(pid).exitstatus
+    end
+  end
+
+  private
+
   def wait_for(reader, pattern, timeout: 5)
     read_until(reader, pattern, timeout: timeout)
   end
