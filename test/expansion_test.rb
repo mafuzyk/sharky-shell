@@ -101,4 +101,29 @@ class ExpansionTest < Minitest::Test
     assert_equal ["7"], expansion.expand_word(word(part), quoted: true)
     assert_equal ["7"], expansion.expand_word(word(part))
   end
+
+  def test_brace_alternatives_and_nesting
+    assert_equal ["abd", "acd"], expansion.expand_word(word(lit("a{b,c}d")))
+    assert_equal ["abe", "ace", "ade"], expansion.expand_word(word(lit("a{b,{c,d}}e")))
+    assert_equal ["a", "ab", "ac"], expansion.expand_word(word(lit("a{,b,c}")))
+  end
+
+  def test_brace_ranges
+    assert_equal %w[1 2 3], expansion.expand_word(word(lit("{1..3}")))
+    assert_equal %w[3 2 1], expansion.expand_word(word(lit("{3..1}")))
+    assert_equal %w[a b c], expansion.expand_word(word(lit("{a..c}")))
+    assert_equal %w[1 3 5], expansion.expand_word(word(lit("{1..5..2}")))
+  end
+
+  def test_quoted_braces_do_not_expand
+    part = Sharky::AST::Part.new(type: :single, value: "a{b,c}")
+    assert_equal ["a{b,c}"], expansion.expand_word(word(part))
+    double = Sharky::AST::Part.new(type: :double, value: [lit("a{b,c}")])
+    assert_equal ["a{b,c}"], expansion.expand_word(word(double))
+  end
+
+  def test_malformed_braces_stay_literal
+    assert_equal ["a{b,c"], expansion.expand_word(word(lit("a{b,c")))
+    assert_equal ["{a}"], expansion.expand_word(word(lit("{a}")))
+  end
 end

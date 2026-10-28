@@ -169,4 +169,11 @@ class AcceptanceTest < Minitest::Test
     assert_equal 0, shell.run("new_name")
     assert_equal "oldnew", stdout.string
   end
+
+  def test_brace_expansion_reaches_the_cli
+    out, err, status = run_sharky("-c", "printf '%s\\n' a{b,c}d")
+    assert_equal 0, status.exitstatus
+    assert_equal "abd\nacd\n", out
+    assert_empty err
+  end
 end

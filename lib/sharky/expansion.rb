@@ -16,8 +16,10 @@ module Sharky
     end
 
     def expand_word(word, quoted: false)
-      fields = split_fields(word.parts.flat_map { |part| expand_part(part, quoted: quoted) })
-      fields.flat_map { |field| glob_field(field) }
+      brace_expand(word, quoted: quoted).flat_map do |variant|
+        fields = split_fields(variant.parts.flat_map { |part| expand_part(part, quoted: quoted) })
+        fields.flat_map { |field| glob_field(field) }
+      end
     end
 
     def expand_words(words)
@@ -29,6 +31,118 @@ module Sharky
     end
 
     private
+
+    def brace_expand(word, quoted:)
+      return [word] if quoted || word.parts.length != 1
+      part = word.parts.first
+      return [word] unless part.type == :literal && part.value.include?("{")
+
+      brace_expand_text(part.value).map do |text|
+        AST::Word.new(
+          parts: [AST::Part.new(type: :literal, value: text, pos: part.pos)],
+          pos: word.pos
+        )
+      end
+    end
+
+    def brace_expand_text(text)
+      open = text.index("{")
+      return [text] unless open
+
+      close = matching_brace(text, open)
+      return [text] unless close
+
+      prefix = text[0...open]
+      suffix = text[(close + 1)..]
+      body = text[(open + 1)...close]
+      options = brace_options(body)
+      return [text] if options.nil? || options.empty?
+
+      expansions = options.flat_map { |option| brace_expand_text(prefix + option + suffix) }
+      expansions.empty? ? [text] : expansions
+    end
+
+    def matching_brace(text, open)
+      depth = 0
+      index = open
+
+      while index < text.length
+        case text[index]
+        when "{"
+          depth += 1
+        when "}"
+          depth -= 1
+          return index if depth.zero?
+        end
+        index += 1
+      end
+
+      nil
+    end
+
+    def brace_options(body)
+      if (range = /\A(-?\d+)\.\.(-?\d+)(?:\.\.(-?\d+))?\z/.match(body))
+        return numeric_range(range)
+      end
+      if (range = /\A(.)\.\.(.)(?:\.\.(-?\d+))?\z/.match(body))
+        return character_range(range)
+      end
+
+      parts = []
+      depth = 0
+      start = 0
+      body.each_char.with_index do |char, index|
+        case char
+        when "{"
+          depth += 1
+        when "}"
+          depth -= 1
+        when ","
+          next unless depth.zero?
+
+          parts << body[start...index]
+          start = index + 1
+        end
+      end
+      return nil if parts.empty?
+
+      parts << body[start..]
+      parts
+    end
+
+    def numeric_range(match)
+      first = Integer(match[1], 10)
+      last = Integer(match[2], 10)
+      step = match[3] ? Integer(match[3], 10) : (first <= last ? 1 : -1)
+      return nil if step.zero?
+
+      step = -step.abs if first > last
+      values = []
+      value = first
+      while first <= last ? value <= last : value >= last
+        values << value.to_s
+        value += step
+        break if values.length > 10_000
+      end
+      values.empty? ? nil : values
+    end
+
+    def character_range(match)
+      first = match[1].ord
+      last = match[2].ord
+      step = match[3] ? Integer(match[3], 10) : (first <= last ? 1 : -1)
+      return nil if step.zero?
+
+      step = -step.abs if first > last
+      values = []
+      value = first
+      while first <= last ? value <= last : value >= last
+        values << value.chr
+        value += step
+        break if values.length > 10_000
+      end
+      values.empty? ? nil : values
+    end
 
     def expand_part(part, quoted:)
       case part.type
