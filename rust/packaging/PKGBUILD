@@ -24,6 +24,7 @@ pkgver() {
 build() {
   cd sharky-shell/rust
   export CARGO_HOME="$srcdir/cargo"
+  export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$srcdir=."
   cargo build --release --locked --jobs 6
 }
 
