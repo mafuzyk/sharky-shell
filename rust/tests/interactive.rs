@@ -257,3 +257,53 @@ fn wake_runs_commands_before_the_first_prompt() {
     assert!(wake < prompt, "wake output after prompt: {seen:?}");
     assert_eq!(seen.matches("WAKE-UP").count(), 1);
 }
+
+#[test]
+fn abbreviations_expand_on_space_and_enter() {
+    let dir = std::env::temp_dir().join(format!("sharky-abbr-{}", std::process::id()));
+    let config = dir.join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("config.sharky"),
+        "wave prompt \"P> \"\ntide greeting off\nshoal hi \"printf yes > $HOME/marker\"\n",
+    )
+    .unwrap();
+
+    let pty = openpty(None, None).expect("pty");
+    let stdin = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stdout = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stderr = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .stdin(stdin)
+        .stdout(stdout)
+        .stderr(stderr)
+        .env("SHARKY_CONFIG", &config)
+        .env("TERM", "xterm-256color")
+        .env("HOME", &dir)
+        .spawn()
+        .expect("spawn sharky");
+
+    let fd = pty.master.as_raw_fd();
+    let mut writer = unsafe { std::fs::File::from_raw_fd(pty.master.try_clone().unwrap().into_raw_fd()) };
+    let marker = dir.join("marker");
+
+    read_until(fd, "P> ", Duration::from_secs(5));
+    let _ = writer.write_all(b"hi \r");
+    read_until(fd, "P> ", Duration::from_secs(5));
+    assert_eq!(std::fs::read_to_string(&marker).unwrap_or_default(), "yes");
+
+    std::fs::remove_file(&marker).ok();
+    let _ = writer.write_all(b"hi\r");
+    read_until(fd, "P> ", Duration::from_secs(5));
+    assert_eq!(std::fs::read_to_string(&marker).unwrap_or_default(), "yes");
+
+    std::fs::remove_file(&marker).ok();
+    let _ = writer.write_all(b"echo hi \r");
+    read_until(fd, "P> ", Duration::from_secs(5));
+    assert!(!marker.exists(), "argument expanded as an abbreviation");
+
+    let _ = writer.write_all(b"exit\r");
+    let _ = child.wait();
+    std::fs::remove_dir_all(&dir).ok();
+}

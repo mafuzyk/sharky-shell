@@ -1212,3 +1212,24 @@ fn discovers_path_additions_from_shell_profiles() {
     std::fs::remove_dir_all(&dir).ok();
     assert_eq!(out.status.code(), Some(127));
 }
+
+#[test]
+fn abbr_declares_lists_and_removes_abbreviations() {
+    let out = sharky(&["-c", "abbr gco 'git checkout'; abbr"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "abbr gco='git checkout'\n");
+
+    let out = sharky(&["-c", "abbr gco 'git checkout'; abbr gco"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "abbr gco='git checkout'\n");
+
+    let out = sharky(&["-c", "abbr c=d; abbr c"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "abbr c='d'\n");
+
+    let out = sharky(&["-c", "abbr gco 'git checkout'; unabbr gco; abbr gco"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not found"));
+
+    let out = sharky(&["-c", "abbr a b; unabbr -a; abbr"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+
+    assert_eq!(sharky(&["-c", "unabbr"]).status.code(), Some(1));
+}

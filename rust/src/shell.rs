@@ -31,6 +31,7 @@ pub struct Shell {
     arrays: HashMap<String, Vec<String>>,
     positional: Vec<String>,
     aliases: HashMap<String, String>,
+    abbreviations: HashMap<String, String>,
     wake: Vec<String>,
     keybinds: HashMap<String, String>,
     settings: HashMap<String, String>,
@@ -113,6 +114,7 @@ impl Shell {
             arrays: HashMap::new(),
             positional: Vec::new(),
             aliases: HashMap::new(),
+            abbreviations: HashMap::new(),
             wake: Vec::new(),
             keybinds: HashMap::new(),
             settings: HashMap::new(),
@@ -180,6 +182,7 @@ impl Shell {
             self.add_path(&dir);
         }
         self.aliases.extend(config.aliases);
+        self.abbreviations.extend(config.abbreviations);
         self.wake.extend(config.wake);
         self.keybinds.extend(config.keybinds);
         self.settings.extend(config.settings);
@@ -289,6 +292,10 @@ impl Shell {
         self.settings.get(key).map(String::as_str)
     }
 
+    pub fn abbreviation(&self, name: &str) -> Option<&str> {
+        self.abbreviations.get(name).map(String::as_str)
+    }
+
     pub fn wake_commands(&self) -> &[String] {
         &self.wake
     }
@@ -326,6 +333,7 @@ impl Shell {
         .map(|word| word.to_string())
         .collect();
         words.extend(self.aliases.keys().cloned());
+        words.extend(self.abbreviations.keys().cloned());
         words.extend(self.funcs.keys().cloned());
         words
     }
@@ -1090,6 +1098,8 @@ impl Shell {
             }
             "type" => Some(Flow::Status(self.type_builtin(&words[1..]))),
             "alias" => Some(Flow::Status(self.alias(&words[1..]))),
+            "abbr" => Some(Flow::Status(self.abbr(&words[1..]))),
+            "unabbr" => Some(Flow::Status(self.unabbr(&words[1..]))),
             "unalias" => Some(Flow::Status(self.unalias(&words[1..]))),
             "history" => Some(Flow::Status(self.history_builtin(&words[1..]))),
             "wait" => Some(Flow::Status(self.wait_builtin(&words[1..]))),
@@ -1441,6 +1451,7 @@ impl Shell {
             return 0;
         };
         self.aliases.clear();
+        self.abbreviations.clear();
         self.keybinds.clear();
         self.settings.clear();
         self.colors.clear();
@@ -1645,6 +1656,66 @@ impl Shell {
                 status = 1;
             } else {
                 self.aliases.insert(name, value);
+            }
+        }
+        status
+    }
+
+    fn abbr(&mut self, args: &[String]) -> i32 {
+        if args.is_empty() {
+            let mut entries: Vec<_> = self.abbreviations.iter().collect();
+            entries.sort_by(|left, right| left.0.cmp(right.0));
+            for (name, value) in entries {
+                println!("abbr {name}='{value}'");
+            }
+            return 0;
+        }
+
+        let mut status = 0;
+        let mut index = 0;
+        while index < args.len() {
+            let argument = &args[index];
+            let (name, value) = if let Some((name, value)) = argument.split_once('=') {
+                index += 1;
+                (name.to_string(), value.to_string())
+            } else if index + 1 < args.len() {
+                let pair = (argument.clone(), args[index + 1].clone());
+                index += 2;
+                pair
+            } else {
+                index += 1;
+                match self.abbreviations.get(argument).cloned() {
+                    Some(value) => {
+                        println!("abbr {argument}='{value}'");
+                        continue;
+                    }
+                    None => {
+                        eprintln!("sharky: abbr: {argument}: not found");
+                        status = 1;
+                        continue;
+                    }
+                }
+            };
+            self.abbreviations.insert(name, value);
+        }
+        status
+    }
+
+    fn unabbr(&mut self, args: &[String]) -> i32 {
+        if args.is_empty() {
+            eprintln!("sharky: unabbr: usage: unabbr [-a] name ...");
+            return 1;
+        }
+        if args.len() == 1 && args[0] == "-a" {
+            self.abbreviations.clear();
+            return 0;
+        }
+
+        let mut status = 0;
+        for name in args {
+            if self.abbreviations.remove(name).is_none() {
+                eprintln!("sharky: unabbr: {name}: not found");
+                status = 1;
             }
         }
         status
@@ -2264,6 +2335,8 @@ fn is_builtin_name(name: &str) -> bool {
             | "pwd"
             | "type"
             | "alias"
+            | "abbr"
+            | "unabbr"
             | "unalias"
             | "trap"
             | "read"

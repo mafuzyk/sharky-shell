@@ -18,6 +18,9 @@ current "~/.local/bin"
 // Startup commands, run once before the first prompt
 // wake "fastfetch"
 
+// Abbreviations expand when you press space or Enter
+// shoal gco "git checkout"
+
 // Aliases
 reef ll "ls -lah"
 reef gs "git status"

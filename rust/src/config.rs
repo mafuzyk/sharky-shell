@@ -3,7 +3,7 @@ use std::fmt;
 use std::path::Path;
 
 pub const INSTRUCTIONS: &[&str] = &[
-    "tide", "pearl", "current", "reef", "anchor", "coral", "wave", "wake",
+    "tide", "pearl", "current", "reef", "shoal", "anchor", "coral", "wave", "wake",
 ];
 
 pub const ACTIONS: &[&str] = &[
@@ -35,6 +35,7 @@ pub struct Config {
     pub env: Vec<(String, String)>,
     pub paths: Vec<String>,
     pub aliases: HashMap<String, String>,
+    pub abbreviations: HashMap<String, String>,
     pub wake: Vec<String>,
     pub keybinds: HashMap<String, String>,
     pub colors: HashMap<String, String>,
@@ -147,6 +148,7 @@ fn merge(into: &mut Config, from: Config) {
     into.env.extend(from.env);
     into.paths.extend(from.paths);
     into.aliases.extend(from.aliases);
+    into.abbreviations.extend(from.abbreviations);
     into.wake.extend(from.wake);
     into.keybinds.extend(from.keybinds);
     into.colors.extend(from.colors);
@@ -178,6 +180,10 @@ fn apply(config: &mut Config, tokens: &[String]) -> Result<(), String> {
         "reef" => {
             let (key, value) = pair(rest, "reef")?;
             config.aliases.insert(key, value);
+        }
+        "shoal" => {
+            let (key, value) = pair(rest, "shoal")?;
+            config.abbreviations.insert(key, value);
         }
         "wake" => {
             let [value] = rest else {
@@ -319,6 +325,15 @@ anchor ctrl+r history_search
         assert_eq!(config.paths, vec!["~/.cargo/bin".to_string()]);
         assert_eq!(config.aliases["ll"], "ls -lah");
         assert_eq!(config.keybinds["ctrl+r"], "history_search");
+    }
+
+    #[test]
+    fn parses_shoal_abbreviations() {
+        let config = parse("shoal gco \"git checkout\"\n", "config.sharky").unwrap();
+        assert_eq!(config.abbreviations["gco"], "git checkout");
+
+        let error = parse("shoal\n", "config.sharky").unwrap_err();
+        assert!(error.message.contains("property and a value"), "{error}");
     }
 
     #[test]

@@ -8,7 +8,8 @@ Status: the shell runs commands, scripts and an interactive session, with job
 control (`&`, `jobs`, `fg`, `bg`, Ctrl-Z), `[[ ]]` conditionals, `((...))`,
 heredocs, here-strings, brace expansion, indexed arrays, `${var/pat/repl}`,
 `set` options, `trap` EXIT, `read`, `shift`, `[[ =~ ]]`, the core builtins
-a Starship prompt (`tide starship on`) and startup commands (`wake`).
+a Starship prompt (`tide starship on`), startup commands (`wake`) and
+automatic `PATH` discovery.
 
 ## Build
 

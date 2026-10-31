@@ -88,7 +88,7 @@ The prompt, `-c` and script files share one grammar:
 | case | `case $x in f*) ...;; *) ...;; esac` |
 | functions | `greet() { printf 'hi %s\n' "$1"; }` |
 | groups and subshells | `{ a; b; }`, `( a; b )` |
-| builtins | `type`, `alias`, `unalias`, `history`, `pwd`, `read`, `shift` |
+| builtins | `type`, `alias`, `unalias`, `abbr`, `unabbr`, `history`, `pwd`, `read`, `shift` |
 | job control | `cmd &`, `jobs`, `fg`, `bg`, Ctrl-Z |
 | scripts | `source lib.sh`, `sharky file.sh args` |
 
@@ -120,6 +120,7 @@ and `\t` are escapes. Anything after `//` outside quotes is a comment.
 | `pearl` | environment variable | `pearl EDITOR "nvim"` |
 | `current` | prepend a directory to `PATH` | `current "~/.cargo/bin"` |
 | `reef` | alias | `reef ll "ls -lah"` |
+| `shoal` | abbreviation, expanded on space or Enter | `shoal gco "git checkout"` |
 | `wake` | run a command at interactive startup | `wake "fastfetch"` |
 | `anchor` | key binding | `anchor ctrl+r history_search` |
 
@@ -163,6 +164,7 @@ current "~/.local/bin"
 
 reef ll "ls -lah"
 reef gs "git status"
+shoal gco "git checkout"
 reef cls "clear"
 
 anchor ctrl+r history_search

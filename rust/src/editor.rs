@@ -38,6 +38,7 @@ impl Editor {
 
             match term::read_key()? {
                 Key::Enter => {
+                    expand_abbreviation(&mut buffer, &mut cursor, shell, "");
                     term::write_stdout("\r\n")?;
                     return Ok(Line::Content(buffer.iter().collect()));
                 }
@@ -92,6 +93,12 @@ impl Editor {
                 Key::Up => self.recall_newer(&mut buffer, &mut cursor, shell),
                 Key::Down => self.recall_older(&mut buffer, &mut cursor, shell),
                 Key::Tab => complete(&mut buffer, &mut cursor, shell),
+                Key::Char(' ') => {
+                    if !expand_abbreviation(&mut buffer, &mut cursor, shell, " ") {
+                        buffer.insert(cursor, ' ');
+                        cursor += 1;
+                    }
+                }
                 Key::Char(char) => {
                     buffer.insert(cursor, char);
                     cursor += 1;
@@ -159,6 +166,33 @@ impl Editor {
 
         term::write_stdout(&out)
     }
+}
+
+fn expand_abbreviation(
+    buffer: &mut Vec<char>,
+    cursor: &mut usize,
+    shell: &Shell,
+    separator: &str,
+) -> bool {
+    if *cursor != buffer.len() {
+        return false;
+    }
+
+    let text: String = buffer.iter().collect();
+    let start = text.len() - text.trim_start().len();
+    let token = text[start..].trim_end();
+    if token.is_empty() || token.chars().any(char::is_whitespace) {
+        return false;
+    }
+
+    let Some(expansion) = shell.abbreviation(token) else {
+        return false;
+    };
+    let separator = if expansion.ends_with(' ') { "" } else { separator };
+    let expanded = format!("{}{expansion}{separator}", &text[..start]);
+    *buffer = expanded.chars().collect();
+    *cursor = buffer.len();
+    true
 }
 
 fn last_line_width(prompt: &str) -> usize {
