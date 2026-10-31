@@ -1,0 +1,138 @@
+.TH SHARKY 1 "2026-10-31" "sharky 2.0.0" "User Commands"
+.SH NAME
+sharky \- Unix-first interactive shell
+.SH SYNOPSIS
+.B sharky
+[\fIOPTIONS\fR]
+.br
+.B sharky
+\fB\-c\fR \fICOMMAND\fR
+.br
+.B sharky
+\fIFILE\fR [\fIARG\fR...]
+.SH DESCRIPTION
+.B sharky
+is an interactive POSIX-like shell written in Rust. Commands run as real Unix
+processes; the parser, executor, line editor, prompt, history and completion are
+owned by the shell itself.
+.PP
+With no arguments and a terminal on standard input, sharky starts interactively.
+With no arguments and no terminal it reads commands from standard input.
+.SH OPTIONS
+.TP
+.B \-c \fICOMMAND\fR
+Run \fICOMMAND\fR and exit with its status.
+.TP
+.B \-\-no\-config
+Do not read the configuration files.
+.TP
+.B \-\-version
+Print the version and exit.
+.TP
+.B \-\-help
+Print a short usage summary and exit.
+.SH LANGUAGE
+The prompt, \fB\-c\fR and script files share one grammar:
+.IP \(bu 2
+single and double quotes, backslash escapes and \fB#\fR comments;
+.IP \(bu 2
+variables, positional parameters, \fB${NAME:\-default}\fR style operators and
+\fB$(...)\fR command substitution;
+.IP \(bu 2
+arithmetic expansion \fB$((...))\fR;
+.IP \(bu 2
+tilde expansion and glob patterns;
+.IP \(bu 2
+pipelines, redirections (\fB>\fR, \fB>>\fR, \fB<\fR, \fB2>&1\fR), \fB;\fR,
+\fB&&\fR and \fB||\fR lists;
+.IP \(bu 2
+\fBif\fR, \fBfor\fR, \fBwhile\fR, \fBuntil\fR, \fBcase\fR, shell functions,
+groups, subshells and \fB!\fR.
+.PP
+This is a subset of Bash, not a replacement. Unsupported syntax fails with
+status 2 instead of falling back to another shell.
+.SH CONFIGURATION
+Configuration lives in \fB$SHARKY_CONFIG\fR, or
+\fB${XDG_CONFIG_HOME:\-~/.config}/sharky\fR. Two files are read, each a small
+declarative language with one statement per line, \fB//\fR comments and
+double-quoted values:
+.PP
+.nf
+    tide greeting off
+    tide history 10000
+    pearl EDITOR "nvim"
+    current "~/.local/bin"
+    reef ll "ls -lah"
+    anchor ctrl+r history_search
+.fi
+.PP
+.SS config.sharky
+.TP
+.B tide \fIkey value\fR
+Shell preferences: \fBgreeting\fR, \fBautosuggest\fR, \fBhighlight\fR
+(\fBon\fR or \fBoff\fR) and \fBhistory\fR (a number).
+.TP
+.B pearl \fINAME value\fR
+Set an environment variable.
+.TP
+.B current \fIdirectory\fR
+Prepend a directory to \fBPATH\fR.
+.TP
+.B reef \fIname command\fR
+Define an alias.
+.TP
+.B anchor \fIkey action\fR
+Bind a key to an editor action.
+.SS theme.sharky
+.TP
+.B coral \fIname #RRGGBB\fR
+Define a colour.
+.TP
+.B wave \fIkey value\fR
+Set the prompt template (\fBprompt\fR) and styles. Styles reference colours with
+\fB@name\fR, for example \fBwave prompt.cwd @kelp\fR.
+.PP
+Unknown instructions, wrong arity, invalid colours and undefined colour
+references are reported as \fBfile:line\fR errors; the shell keeps running with
+its defaults.
+.SH FILES
+.TP
+.I ~/.config/sharky/config.sharky
+Shell preferences, environment, PATH entries, aliases and key bindings.
+.TP
+.I ~/.config/sharky/theme.sharky
+Colour palette and prompt styles.
+.TP
+.I ~/.local/share/sharky/history
+Command history, limited by \fBtide history\fR.
+.SH ENVIRONMENT
+.TP
+.B SHARKY_CONFIG
+Configuration directory, overriding the default.
+.TP
+.B XDG_CONFIG_HOME
+Used to find the configuration directory.
+.TP
+.B XDG_DATA_HOME
+Used to find the history file.
+.TP
+.B NO_COLOR
+Disables colour in the prompt when set.
+.TP
+.B PATH
+Searched for commands, extended by \fBcurrent\fR entries.
+.SH EXIT STATUS
+The status of the last command, or the argument of \fBexit\fR. A syntax error
+exits with 2; a command that cannot be found exits with 127; a command that
+cannot be executed exits with 126.
+.SH EXAMPLES
+.nf
+    sharky -c 'printf "a b\\n" | wc -w'
+    sharky script.sh argument
+    sharky
+.fi
+.SH SEE ALSO
+.BR bash (1),
+.BR fish (1)
+.SH LICENSE
+GPL-3.0-only. Copyright (C) 2026 mafuzyk.
