@@ -11,8 +11,9 @@ use crate::config::{self, Config};
 use crate::ast::{
     AndOr, Command, List, Pipeline, Program, Redirect, RedirectOp, Simple,
 };
+use crate::arith;
 use crate::exec;
-use crate::lexer::{Part, Word};
+use crate::lexer::{self, ParamOp, Parameter, Part, TokenKind, Word};
 use crate::parser;
 
 pub struct Shell {
@@ -286,7 +287,7 @@ impl Shell {
     fn run_simple(&mut self, simple: &Simple) -> Flow {
         if simple.words.is_empty() && simple.redirects.is_empty() {
             for assignment in &simple.assignments {
-                let value = expand_assignment(&assignment.value, self);
+                let value = self.expand_assignment(&assignment.value);
                 self.set_var(&assignment.name, value);
             }
             return Flow::Status(0);
@@ -354,7 +355,7 @@ impl Shell {
     fn run_simple_child(&mut self, simple: &Simple) -> i32 {
         if simple.words.is_empty() && simple.redirects.is_empty() {
             for assignment in &simple.assignments {
-                let value = expand_assignment(&assignment.value, self);
+                let value = self.expand_assignment(&assignment.value);
                 self.set_var(&assignment.name, value);
             }
             return 0;
@@ -459,10 +460,11 @@ impl Shell {
         let values: Vec<String> = if words.is_empty() {
             self.positional.clone()
         } else {
-            words
-                .iter()
-                .flat_map(|word| expand_word(word, self))
-                .collect()
+            let mut values = Vec::new();
+            for word in words {
+                values.extend(self.expand_word(word));
+            }
+            values
         };
 
         let mut status = 0;
@@ -509,11 +511,11 @@ impl Shell {
     }
 
     fn run_case(&mut self, word: &Word, arms: &[(Vec<Word>, List)]) -> Flow {
-        let value = expand_text_word(word, self);
+        let value = self.expand_text_word(word);
 
         for (patterns, body) in arms {
             for pattern in patterns {
-                let pattern = expand_text_word(pattern, self);
+                let pattern = self.expand_text_word(pattern);
                 if glob_match(&pattern, &value) {
                     return self.run_list(body);
                 }
@@ -523,18 +525,17 @@ impl Shell {
         Flow::Status(0)
     }
 
-    fn prepare(&self, simple: &Simple) -> Result<Prepared, String> {
-        let argv: Vec<String> = simple
-            .words
-            .iter()
-            .flat_map(|word| expand_word(word, self))
-            .collect();
+    fn prepare(&mut self, simple: &Simple) -> Result<Prepared, String> {
+        let mut argv = Vec::new();
+        for word in &simple.words {
+            argv.extend(self.expand_word(word));
+        }
 
         let actions = self.redirect_actions(&simple.redirects)?;
 
         let mut env = self.env.clone();
         for assignment in &simple.assignments {
-            let value = expand_assignment(&assignment.value, self);
+            let value = self.expand_assignment(&assignment.value);
             match env.iter_mut().find(|(key, _)| key == &assignment.name) {
                 Some(entry) => entry.1 = value,
                 None => env.push((assignment.name.clone(), value)),
@@ -550,16 +551,16 @@ impl Shell {
 
     // shortcut: aliases expand to plain words; pipes and redirections in an
     // alias value are not supported yet.
-    fn expand_alias(&self, expansion: &str, extra: &[String]) -> Option<Vec<String>> {
-        let tokens = crate::lexer::tokenize(expansion).ok()?;
+    fn expand_alias(&mut self, expansion: &str, extra: &[String]) -> Option<Vec<String>> {
+        let tokens = lexer::tokenize(expansion).ok()?;
         let mut argv = Vec::new();
 
         for token in tokens {
             match token.kind {
-                crate::lexer::TokenKind::Word(word) => {
-                    argv.extend(expand_word(&word, self));
+                TokenKind::Word(word) => {
+                    argv.extend(self.expand_word(&word));
                 }
-                crate::lexer::TokenKind::Eof => break,
+                TokenKind::Eof => break,
                 _ => return None,
             }
         }
@@ -568,7 +569,7 @@ impl Shell {
         Some(argv)
     }
 
-    fn redirect_actions(&self, redirects: &[Redirect]) -> Result<Vec<Action>, String> {
+    fn redirect_actions(&mut self, redirects: &[Redirect]) -> Result<Vec<Action>, String> {
         let mut actions = Vec::new();
 
         for redirect in redirects {
@@ -581,7 +582,7 @@ impl Shell {
                     let Some(word) = &redirect.target else {
                         return Err("redirect without a target".to_string());
                     };
-                    let fields = expand_word(word, self);
+                    let fields = self.expand_word(word);
                     if fields.len() != 1 {
                         return Err("ambiguous redirect".to_string());
                     }
@@ -753,6 +754,196 @@ impl Shell {
             }
         }
     }
+
+    fn expand_word(&mut self, word: &Word) -> Vec<String> {
+        let mut fields = Fields::new();
+
+        for part in &word.parts {
+            match part {
+                Part::Literal(text) => fields.push(text, false),
+                Part::Single(text) | Part::Escaped(text) => fields.push(text, true),
+                Part::Tilde => {
+                    let home = self.var("HOME");
+                    fields.push(&home, true);
+                }
+                Part::Double(inner) => {
+                    let mut text = String::new();
+                    self.expand_parts(inner, &mut text);
+                    fields.push(&text, true);
+                }
+                Part::Variable(name) if name == "@" || name == "*" => {
+                    for value in &self.positional {
+                        fields.field(value);
+                    }
+                }
+                Part::Variable(name) => {
+                    let value = self.var(name);
+                    fields.push(&value, false);
+                }
+                Part::Parameter(parameter) => {
+                    let value = self.parameter_value(parameter);
+                    fields.push(&value, false);
+                }
+                Part::CmdSub(source) => {
+                    let value = self.command_substitution(source);
+                    fields.push(&value, false);
+                }
+                Part::Arithmetic(source) => match arith::evaluate(source, self) {
+                    Ok(value) => fields.push(&value.to_string(), false),
+                    Err(message) => {
+                        eprintln!("sharky: arithmetic: {message}");
+                        fields.push("0", false);
+                    }
+                },
+            }
+        }
+
+        self.glob_fields(fields.finish())
+    }
+
+    fn expand_text_word(&mut self, word: &Word) -> String {
+        let mut text = String::new();
+        self.expand_parts(&word.parts, &mut text);
+        text
+    }
+
+    fn expand_assignment(&mut self, word: &Word) -> String {
+        self.expand_text_word(word)
+    }
+
+    fn expand_parts(&mut self, parts: &[Part], out: &mut String) {
+        for part in parts {
+            match part {
+                Part::Literal(text) | Part::Single(text) | Part::Escaped(text) => out.push_str(text),
+                Part::Double(inner) => self.expand_parts(inner, out),
+                Part::Variable(name) => out.push_str(&self.var(name)),
+                Part::Parameter(parameter) => out.push_str(&self.parameter_value(parameter)),
+                Part::CmdSub(source) => out.push_str(&self.command_substitution(source)),
+                Part::Arithmetic(source) => match arith::evaluate(source, self) {
+                    Ok(value) => out.push_str(&value.to_string()),
+                    Err(message) => eprintln!("sharky: arithmetic: {message}"),
+                },
+                Part::Tilde => out.push_str(&self.var("HOME")),
+            }
+        }
+    }
+
+    fn expand_string(&mut self, text: &str) -> String {
+        let Ok(tokens) = lexer::tokenize(text) else {
+            return text.to_string();
+        };
+
+        let mut out = String::new();
+        for token in tokens {
+            if let TokenKind::Word(word) = token.kind {
+                if !out.is_empty() {
+                    out.push(' ');
+                }
+                out.push_str(&self.expand_text_word(&word));
+            }
+        }
+        out
+    }
+
+    fn parameter_value(&mut self, parameter: &Parameter) -> String {
+        let value = self.var(&parameter.name);
+        let argument = parameter.argument.clone().unwrap_or_default();
+
+        match parameter.operator {
+            None => value,
+            Some(ParamOp::Length) => value.chars().count().to_string(),
+            Some(ParamOp::Default) => {
+                if value.is_empty() {
+                    self.expand_string(&argument)
+                } else {
+                    value
+                }
+            }
+            Some(ParamOp::Assign) => {
+                if value.is_empty() {
+                    let new = self.expand_string(&argument);
+                    self.set_var(&parameter.name, new.clone());
+                    new
+                } else {
+                    value
+                }
+            }
+            Some(ParamOp::Alternate) => {
+                if value.is_empty() {
+                    String::new()
+                } else {
+                    self.expand_string(&argument)
+                }
+            }
+            Some(ParamOp::Error) => {
+                if value.is_empty() {
+                    eprintln!("sharky: {}: {}", parameter.name, argument);
+                }
+                value
+            }
+            Some(ParamOp::TrimPrefixShort) => trim_prefix(&value, &argument, false),
+            Some(ParamOp::TrimPrefixLong) => trim_prefix(&value, &argument, true),
+            Some(ParamOp::TrimSuffixShort) => trim_suffix(&value, &argument, false),
+            Some(ParamOp::TrimSuffixLong) => trim_suffix(&value, &argument, true),
+        }
+    }
+
+    fn command_substitution(&mut self, source: &str) -> String {
+        use std::io::Read;
+        use std::os::fd::{FromRawFd, IntoRawFd};
+
+        let Ok((read, write)) = pipe2(OFlag::O_CLOEXEC) else {
+            return String::new();
+        };
+
+        // SAFETY: the child runs shell code and exits without unwinding.
+        match unsafe { fork() } {
+            Ok(ForkResult::Parent { child }) => {
+                drop(write);
+                let mut file = unsafe { std::fs::File::from_raw_fd(read.into_raw_fd()) };
+                let mut output = String::new();
+                let _ = file.read_to_string(&mut output);
+                exec::wait(child);
+                while output.ends_with('\n') {
+                    output.pop();
+                }
+                output
+            }
+            Ok(ForkResult::Child) => {
+                let _ = move_fd(write.as_raw_fd(), 1);
+                unsafe {
+                    nix::libc::close(read.as_raw_fd());
+                    nix::libc::close(write.as_raw_fd());
+                }
+                let code = match parser::parse(source) {
+                    Ok(program) => flow_status(self.run_program(&program)),
+                    Err(err) => {
+                        eprintln!("sharky: {}", err.message);
+                        2
+                    }
+                };
+                unsafe { _exit(code) }
+            }
+            Err(_) => String::new(),
+        }
+    }
+
+    fn glob_fields(&self, fields: Vec<(String, bool)>) -> Vec<String> {
+        let mut out = Vec::new();
+
+        for (text, eligible) in fields {
+            if eligible && text.chars().any(|char| matches!(char, '*' | '?' | '[')) {
+                let matches = glob(&text);
+                if !matches.is_empty() {
+                    out.extend(matches);
+                    continue;
+                }
+            }
+            out.push(text);
+        }
+
+        out
+    }
 }
 
 fn config_dir() -> Option<PathBuf> {
@@ -810,54 +1001,12 @@ fn apply_actions(actions: &[Action]) -> Result<(), String> {
     Ok(())
 }
 
-fn expand_word(word: &Word, shell: &Shell) -> Vec<String> {
-    let mut fields = Fields::new();
-
-    for part in &word.parts {
-        match part {
-            Part::Literal(text) => fields.push(text, false),
-            Part::Single(text) | Part::Escaped(text) => fields.push(text, true),
-            Part::Double(inner) => {
-                let mut text = String::new();
-                expand_text(inner, shell, &mut text);
-                fields.push(&text, true);
-            }
-            Part::Variable(name) if name == "@" || name == "*" => {
-                for value in &shell.positional {
-                    fields.field(value);
-                }
-            }
-            Part::Variable(name) => fields.push(&shell.var(name), false),
-        }
-    }
-
-    fields.finish()
-}
-
-fn expand_text_word(word: &Word, shell: &Shell) -> String {
-    let mut text = String::new();
-    expand_text(&word.parts, shell, &mut text);
-    text
-}
-
-fn expand_assignment(word: &Word, shell: &Shell) -> String {
-    expand_text_word(word, shell)
-}
-
-fn expand_text(parts: &[Part], shell: &Shell, out: &mut String) {
-    for part in parts {
-        match part {
-            Part::Literal(text) | Part::Single(text) | Part::Escaped(text) => out.push_str(text),
-            Part::Double(inner) => expand_text(inner, shell, out),
-            Part::Variable(name) => out.push_str(&shell.var(name)),
-        }
-    }
-}
 
 struct Fields {
-    done: Vec<String>,
+    done: Vec<(String, bool)>,
     current: String,
     started: bool,
+    glob: bool,
 }
 
 impl Fields {
@@ -866,6 +1015,7 @@ impl Fields {
             done: Vec::new(),
             current: String::new(),
             started: false,
+            glob: false,
         }
     }
 
@@ -884,6 +1034,7 @@ impl Fields {
             } else {
                 self.current.push(char);
                 self.started = true;
+                self.glob = true;
             }
         }
     }
@@ -894,20 +1045,92 @@ impl Fields {
         }
         self.current.push_str(text);
         self.started = true;
+        self.glob = true;
         self.flush();
     }
 
     fn flush(&mut self) {
-        self.done.push(std::mem::take(&mut self.current));
+        self.done
+            .push((std::mem::take(&mut self.current), self.glob));
         self.started = false;
+        self.glob = false;
     }
 
-    fn finish(mut self) -> Vec<String> {
+    fn finish(mut self) -> Vec<(String, bool)> {
         if self.started {
             self.flush();
         }
         self.done
     }
+}
+
+fn glob(pattern: &str) -> Vec<String> {
+    let (dir, base) = match pattern.rfind('/') {
+        Some(index) => (&pattern[..index], &pattern[index + 1..]),
+        None => (".", pattern),
+    };
+    if base.is_empty() {
+        return Vec::new();
+    }
+
+    let directory = if dir.is_empty() { "/" } else { dir };
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Vec::new();
+    };
+
+    let mut matches: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') && !base.starts_with('.') {
+                return None;
+            }
+            if !glob_match(base, &name) {
+                return None;
+            }
+            Some(match pattern.rfind('/') {
+                Some(_) => format!("{}/{name}", directory.trim_end_matches('/')),
+                None => name,
+            })
+        })
+        .collect();
+
+    matches.sort();
+    matches
+}
+
+fn trim_prefix(value: &str, pattern: &str, longest: bool) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let mut indices: Vec<usize> = (0..=chars.len()).collect();
+    if longest {
+        indices.reverse();
+    }
+
+    for index in indices {
+        let prefix: String = chars[..index].iter().collect();
+        if glob_match(pattern, &prefix) {
+            return chars[index..].iter().collect();
+        }
+    }
+
+    value.to_string()
+}
+
+fn trim_suffix(value: &str, pattern: &str, longest: bool) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let mut indices: Vec<usize> = (0..=chars.len()).collect();
+    if !longest {
+        indices.reverse();
+    }
+
+    for index in indices {
+        let suffix: String = chars[index..].iter().collect();
+        if glob_match(pattern, &suffix) {
+            return chars[..index].iter().collect();
+        }
+    }
+
+    value.to_string()
 }
 
 fn glob_match(pattern: &str, text: &str) -> bool {

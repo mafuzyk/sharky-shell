@@ -1,3 +1,4 @@
+mod arith;
 mod ast;
 mod cli;
 mod config;

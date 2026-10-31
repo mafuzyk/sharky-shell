@@ -38,9 +38,11 @@ assert an exit status instead of waiting forever.
 - [x] Lists (`;`, `&&`, `||`), `exit`, `cd`, `:`, `true`, `false`
 - [x] Pipelines, redirects (`>`, `>>`, `<`, `N>`, `2>&1`)
 - [x] Assignments, prefix assignments, `export`, `unset`
-- [ ] `$(...)`, `${...}` operators, `$((...))`, globbing
-- [ ] Parser and AST: `if`, `for`, `while`, `case`, functions, `[[ ]]`
-- [ ] `source`, scripts, shebang, positional parameters
+- [x] `$(...)`, `${...}` operators, `$((...))`, globbing, tilde
+- [x] Parser and AST: `if`, `for`, `while`, `until`, `case`, functions,
+      groups, subshells, `!`
+- [ ] `[[ ]]`, `((...))` as commands, heredocs, `&` background lists
+- [ ] `source`, scripts, shebang, positional parameters in scripts
 - [ ] Job control, signals, `trap`
 - [ ] Interactive: line editor, history, completion, prompt
 - [x] Configuration parser: `config.sharky` and `theme.sharky`

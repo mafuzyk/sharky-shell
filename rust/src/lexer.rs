@@ -5,6 +5,30 @@ pub enum Part {
     Escaped(String),
     Double(Vec<Part>),
     Variable(String),
+    Parameter(Box<Parameter>),
+    CmdSub(String),
+    Arithmetic(String),
+    Tilde,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Parameter {
+    pub name: String,
+    pub operator: Option<ParamOp>,
+    pub argument: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ParamOp {
+    Length,
+    Default,
+    Assign,
+    Alternate,
+    Error,
+    TrimPrefixShort,
+    TrimPrefixLong,
+    TrimSuffixShort,
+    TrimSuffixLong,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -195,6 +219,11 @@ impl Lexer {
                 '"' => parts.push(Part::Double(self.scan_double()?)),
                 '\\' => self.scan_escape(&mut parts)?,
                 '$' => parts.push(self.scan_dollar()),
+                '~' if parts.is_empty() && matches!(self.peek(), None | Some('/')) =>
+                {
+                    parts.push(Part::Tilde);
+                    self.pos += 1;
+                }
                 _ => {
                     push_literal(&mut parts, char);
                     self.pos += 1;
@@ -357,20 +386,17 @@ impl Lexer {
         self.pos += 1;
 
         match self.current() {
-            Some('{') => {
-                self.pos += 1;
-                let mut name = String::new();
-                while let Some(char) = self.current() {
-                    if char == '}' {
-                        self.pos += 1;
-                        return Part::Variable(name);
-                    }
-                    name.push(char);
-                    self.pos += 1;
+            Some('(') => {
+                if self.peek() == Some('(') {
+                    self.scan_arithmetic(start)
+                } else {
+                    self.scan_command_substitution(start)
                 }
-                self.pos = start;
-                Part::Literal("$".to_string())
             }
+            Some('{') => match self.scan_braced_parameter(start) {
+                Some(parameter) => Part::Parameter(Box::new(parameter)),
+                None => Part::Literal("$".to_string()),
+            },
             Some(char @ ('?' | '$' | '!' | '#' | '@' | '*')) => {
                 self.pos += 1;
                 Part::Variable(char.to_string())
@@ -399,6 +425,166 @@ impl Lexer {
             }
             _ => Part::Literal("$".to_string()),
         }
+    }
+
+    fn scan_braced_parameter(&mut self, start: usize) -> Option<Parameter> {
+        self.pos += 1;
+        let content_start = self.pos;
+        let mut depth = 0;
+        let mut index = self.pos;
+
+        while index < self.chars.len() {
+            match self.chars[index] {
+                '\\' => index += 2,
+                '$' if self.chars.get(index + 1) == Some(&'{') => {
+                    depth += 1;
+                    index += 2;
+                }
+                '}' if depth == 0 => {
+                    let content: String = self.chars[content_start..index].iter().collect();
+                    self.pos = index + 1;
+                    return Some(parse_parameter(&content));
+                }
+                '}' => {
+                    depth -= 1;
+                    index += 1;
+                }
+                _ => index += 1,
+            }
+        }
+
+        self.pos = start;
+        None
+    }
+
+    fn scan_arithmetic(&mut self, start: usize) -> Part {
+        self.pos += 2;
+        let content_start = self.pos;
+        let mut depth = 0;
+
+        while self.pos < self.chars.len() {
+            match self.chars[self.pos] {
+                '(' => {
+                    depth += 1;
+                    self.pos += 1;
+                }
+                ')' if depth == 0 && self.chars.get(self.pos + 1) == Some(&')') => {
+                    let source: String = self.chars[content_start..self.pos].iter().collect();
+                    self.pos += 2;
+                    return Part::Arithmetic(source.trim().to_string());
+                }
+                ')' => {
+                    depth -= 1;
+                    self.pos += 1;
+                }
+                _ => self.pos += 1,
+            }
+        }
+
+        self.pos = start;
+        Part::Literal("$((".to_string())
+    }
+
+    fn scan_command_substitution(&mut self, start: usize) -> Part {
+        let content_start = self.pos + 1;
+        let mut index = content_start;
+        let mut depth = 1;
+        let mut state = Quote::Normal;
+
+        while index < self.chars.len() {
+            let char = self.chars[index];
+
+            match state {
+                Quote::Single => {
+                    if char == '\'' {
+                        state = Quote::Normal;
+                    }
+                    index += 1;
+                }
+                Quote::Double => match char {
+                    '\\' => index += 2,
+                    '"' => {
+                        state = Quote::Normal;
+                        index += 1;
+                    }
+                    _ => index += 1,
+                },
+                Quote::Normal => match char {
+                    '\\' => index += 2,
+                    '\'' => {
+                        state = Quote::Single;
+                        index += 1;
+                    }
+                    '"' => {
+                        state = Quote::Double;
+                        index += 1;
+                    }
+                    '(' => {
+                        depth += 1;
+                        index += 1;
+                    }
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            let source: String = self.chars[content_start..index].iter().collect();
+                            self.pos = index + 1;
+                            return Part::CmdSub(source);
+                        }
+                        index += 1;
+                    }
+                    _ => index += 1,
+                },
+            }
+        }
+
+        self.pos = start;
+        Part::Literal("$(".to_string())
+    }
+}
+
+enum Quote {
+    Normal,
+    Single,
+    Double,
+}
+
+fn parse_parameter(content: &str) -> Parameter {
+    if let Some(rest) = content.strip_prefix('#')
+        && !rest.is_empty()
+        && rest.chars().all(|char| char.is_ascii_alphanumeric() || char == '_')
+    {
+        return Parameter {
+            name: rest.to_string(),
+            operator: Some(ParamOp::Length),
+            argument: None,
+        };
+    }
+
+    const OPERATORS: &[(&str, ParamOp)] = &[
+        (":-", ParamOp::Default),
+        (":=", ParamOp::Assign),
+        (":?", ParamOp::Error),
+        (":+", ParamOp::Alternate),
+        ("##", ParamOp::TrimPrefixLong),
+        ("%%", ParamOp::TrimSuffixLong),
+        ("#", ParamOp::TrimPrefixShort),
+        ("%", ParamOp::TrimSuffixShort),
+    ];
+
+    for (operator, kind) in OPERATORS {
+        if let Some(index) = content.find(operator) {
+            return Parameter {
+                name: content[..index].to_string(),
+                operator: Some(*kind),
+                argument: Some(content[index + operator.len()..].to_string()),
+            };
+        }
+    }
+
+    Parameter {
+        name: content.to_string(),
+        operator: None,
+        argument: None,
     }
 }
 

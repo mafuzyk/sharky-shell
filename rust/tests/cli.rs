@@ -77,10 +77,10 @@ fn unclosed_quote_is_a_syntax_error() {
 }
 
 #[test]
-fn unsupported_operator_fails_instead_of_looping() {
-    let out = sharky(&["-c", r"printf '%s' $(printf x)"]);
-    assert_eq!(out.status.code(), Some(2));
-    assert!(!out.stderr.is_empty());
+fn command_substitution_runs_and_captures() {
+    let out = sharky(&["-c", r"printf '%s' $(printf hi)"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi");
 }
 
 fn sharky_with(args: &[&str], env: &[(&str, &str)]) -> Output {
@@ -457,4 +457,106 @@ fn theme_with_undefined_colour_fails_loudly() {
         .expect("failed to run sharky");
     std::fs::remove_dir_all(&dir).ok();
     assert!(String::from_utf8_lossy(&out.stderr).contains("undefined colour"));
+}
+
+#[test]
+fn command_substitution_strips_trailing_newlines() {
+    let out = sharky(&["-c", r#"X=$(printf 'a\nb\n\n'); printf '[%s]' "$X""#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "[a\nb]");
+}
+
+#[test]
+fn command_substitution_nests() {
+    let out = sharky(&["-c", r"printf '%s' $(printf '%s' $(printf x))"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "x");
+}
+
+#[test]
+fn command_substitution_splits_when_unquoted() {
+    let out = sharky(&["-c", r"printf '[%s]\n' $(printf 'a b')"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "[a]\n[b]\n");
+}
+
+#[test]
+fn arithmetic_respects_precedence() {
+    let out = sharky(&["-c", "printf '%s' $((2 + 3 * 4))"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "14");
+}
+
+#[test]
+fn arithmetic_reads_variables() {
+    let out = sharky(&["-c", "i=2; printf '%s' $((i * 3))"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "6");
+}
+
+#[test]
+fn arithmetic_can_drive_a_loop() {
+    let out = sharky(&[
+        "-c",
+        "i=0; while [ $i -lt 3 ]; do printf '%s' $i; i=$((i+1)); done",
+    ]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "012");
+}
+
+#[test]
+fn parameter_default_uses_fallback_when_unset() {
+    let out = sharky(&["-c", r#"printf '%s' "${X:-fallback}""#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "fallback");
+}
+
+#[test]
+fn parameter_default_keeps_a_set_value() {
+    let out = sharky(&["-c", r#"X=v; printf '%s' "${X:-fallback}""#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "v");
+}
+
+#[test]
+fn parameter_length_counts_characters() {
+    let out = sharky(&["-c", r#"X=abc; printf '%s' "${#X}""#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "3");
+}
+
+#[test]
+fn parameter_trims_the_shortest_prefix() {
+    let out = sharky(&["-c", r#"X=prefix.txt; printf '%s' "${X#*.}""#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "txt");
+}
+
+#[test]
+fn parameter_trims_the_longest_suffix() {
+    let out = sharky(&["-c", r#"X=a.tar.gz; printf '%s' "${X%%.*}""#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "a");
+}
+
+#[test]
+fn tilde_expands_to_home() {
+    let out = sharky_with(&["-c", "printf '%s' ~/x"], &[("HOME", "/tmp/h")]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "/tmp/h/x");
+}
+
+#[test]
+fn glob_expands_matching_files() {
+    let dir = temp_dir();
+    std::fs::write(dir.join("a.txt"), "").unwrap();
+    std::fs::write(dir.join("b.txt"), "").unwrap();
+    let out = sharky_in(&dir, &["-c", r"printf '%s\n' *.txt"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "a.txt\nb.txt\n");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn glob_keeps_the_pattern_when_nothing_matches() {
+    let dir = temp_dir();
+    let out = sharky_in(&dir, &["-c", r"printf '%s' *.nope"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "*.nope");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn quoted_glob_is_not_expanded() {
+    let dir = temp_dir();
+    std::fs::write(dir.join("a.txt"), "").unwrap();
+    let out = sharky_in(&dir, &["-c", r#"printf '%s' "*.txt""#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "*.txt");
+    std::fs::remove_dir_all(&dir).ok();
 }
