@@ -80,6 +80,9 @@ The prompt, `-c` and script files share one grammar:
 | pipelines and redirects | `a \| b > out 2>&1`, `cmd &> out`, `cmd &>> out` |
 | heredocs and here-strings | `cat <<EOF` ... `EOF`, `<<-EOF`, `<<'EOF'`, `cat <<< "text"` |
 | lists | `a; b`, `a && b`, `a \|\| b` |
+| options | `set -e`, `set -u`, `set -x`, `set -o pipefail`, `set -- a b` |
+| traps | `trap 'cleanup' EXIT`, `trap -l` |
+| read and shift | `read -r name`, `shift 2` |
 | conditionals | `if`, `elif`, `else`, `fi`, `[[ -f x && -n "$y" ]]` |
 | loops | `for x in a b; do ...; done`, `while`, `until` |
 | case | `case $x in f*) ...;; *) ...;; esac` |

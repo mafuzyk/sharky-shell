@@ -936,3 +936,122 @@ fn empty_array_has_zero_length() {
     let out = sharky(&["-c", r#"a=(); printf '%s' "${#a[@]}""#]);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "0");
 }
+
+#[test]
+fn set_e_exits_on_the_first_failure() {
+    let out = sharky(&["-c", "set -e; false; printf no"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn set_e_is_suppressed_in_and_or_lists() {
+    let out = sharky(&["-c", "set -e; false && true; printf yes"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "yes");
+    let out = sharky(&["-c", "set -e; true && false; printf no"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn set_e_is_suppressed_in_conditions_and_negation() {
+    let out = sharky(&["-c", "set -e; if false; then :; fi; printf yes"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "yes");
+    let out = sharky(&["-c", "set -e; ! true; printf yes"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "yes");
+}
+
+#[test]
+fn pipefail_returns_the_rightmost_failure() {
+    let out = sharky(&["-c", "set -o pipefail; false | true; printf '%s' \"$?\""]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "1");
+}
+
+#[test]
+fn set_e_with_pipefail_exits_on_a_failed_pipeline() {
+    let out = sharky(&["-c", "set -e -o pipefail; false | true; printf no"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn set_dash_dash_sets_positional_parameters() {
+    let out = sharky(&["-c", r#"set -- a b; printf '%s|%s|%s' "$1" "$2" "$#""#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "a|b|2");
+}
+
+#[test]
+fn set_without_arguments_reports_active_options() {
+    let out = sharky(&["-c", "set -e; set"]);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("errexit"));
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn set_x_traces_to_stderr() {
+    let out = sharky(&["-c", "set -x; printf hi"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("+ printf hi"));
+}
+
+#[test]
+fn trap_runs_the_exit_action() {
+    let out = sharky(&["-c", "trap 'printf bye' EXIT; printf hi"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hibye");
+}
+
+#[test]
+fn trap_lists_and_clears_signal_actions() {
+    let out = sharky(&["-c", "trap -l"]);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("EXIT HUP"));
+    let out = sharky(&["-c", "trap 'printf bye' EXIT; trap - EXIT; printf hi"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi");
+}
+
+#[test]
+fn read_splits_fields_and_gives_the_rest_to_the_last_name() {
+    let out = sharky(&["-c", r#"printf 'a b c\n' | { read x y; printf '%s|%s' "$x" "$y"; }"#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "a|b c");
+}
+
+#[test]
+fn read_r_keeps_backslashes_literal() {
+    let out = sharky(&["-c", r#"printf 'a\\b\n' | { read -r x; printf '%s' "$x"; }"#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), r"a\b");
+}
+
+#[test]
+fn read_honors_escaped_spaces() {
+    let out = sharky(&["-c", r#"printf 'a\\ b\n' | { read x; printf '%s' "$x"; }"#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "a b");
+}
+
+#[test]
+fn shift_moves_positional_parameters() {
+    let out = sharky(&["-c", r#"f() { shift; printf '%s' "$1"; }; f a b"#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "b");
+    let out = sharky(&["-c", r#"f() { shift 2; printf '%s' "$1"; }; f a b c"#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "c");
+}
+
+#[test]
+fn nounset_stops_expansion_of_an_unset_variable() {
+    let out = sharky(&["-c", r#"set -u; printf '%s' "$UNSET_X"; printf after"#]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unbound variable"));
+}
+
+#[test]
+fn nounset_allows_default_operators() {
+    let out = sharky(&["-c", r#"set -u; printf '%s' "${UNSET_X:-fallback}""#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "fallback");
+}
+
+#[test]
+fn set_e_propagates_out_of_functions() {
+    let out = sharky(&["-c", "set -e; f() { false; printf no; }; f; printf no2"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+}

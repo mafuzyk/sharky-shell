@@ -42,6 +42,7 @@ assert an exit status instead of waiting forever.
 - [x] `$(...)`, `${...}` operators, `$((...))`, globbing, tilde
 - [x] Brace expansion, here-strings, `&>`, `${var/pat/repl}`
 - [x] Indexed arrays: literals, `[@]`, index, `#`, `+=` and `a[i]=`
+- [x] `set -e/-u/-x`, `pipefail`, `set --`, `trap` EXIT, `read` and `shift`
 - [x] Parser and AST: `if`, `for`, `while`, `until`, `case`, functions,
       groups, subshells, `!`
 - [x] `[[ ]]` conditionals and heredocs (`<<`, `<<-`, quoted delimiters)

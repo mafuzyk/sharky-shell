@@ -32,6 +32,14 @@ pub struct Shell {
     settings: HashMap<String, String>,
     script: Option<String>,
     interactive: bool,
+    errexit: bool,
+    nounset: bool,
+    xtrace: bool,
+    pipefail: bool,
+    errexit_suppressed: bool,
+    nounset_failed: bool,
+    traps: HashMap<String, String>,
+    exit_trap_ran: bool,
     pub exit_requested: Option<i32>,
     jobs: Vec<Job>,
     next_job: usize,
@@ -48,6 +56,12 @@ struct Job {
     command: String,
     stopped: bool,
 }
+
+const SIGNALS: &[&str] = &[
+    "HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "BUS", "FPE", "KILL", "USR1", "SEGV", "USR2",
+    "PIPE", "ALRM", "TERM", "CHLD", "CONT", "STOP", "TSTP", "TTIN", "TTOU", "URG", "XCPU",
+    "XFSZ", "VTALRM", "PROF", "WINCH", "IO", "SYS",
+];
 
 enum Flow {
     Status(i32),
@@ -95,6 +109,14 @@ impl Shell {
             settings: HashMap::new(),
             script: None,
             interactive: false,
+            errexit: false,
+            nounset: false,
+            xtrace: false,
+            pipefail: false,
+            errexit_suppressed: false,
+            nounset_failed: false,
+            traps: HashMap::new(),
+            exit_trap_ran: false,
             exit_requested: None,
             jobs: Vec::new(),
             next_job: 1,
@@ -176,13 +198,37 @@ impl Shell {
     }
 
     pub fn run(&mut self, source: &str) -> i32 {
-        match self.eval(source) {
+        let status = match self.eval(source) {
             Ok(code) => code,
             Err(err) => {
                 eprintln!("sharky: {}", err.message);
                 2
             }
+        };
+        self.finish(status)
+    }
+
+    pub fn finish(&mut self, status: i32) -> i32 {
+        if self.exit_trap_ran {
+            return status;
         }
+        self.exit_trap_ran = true;
+
+        let Some(command) = self.traps.get("EXIT").cloned() else {
+            return status;
+        };
+        if command.trim().is_empty() {
+            return status;
+        }
+
+        let saved = self.exit_requested;
+        self.exit_requested = None;
+        let _ = self.run(&command);
+        if let Some(code) = self.exit_requested.take() {
+            return code;
+        }
+        self.exit_requested = saved;
+        status
     }
 
     pub fn eval(&mut self, source: &str) -> Result<i32, parser::ParseError> {
@@ -323,25 +369,67 @@ impl Shell {
     }
 
     fn run_and_or(&mut self, and_or: &AndOr) -> Flow {
+        let previous = self.errexit_suppressed;
+        if !and_or.rest.is_empty() {
+            self.errexit_suppressed = true;
+        }
         let mut flow = self.run_pipeline(&and_or.first);
 
-        for (is_and, pipeline) in &and_or.rest {
+        for (index, (is_and, pipeline)) in and_or.rest.iter().enumerate() {
             let status = match &flow {
                 Flow::Status(code) => *code,
-                _ => return flow,
+                _ => {
+                    self.errexit_suppressed = previous;
+                    return flow;
+                }
             };
             let should_run = if *is_and { status == 0 } else { status != 0 };
             if should_run {
+                self.errexit_suppressed = index + 1 != and_or.rest.len();
                 flow = self.run_pipeline(pipeline);
             }
         }
 
+        self.errexit_suppressed = previous;
         flow
+    }
+
+    fn run_suppressed(&mut self, list: &List) -> Flow {
+        let previous = self.errexit_suppressed;
+        self.errexit_suppressed = true;
+        let flow = self.run_list(list);
+        self.errexit_suppressed = previous;
+        flow
+    }
+
+    fn errexit_check(&mut self, flow: Flow) -> Flow {
+        if self.nounset_failed {
+            self.nounset_failed = false;
+            self.exit_requested = Some(1);
+            return Flow::Exit(1);
+        }
+        match flow {
+            Flow::Status(code)
+                if code != 0 && self.errexit && !self.errexit_suppressed =>
+            {
+                self.exit_requested = Some(code);
+                Flow::Exit(code)
+            }
+            other => other,
+        }
     }
 
     fn run_pipeline(&mut self, pipeline: &Pipeline) -> Flow {
         if pipeline.commands.len() == 1 {
-            return self.run_command(&pipeline.commands[0]);
+            if matches!(pipeline.commands[0], Command::Not(_)) {
+                let previous = self.errexit_suppressed;
+                self.errexit_suppressed = true;
+                let flow = self.run_command(&pipeline.commands[0]);
+                self.errexit_suppressed = previous;
+                return flow;
+            }
+            let flow = self.run_command(&pipeline.commands[0]);
+            return self.errexit_check(flow);
         }
 
         let links = pipeline.commands.len() - 1;
@@ -411,7 +499,8 @@ impl Shell {
 
         let command = describe_pipeline(pipeline);
         let pgid = leader.unwrap_or_else(getpgrp);
-        Flow::Status(self.wait_foreground(&pids, pgid, command))
+        let status = self.wait_pipeline(&pids, pgid, command);
+        self.errexit_check(Flow::Status(status))
     }
 
     fn run_command(&mut self, command: &Command) -> Flow {
@@ -471,6 +560,11 @@ impl Shell {
             for assignment in &simple.assignments {
                 self.assign(assignment);
             }
+            if self.nounset_failed {
+                self.nounset_failed = false;
+                self.exit_requested = Some(1);
+                return Flow::Exit(1);
+            }
             return Flow::Status(0);
         }
 
@@ -481,6 +575,12 @@ impl Shell {
                 return Flow::Status(1);
             }
         };
+
+        if self.nounset_failed {
+            self.nounset_failed = false;
+            self.exit_requested = Some(1);
+            return Flow::Exit(1);
+        }
 
         if let Some(name) = prepared.argv.first()
             && let Some(expansion) = self.aliases.get(name).cloned()
@@ -540,7 +640,7 @@ impl Shell {
             for assignment in &simple.assignments {
                 self.assign(assignment);
             }
-            return 0;
+            return i32::from(self.nounset_failed);
         }
 
         let prepared = match self.prepare(simple) {
@@ -550,6 +650,10 @@ impl Shell {
                 return 1;
             }
         };
+
+        if self.nounset_failed {
+            return 1;
+        }
 
         if let Err(message) = apply_actions(&prepared.actions) {
             eprintln!("sharky: {message}");
@@ -637,7 +741,7 @@ impl Shell {
 
     fn run_if(&mut self, branches: &[(List, List)], else_body: Option<&List>) -> Flow {
         for (condition, body) in branches {
-            if let Flow::Status(0) = self.run_list(condition) {
+            if let Flow::Status(0) = self.run_suppressed(condition) {
                 return self.run_list(body);
             }
         }
@@ -677,7 +781,7 @@ impl Shell {
         let mut status = 0;
 
         loop {
-            let condition_status = match self.run_list(condition) {
+            let condition_status = match self.run_suppressed(condition) {
                 Flow::Status(code) => code,
                 other => return other,
             };
@@ -721,6 +825,10 @@ impl Shell {
         let mut argv = Vec::new();
         for word in &simple.words {
             argv.extend(self.expand_word(word));
+        }
+
+        if self.xtrace && !argv.is_empty() {
+            eprintln!("+ {}", argv.join(" "));
         }
 
         let actions = self.redirect_actions(&simple.redirects)?;
@@ -926,11 +1034,27 @@ impl Shell {
             "unset" => Some(Flow::Status(self.unset(&words[1..]))),
             "set" => Some(Flow::Status(self.set(&words[1..]))),
             "jobs" => Some(Flow::Status(self.list_jobs())),
+            "trap" => Some(Flow::Status(self.trap(&words[1..]))),
+            "read" => Some(Flow::Status(self.read(&words[1..]))),
+            "shift" => Some(Flow::Status(self.shift(&words[1..]))),
             "fg" => Some(Flow::Status(self.fg(&words[1..]))),
             "bg" => Some(Flow::Status(self.bg(&words[1..]))),
             "source" | "." => Some(self.source(&words[1..])),
             _ => None,
         }
+    }
+
+    fn expansion_var(&mut self, name: &str) -> String {
+        if self.nounset
+            && !is_special_name(name)
+            && !self.arrays.contains_key(name)
+            && !self.env.iter().any(|(key, _)| key == name)
+        {
+            eprintln!("sharky: {name}: unbound variable");
+            self.nounset_failed = true;
+            return String::new();
+        }
+        self.var(name)
     }
 
     pub fn var(&self, name: &str) -> String {
@@ -1061,19 +1185,34 @@ impl Shell {
     }
 
     fn wait_foreground(&mut self, pids: &[Pid], pgid: Pid, command: String) -> i32 {
+        self.wait_job(pids, pgid, command, false)
+    }
+
+    fn wait_pipeline(&mut self, pids: &[Pid], pgid: Pid, command: String) -> i32 {
+        self.wait_job(pids, pgid, command, self.pipefail)
+    }
+
+    fn wait_job(&mut self, pids: &[Pid], pgid: Pid, command: String, pipefail: bool) -> i32 {
         let mut status = 0;
+        let mut statuses = Vec::new();
         let mut stopped = false;
 
         for pid in pids {
-            match exec::wait_traced(*pid) {
-                WaitStatus::Exited(_, code) => status = code,
-                WaitStatus::Signaled(_, signal, _) => status = 128 + signal as i32,
+            let code = match exec::wait_traced(*pid) {
+                WaitStatus::Exited(_, code) => code,
+                WaitStatus::Signaled(_, signal, _) => 128 + signal as i32,
                 WaitStatus::Stopped(_, _) => {
                     stopped = true;
-                    status = 128 + Signal::SIGTSTP as i32;
+                    128 + Signal::SIGTSTP as i32
                 }
-                _ => {}
-            }
+                _ => 0,
+            };
+            statuses.push(code);
+            status = code;
+        }
+
+        if pipefail {
+            status = statuses.iter().rev().find(|code| **code != 0).copied().unwrap_or(0);
         }
 
         self.reclaim_terminal();
@@ -1182,20 +1321,172 @@ impl Shell {
         flow
     }
 
+    fn trap(&mut self, args: &[String]) -> i32 {
+        if matches!(args.first().map(String::as_str), Some("-l" | "-L")) {
+            println!("EXIT {}", SIGNALS.join(" "));
+            return 0;
+        }
+
+        if args.is_empty() {
+            let mut entries: Vec<_> = self.traps.iter().collect();
+            entries.sort_by(|left, right| left.0.cmp(right.0));
+            for (signal, command) in entries {
+                println!("trap -- '{command}' {signal}");
+            }
+            return 0;
+        }
+
+        let (action, signals) = if args[0] == "--" {
+            if args.len() == 1 {
+                return 0;
+            }
+            (&args[1], &args[2..])
+        } else if args[0] == "-" {
+            for name in &args[1..] {
+                let Some(signal) = normalize_signal(name) else {
+                    eprintln!("sharky: trap: invalid signal specification");
+                    return 1;
+                };
+                self.traps.remove(signal);
+            }
+            return 0;
+        } else {
+            (&args[0], &args[1..])
+        };
+
+        if signals.is_empty() {
+            eprintln!("sharky: trap: action required");
+            return 1;
+        }
+
+        let mut status = 0;
+        for name in signals {
+            let Some(signal) = normalize_signal(name) else {
+                eprintln!("sharky: trap: invalid signal specification");
+                status = 1;
+                continue;
+            };
+            self.traps.insert(signal.to_string(), action.clone());
+        }
+        status
+    }
+
+    fn read(&mut self, args: &[String]) -> i32 {
+        let raw = args.first().map(String::as_str) == Some("-r");
+        let names: Vec<String> = if raw {
+            args[1..].to_vec()
+        } else {
+            args.to_vec()
+        };
+        let names = if names.is_empty() {
+            vec!["REPLY".to_string()]
+        } else {
+            names
+        };
+
+        let mut line = String::new();
+        loop {
+            let Some(chunk) = read_stdin_line() else {
+                return 1;
+            };
+            line.push_str(&chunk);
+            if !raw && line.ends_with("\\\n") {
+                line.truncate(line.len() - 2);
+                continue;
+            }
+            break;
+        }
+
+        let ended = line.ends_with('\n');
+        let fields = split_read_fields(&line, !raw, names.len());
+        for (name, value) in names.iter().zip(fields) {
+            self.set_var(name, value);
+        }
+        if ended { 0 } else { 1 }
+    }
+
+    fn shift(&mut self, args: &[String]) -> i32 {
+        let count = match args.first() {
+            None => 1,
+            Some(text) => match text.parse::<usize>() {
+                Ok(count) => count,
+                Err(_) => {
+                    eprintln!("sharky: shift: {text}: numeric argument required");
+                    return 1;
+                }
+            },
+        };
+
+        if count > self.positional.len() {
+            return 1;
+        }
+        self.positional.drain(..count);
+        0
+    }
+
     fn set(&mut self, args: &[String]) -> i32 {
+        if args.first().map(String::as_str) == Some("--") {
+            self.positional = args[1..].to_vec();
+            return 0;
+        }
+
+        if args.is_empty() {
+            let mut active = Vec::new();
+            if self.errexit {
+                active.push("errexit");
+            }
+            if self.nounset {
+                active.push("nounset");
+            }
+            if self.xtrace {
+                active.push("xtrace");
+            }
+            if self.pipefail {
+                active.push("pipefail");
+            }
+            if !active.is_empty() {
+                println!("{}", active.join(" "));
+            }
+            return 0;
+        }
+
+        let mut status = 0;
         let mut index = 0;
         while index < args.len() {
             match args[index].as_str() {
-                "-e" | "-u" | "-x" | "+e" | "+u" | "+x" => {}
+                "-e" => self.errexit = true,
+                "+e" => self.errexit = false,
+                "-u" => self.nounset = true,
+                "+u" => self.nounset = false,
+                "-x" => self.xtrace = true,
+                "+x" => self.xtrace = false,
+                option @ ("-o" | "+o") => {
+                    let on = option.starts_with('-');
+                    index += 1;
+                    match args.get(index).map(String::as_str) {
+                        Some("pipefail") => self.pipefail = on,
+                        Some(name) => {
+                            eprintln!("sharky: set: {name}: invalid option name");
+                            status = 1;
+                        }
+                        None => {
+                            eprintln!("sharky: set: {option}: option name required");
+                            status = 1;
+                        }
+                    }
+                }
                 name => {
                     if let Some((key, value)) = name.split_once('=') {
                         self.set_var(key, value.to_string());
+                    } else {
+                        eprintln!("sharky: set: {name}: invalid option");
+                        status = 1;
                     }
                 }
             }
             index += 1;
         }
-        0
+        status
     }
 
     fn cd(&mut self, target: Option<&str>) -> i32 {
@@ -1270,7 +1561,7 @@ impl Shell {
                     }
                 }
                 Part::Variable(name) => {
-                    let value = self.var(name);
+                    let value = self.expansion_var(name);
                     fields.push(&value, false);
                 }
                 Part::Parameter(parameter) => {
@@ -1309,7 +1600,10 @@ impl Shell {
             match part {
                 Part::Literal(text) | Part::Single(text) | Part::Escaped(text) => out.push_str(text),
                 Part::Double(inner) => self.expand_parts(inner, out),
-                Part::Variable(name) => out.push_str(&self.var(name)),
+                Part::Variable(name) => {
+                    let value = self.expansion_var(name);
+                    out.push_str(&value);
+                }
                 Part::Parameter(parameter) => out.push_str(&self.parameter_value(parameter)),
                 Part::CmdSub(source) => out.push_str(&self.command_substitution(source)),
                 Part::Arithmetic(source) => match arith::evaluate(source, self) {
@@ -1346,14 +1640,20 @@ impl Shell {
             return array.len().to_string();
         }
 
+        let no_nounset = matches!(
+            parameter.operator,
+            Some(ParamOp::Default | ParamOp::Assign | ParamOp::Alternate | ParamOp::Error)
+        );
         let value = if let Some(array) = self.arrays.get(&parameter.name) {
             match parameter.index.as_deref() {
                 Some("@") | Some("*") => array.join(" "),
                 Some(index) => array_index(array, index).unwrap_or_default(),
                 None => array.first().cloned().unwrap_or_default(),
             }
-        } else {
+        } else if no_nounset {
             self.var(&parameter.name)
+        } else {
+            self.expansion_var(&parameter.name)
         };
         let argument = parameter.argument.clone().unwrap_or_default();
 
@@ -1544,6 +1844,102 @@ fn flow_status(flow: Flow) -> i32 {
 
 // shortcut: heredoc bodies go through an unlinked temp file instead of a pipe,
 // so a large body cannot deadlock before the child starts reading.
+fn is_special_name(name: &str) -> bool {
+    matches!(name, "?" | "#" | "@" | "*" | "!" | "$" | "-")
+        || (!name.is_empty() && name.chars().all(|char| char.is_ascii_digit()))
+}
+
+fn normalize_signal(name: &str) -> Option<&'static str> {
+    let upper = name.to_ascii_uppercase();
+    let signal = upper.strip_prefix("SIG").unwrap_or(&upper);
+    if signal == "0" || signal == "EXIT" {
+        return Some("EXIT");
+    }
+    SIGNALS.iter().copied().find(|candidate| *candidate == signal)
+}
+
+fn read_stdin_line() -> Option<String> {
+    let mut bytes = Vec::new();
+    loop {
+        let mut byte = [0u8; 1];
+        // SAFETY: fd 0 is the shell's stdin and the buffer is one byte.
+        let count = unsafe { nix::libc::read(0, byte.as_mut_ptr() as *mut _, 1) };
+        if count < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            break;
+        }
+        if count == 0 {
+            break;
+        }
+        bytes.push(byte[0]);
+        if byte[0] == b'\n' {
+            break;
+        }
+    }
+
+    if bytes.is_empty() {
+        None
+    } else {
+        Some(String::from_utf8_lossy(&bytes).into_owned())
+    }
+}
+
+fn split_read_fields(line: &str, escapes: bool, count: usize) -> Vec<String> {
+    let mut chars = line.chars().peekable();
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut started = false;
+
+    while let Some(&char) = chars.peek() {
+        if char == ' ' || char == '\t' || char == '\n' {
+            chars.next();
+        } else {
+            break;
+        }
+    }
+
+    while let Some(char) = chars.next() {
+        if escapes && char == '\\' {
+            if let Some(next) = chars.next() {
+                current.push(next);
+                started = true;
+            }
+            continue;
+        }
+
+        if (char == ' ' || char == '\t' || char == '\n') && fields.len() + 1 < count {
+            if started {
+                fields.push(std::mem::take(&mut current));
+                started = false;
+            }
+            while let Some(&next) = chars.peek() {
+                if next == ' ' || next == '\t' || next == '\n' {
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        current.push(char);
+        started = true;
+    }
+
+    if started || fields.len() < count {
+        while current.ends_with([' ', '\t', '\n']) {
+            current.pop();
+        }
+        fields.push(current);
+    }
+    while fields.len() < count {
+        fields.push(String::new());
+    }
+    fields
+}
+
 fn temp_file(text: &str) -> Result<std::fs::File, String> {
     use std::io::Write;
     use std::sync::atomic::{AtomicUsize, Ordering};
