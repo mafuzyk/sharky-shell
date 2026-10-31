@@ -30,53 +30,77 @@ git push origin v2.0.0
 Pushing is the first irreversible step: it changes the default branch to the
 Rust implementation.
 
-## 3. Build the package
+## 3. Build the packages
+
+`sharky-shell-git` builds from the repository:
 
 ```sh
 cd rust/packaging
-makepkg -f --nodeps         # builds sharky-shell-git
+makepkg -f --nodeps
 makepkg --printsrcinfo > .SRCINFO
 ```
 
-Package contents should be:
+`sharky-shell-bin` installs the tarball attached to the GitHub release. Bump
+`pkgver` in `rust/packaging/bin/PKGBUILD` first, then refresh both checksums
+(the release tarball and the tag's `LICENSE`):
+
+```sh
+cd rust/packaging/bin
+updpkgsums                  # or sha256sum the two source files by hand
+makepkg -f --nodeps
+makepkg --printsrcinfo > .SRCINFO
+```
+
+Both packages should contain:
 
 ```
 usr/bin/sharky
 usr/share/man/man1/sharky.1.gz
 usr/share/sharky/config.sharky
 usr/share/sharky/theme.sharky
-usr/share/licenses/sharky-shell-git/LICENSE
+usr/share/licenses/<pkgname>/LICENSE
 ```
 
 ## 4. AUR
 
-The AUR repository is `ssh://aur@aur.archlinux.org/sharky-shell-git.git`.
+There are two independent AUR repositories:
+
+- `ssh://aur@aur.archlinux.org/sharky-shell-git.git`
+- `ssh://aur@aur.archlinux.org/sharky-shell-bin.git` (x86_64 only)
 
 ```sh
 git clone ssh://aur@aur.archlinux.org/sharky-shell-git.git
-# first release only; afterwards clone the existing repository
-cp PKGBUILD .SRCINFO /path/to/sharky-shell-git/
-cd /path/to/sharky-shell-git
+cp rust/packaging/PKGBUILD rust/packaging/.SRCINFO sharky-shell-git/
+cd sharky-shell-git
 git add PKGBUILD .SRCINFO
-git commit -m "sharky-shell-git: initial upload"
+git commit -m "upgpkg: sharky-shell-git <version>"
 git push
 ```
 
-For a stable `sharky-shell` package as well, point `source` at the GitHub
-tarball for the tag and let `updpkgsums` fill `sha256sums`:
+```sh
+git clone ssh://aur@aur.archlinux.org/sharky-shell-bin.git
+cp rust/packaging/bin/PKGBUILD rust/packaging/bin/.SRCINFO sharky-shell-bin/
+cd sharky-shell-bin
+git add PKGBUILD .SRCINFO
+git commit -m "upgpkg: sharky-shell-bin <version>"
+git push
+```
 
-```
-source=("$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('<filled by updpkgsums>')
-```
+The first upload of a package uses an `initial upload:` message; later updates
+use `upgpkg:`. The `-bin` package must be updated only after the GitHub release
+for that tag exists, because its sources point at the release assets.
 
 ## 5. After the push
 
 ```sh
-git clone https://aur.archlinux.org/sharky-shell-git.git /tmp/aur-check
-cd /tmp/aur-check && makepkg -si
+git clone https://aur.archlinux.org/sharky-shell-git.git /tmp/aur-git
+cd /tmp/aur-git && makepkg -si
+sharky --version
+
+git clone https://aur.archlinux.org/sharky-shell-bin.git /tmp/aur-bin
+cd /tmp/aur-bin && makepkg -si
 sharky --version
 ```
 
-If the package fails on a clean machine, check `namcap PKGBUILD` and
+If a package fails on a clean machine, check `namcap PKGBUILD` and
 `namcap *.pkg.tar.zst`.

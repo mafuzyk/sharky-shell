@@ -22,8 +22,9 @@ install -Dm755 target/release/sharky ~/.local/bin/sharky
 install -Dm644 man/sharky.1 ~/.local/share/man/man1/sharky.1
 ```
 
-The AUR recipe is in `packaging/PKGBUILD` (`sharky-shell-git`). Generate
-`.SRCINFO` with `makepkg --printsrcinfo > .SRCINFO` before pushing to the AUR.
+The AUR recipes are in `packaging/` (`sharky-shell-git`) and
+`packaging/bin/` (`sharky-shell-bin`). Generate `.SRCINFO` with
+`makepkg --printsrcinfo > .SRCINFO` before pushing either one to the AUR.
 
 ## Use
 

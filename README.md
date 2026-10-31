@@ -19,8 +19,13 @@ the behavioural oracle for the differential test suite.
 ### Arch Linux (AUR)
 
 ```sh
-paru -S sharky-shell-git       # or: yay -S sharky-shell-git
+paru -S sharky-shell-bin       # prebuilt static binary (x86_64)
+paru -S sharky-shell-git       # builds the latest main locally
 ```
+
+`sharky-shell-bin` is the stable package: it installs the same binary published
+on the GitHub release. `sharky-shell-git` tracks `main` and needs a Rust
+toolchain.
 
 ### Prebuilt binary (GitHub)
 
