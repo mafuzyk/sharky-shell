@@ -1,0 +1,17 @@
+[package]
+name = "sharky"
+version = "2.0.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Unix-first interactive shell"
+license = "GPL-3.0-only"
+publish = false
+
+[dependencies]
+nix = { version = "0.31", features = ["process", "signal", "term", "fs"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
