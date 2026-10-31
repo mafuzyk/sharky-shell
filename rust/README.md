@@ -72,7 +72,8 @@ and the shell continues with defaults.
 ## History
 
 Stored in `$XDG_DATA_HOME/sharky/history` (default
-`~/.local/share/sharky/history`), limited by `tide history`.
+`~/.local/share/sharky/history`), limited by `tide history`. Ctrl-R opens an
+incremental reverse search; Enter runs the selected entry and Ctrl-G cancels.
 
 ## Tests
 

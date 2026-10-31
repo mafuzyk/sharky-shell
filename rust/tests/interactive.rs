@@ -307,3 +307,120 @@ fn abbreviations_expand_on_space_and_enter() {
     let _ = child.wait();
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn ctrl_r_searches_history_and_accepts_on_enter() {
+    let dir = std::env::temp_dir().join(format!("sharky-search-{}", std::process::id()));
+    let config = dir.join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("config.sharky"),
+        "wave prompt \"P> \"\ntide greeting off\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("history"),
+        "printf first > $HOME/one\nprintf second > $HOME/two\n",
+    )
+    .unwrap();
+
+    let pty = openpty(None, None).expect("pty");
+    let stdin = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stdout = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stderr = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .stdin(stdin)
+        .stdout(stdout)
+        .stderr(stderr)
+        .env("SHARKY_CONFIG", &config)
+        .env("SHARKY_HISTORY", dir.join("history"))
+        .env("TERM", "xterm-256color")
+        .env("HOME", &dir)
+        .spawn()
+        .expect("spawn sharky");
+
+    let fd = pty.master.as_raw_fd();
+    let mut writer = unsafe { std::fs::File::from_raw_fd(pty.master.try_clone().unwrap().into_raw_fd()) };
+
+    read_until(fd, "P> ", Duration::from_secs(5));
+    let _ = writer.write_all(b"\x12");
+    let _ = writer.write_all(b"second");
+    let _ = writer.write_all(b"\r");
+    assert!(wait_for(&dir.join("two"), Duration::from_secs(5)), "search did not run the match");
+
+    let second = std::fs::read_to_string(dir.join("two")).unwrap_or_default();
+    let first = std::fs::read_to_string(dir.join("one")).unwrap_or_default();
+    let _ = writer.write_all(b"exit\r");
+    let _ = child.wait();
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(second, "second");
+    assert_eq!(first, "");
+}
+
+#[test]
+fn ctrl_r_cycles_to_older_matches_and_cancels_with_ctrl_g() {
+    let dir = std::env::temp_dir().join(format!("sharky-search-cycle-{}", std::process::id()));
+    let config = dir.join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("config.sharky"),
+        "wave prompt \"P> \"\ntide greeting off\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("history"),
+        "printf one > $HOME/one\nprintf two > $HOME/two\n",
+    )
+    .unwrap();
+
+    let pty = openpty(None, None).expect("pty");
+    let stdin = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stdout = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stderr = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .stdin(stdin)
+        .stdout(stdout)
+        .stderr(stderr)
+        .env("SHARKY_CONFIG", &config)
+        .env("SHARKY_HISTORY", dir.join("history"))
+        .env("TERM", "xterm-256color")
+        .env("HOME", &dir)
+        .spawn()
+        .expect("spawn sharky");
+
+    let fd = pty.master.as_raw_fd();
+    let mut writer = unsafe { std::fs::File::from_raw_fd(pty.master.try_clone().unwrap().into_raw_fd()) };
+
+    read_until(fd, "P> ", Duration::from_secs(5));
+    let _ = writer.write_all(b"\x12\x12\r");
+    assert!(wait_for(&dir.join("one"), Duration::from_secs(5)), "cycle did not run the older match");
+
+    let one = std::fs::read_to_string(dir.join("one")).unwrap_or_default();
+    let two = std::fs::read_to_string(dir.join("two")).unwrap_or_default();
+
+    let _ = writer.write_all(b"\x12\x07");
+    std::thread::sleep(Duration::from_millis(100));
+    let _ = writer.write_all(b"printf canceled > $HOME/canceled\r");
+    assert!(wait_for(&dir.join("canceled"), Duration::from_secs(5)), "cancel did not return to editing");
+
+    let _ = writer.write_all(b"exit\r");
+    let _ = child.wait();
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(one, "one");
+    assert_eq!(two, "");
+}
+
+fn wait_for(path: &std::path::Path, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if path.exists() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    path.exists()
+}

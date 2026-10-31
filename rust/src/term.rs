@@ -83,6 +83,8 @@ pub fn read_key() -> io::Result<Key> {
         0x0c => Key::Ctrl('l'),
         0x01 => Key::Ctrl('a'),
         0x05 => Key::Ctrl('e'),
+        0x07 => Key::Ctrl('g'),
+        0x12 => Key::Ctrl('r'),
         0x0b => Key::Ctrl('k'),
         0x15 => Key::Ctrl('u'),
         0x17 => Key::Ctrl('w'),

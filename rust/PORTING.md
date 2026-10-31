@@ -47,6 +47,7 @@ assert an exit status instead of waiting forever.
 - [x] `type`, `alias`/`unalias`, `history`, `pwd`
 - [x] Starship prompt integration (`tide starship on`)
 - [x] Abbreviations (`shoal`, `abbr`/`unabbr`) with space and Enter expansion
+- [x] Ctrl-R incremental history search
 - [x] Parser and AST: `if`, `for`, `while`, `until`, `case`, functions,
       groups, subshells, `!`
 - [x] `[[ ]]` conditionals and heredocs (`<<`, `<<-`, quoted delimiters)

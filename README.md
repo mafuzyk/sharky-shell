@@ -89,6 +89,7 @@ The prompt, `-c` and script files share one grammar:
 | functions | `greet() { printf 'hi %s\n' "$1"; }` |
 | groups and subshells | `{ a; b; }`, `( a; b )` |
 | builtins | `type`, `alias`, `unalias`, `abbr`, `unabbr`, `history`, `pwd`, `read`, `shift` |
+| history search | Ctrl-R, type to filter, Enter runs the match, Ctrl-G cancels |
 | job control | `cmd &`, `jobs`, `fg`, `bg`, Ctrl-Z |
 | scripts | `source lib.sh`, `sharky file.sh args` |
 

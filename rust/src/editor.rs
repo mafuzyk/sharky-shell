@@ -31,6 +31,7 @@ impl Editor {
         self.draft.clear();
 
         let prompt_width = last_line_width(prompt);
+        let prompt_last = prompt.rsplit('\n').next().unwrap_or("").to_string();
         term::write_stdout(prompt)?;
 
         loop {
@@ -58,6 +59,12 @@ impl Editor {
                 Key::Ctrl('l') => {
                     term::write_stdout("\x1b[2J\x1b[H")?;
                     term::write_stdout(prompt)?;
+                }
+                Key::Ctrl('r') => {
+                    if history_search(prompt_width, &prompt_last, shell, &mut buffer, &mut cursor)? {
+                        term::write_stdout("\r\n")?;
+                        return Ok(Line::Content(buffer.iter().collect()));
+                    }
                 }
                 Key::Ctrl('a') | Key::Home => cursor = 0,
                 Key::Ctrl('e') | Key::End => cursor = buffer.len(),
@@ -166,6 +173,123 @@ impl Editor {
 
         term::write_stdout(&out)
     }
+}
+
+fn history_search(
+    prompt_width: usize,
+    prompt_last: &str,
+    shell: &Shell,
+    buffer: &mut Vec<char>,
+    cursor: &mut usize,
+) -> std::io::Result<bool> {
+    let entries = shell.history_entries();
+    if entries.is_empty() {
+        return Ok(false);
+    }
+
+    let columns = term::width().max(1);
+    let mut query = String::new();
+    let mut offset = 0;
+    let mut shown: Option<String> = None;
+    let mut line;
+    let mut submit = false;
+
+    term::write_stdout("\r\n")?;
+    loop {
+        if let Some(found) = find_history(entries, &query, offset) {
+            shown = Some(found);
+        }
+        let display = shown.as_deref().unwrap_or("");
+        line = format!("(reverse-i-search) '{query}': {display}");
+        term::write_stdout(&format!("\r{line}\x1b[K"))?;
+
+        match term::read_key()? {
+            Key::Enter => {
+                if let Some(found) = &shown {
+                    *buffer = found.chars().collect();
+                    *cursor = buffer.len();
+                    submit = true;
+                }
+                break;
+            }
+            Key::Ctrl('g') | Key::Ctrl('c') | Key::Escape => break,
+            Key::Ctrl('r') | Key::Up => {
+                offset += 1;
+                if find_history(entries, &query, offset).is_none() {
+                    offset -= 1;
+                }
+            }
+            Key::Down => {
+                offset = offset.saturating_sub(1);
+            }
+            Key::Backspace => {
+                query.pop();
+                offset = 0;
+            }
+            Key::Char(char) => {
+                query.push(char);
+                offset = 0;
+            }
+            _ => {
+                if let Some(found) = &shown {
+                    *buffer = found.chars().collect();
+                    *cursor = buffer.len();
+                }
+                break;
+            }
+        }
+    }
+
+    clear_search_line(&line, columns)?;
+    let input_rows = (prompt_width + buffer.len()) / columns + 1;
+    if input_rows > 0 {
+        term::write_stdout(&format!("\x1b[{input_rows}A"))?;
+    }
+    redraw_input(prompt_last, prompt_width, buffer, *cursor)?;
+    Ok(submit)
+}
+
+fn clear_search_line(line: &str, columns: usize) -> std::io::Result<()> {
+    let rows = line.chars().count().div_ceil(columns).max(1);
+    let mut out = String::new();
+    if rows > 1 {
+        out.push_str(&format!("\x1b[{}A", rows - 1));
+    }
+    out.push_str("\r\x1b[J");
+    term::write_stdout(&out)
+}
+
+fn redraw_input(
+    prompt_last: &str,
+    prompt_width: usize,
+    buffer: &[char],
+    cursor: usize,
+) -> std::io::Result<()> {
+    let columns = term::width().max(1);
+    let mut out = String::from("\r\x1b[J");
+    out.push_str(prompt_last);
+    out.extend(buffer.iter());
+
+    let end_row = (prompt_width + buffer.len()) / columns;
+    let cursor_row = (prompt_width + cursor) / columns;
+    if end_row > cursor_row {
+        out.push_str(&format!("\x1b[{}A", end_row - cursor_row));
+    }
+    out.push('\r');
+    let column = (prompt_width + cursor) % columns;
+    if column > 0 {
+        out.push_str(&format!("\x1b[{column}C"));
+    }
+    term::write_stdout(&out)
+}
+
+fn find_history(entries: &[String], query: &str, offset: usize) -> Option<String> {
+    entries
+        .iter()
+        .rev()
+        .filter(|entry| entry.contains(query))
+        .nth(offset)
+        .cloned()
 }
 
 fn expand_abbreviation(
