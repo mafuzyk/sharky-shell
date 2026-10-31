@@ -53,6 +53,12 @@ struct Item {
     connector: Connector,
 }
 
+struct Prepared {
+    argv: Vec<String>,
+    actions: Vec<Action>,
+    env: Vec<(String, String)>,
+}
+
 enum Action {
     Write(i32, PathBuf),
     Append(i32, PathBuf),
@@ -150,7 +156,11 @@ impl Shell {
             return Flow::Status(0);
         }
 
-        let (argv, actions, env) = match self.prepare(command) {
+        let Prepared {
+            argv,
+            actions,
+            env,
+        } = match self.prepare(command) {
             Ok(prepared) => prepared,
             Err(message) => {
                 eprintln!("sharky: {message}");
@@ -201,10 +211,10 @@ impl Shell {
         }
 
         let mut pids = Vec::with_capacity(commands.len());
-        for (index, (argv, actions, env)) in prepared.iter().enumerate() {
+        for (index, prepared) in prepared.iter().enumerate() {
             let stdin = index.checked_sub(1).map(|i| pipes[i].0.as_raw_fd());
             let stdout = pipes.get(index).map(|pair| pair.1.as_raw_fd());
-            match self.spawn(argv, actions, env, stdin, stdout) {
+            match self.spawn(&prepared.argv, &prepared.actions, &prepared.env, stdin, stdout) {
                 Ok(pid) => pids.push(pid),
                 Err(message) => {
                     eprintln!("sharky: {message}");
@@ -225,7 +235,7 @@ impl Shell {
     fn prepare(
         &self,
         command: &SimpleCommand,
-    ) -> Result<(Vec<String>, Vec<Action>, Vec<(String, String)>), String> {
+    ) -> Result<Prepared, String> {
         let argv: Vec<String> = command
             .words
             .iter()
@@ -267,7 +277,11 @@ impl Shell {
             }
         }
 
-        Ok((argv, actions, env))
+        Ok(Prepared {
+            argv,
+            actions,
+            env,
+        })
     }
 
     fn spawn(
