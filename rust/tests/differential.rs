@@ -10,12 +10,18 @@ const ENV: &[(&str, &str)] = &[
 ];
 
 fn run(bin: &Path, source: &str) -> Output {
-    Command::new(bin)
+    let dir = std::env::temp_dir().join(format!("sharky-diff-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let output = Command::new(bin)
         .args(["--no-config", "-c", source])
+        .current_dir(&dir)
         .env_clear()
         .envs(ENV.iter().copied())
+        .env("DIFF_TMP", &dir)
         .output()
-        .unwrap_or_else(|err| panic!("failed to run {}: {err}", bin.display()))
+        .unwrap_or_else(|err| panic!("failed to run {}: {err}", bin.display()));
+    std::fs::remove_dir_all(&dir).ok();
+    output
 }
 
 fn reference() -> Option<PathBuf> {

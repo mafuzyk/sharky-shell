@@ -20,6 +20,10 @@ pub enum TokenKind {
     OrIf,
     Pipe,
     Amp,
+    RedirOut(Option<i32>),
+    RedirAppend(Option<i32>),
+    RedirIn(Option<i32>),
+    RedirDup(i32, i32),
     Newline,
     Eof,
 }
@@ -104,6 +108,9 @@ impl Lexer {
                     }
                 }
                 ' ' | '\t' => self.pos += 1,
+                '>' => self.scan_output_redirect(None)?,
+                '<' => self.scan_input_redirect(None)?,
+                char if char.is_ascii_digit() => self.scan_number_redirect()?,
                 _ => {
                     if is_word_break(char) {
                         return Err(LexError::new(
@@ -254,6 +261,75 @@ impl Lexer {
                 Ok(())
             }
         }
+    }
+
+    fn scan_output_redirect(&mut self, fd: Option<i32>) -> Result<(), LexError> {
+        let start = self.pos;
+        self.pos += 1;
+
+        match self.current() {
+            Some('>') => {
+                self.pos += 1;
+                self.push_at(TokenKind::RedirAppend(fd), start);
+            }
+            Some('&') => {
+                self.pos += 1;
+                let mut digits = String::new();
+                while let Some(char) = self.current() {
+                    if char.is_ascii_digit() {
+                        digits.push(char);
+                        self.pos += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let Ok(target) = digits.parse() else {
+                    return Err(LexError::new("unsupported syntax: '>&'", start, false));
+                };
+                self.push_at(TokenKind::RedirDup(fd.unwrap_or(1), target), start);
+            }
+            _ => self.push_at(TokenKind::RedirOut(fd), start),
+        }
+
+        Ok(())
+    }
+
+    fn scan_input_redirect(&mut self, fd: Option<i32>) -> Result<(), LexError> {
+        let start = self.pos;
+        self.pos += 1;
+
+        if self.current() == Some('<') {
+            return Err(LexError::new("unsupported syntax: heredoc", start, false));
+        }
+
+        self.push_at(TokenKind::RedirIn(Some(fd.unwrap_or(0))), start);
+        Ok(())
+    }
+
+    fn scan_number_redirect(&mut self) -> Result<(), LexError> {
+        let start = self.pos;
+        let mut fd: i32 = 0;
+
+        while let Some(char) = self.current() {
+            let Some(digit) = char.to_digit(10) else { break };
+            fd = fd.saturating_mul(10).saturating_add(digit as i32);
+            self.pos += 1;
+        }
+
+        match self.current() {
+            Some('>') => self.scan_output_redirect(Some(fd)),
+            Some('<') => self.scan_input_redirect(Some(fd)),
+            _ => {
+                self.pos = start;
+                let word = self.scan_word()?;
+                self.push_at(TokenKind::Word(word), start);
+                Ok(())
+            }
+        }
+    }
+
+    fn push_at(&mut self, kind: TokenKind, pos: usize) {
+        self.tokens.push(Token { kind, pos });
     }
 
     fn scan_dollar(&mut self) -> Part {

@@ -158,3 +158,79 @@ fn quoted_unset_variable_is_an_empty_argument() {
     let out = sharky_with(&["-c", r#"sh -c 'printf "%s" "$#"' x "$X""#], &[]);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "1");
 }
+
+fn temp_dir() -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("sharky-cli-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn sharky_in(dir: &std::path::Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("failed to run sharky")
+}
+
+#[test]
+fn pipeline_connects_stdout_to_stdin() {
+    let out = sharky(&["-c", r"printf 'a\nb\n' | wc -l"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "2");
+}
+
+#[test]
+fn pipeline_status_is_the_last_command() {
+    let out = sharky(&["-c", "printf x | cat"]);
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn redirect_writes_a_file() {
+    let dir = temp_dir();
+    let out = sharky_in(&dir, &["-c", "printf hi > out; cat out"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn redirect_append_keeps_previous_content() {
+    let dir = temp_dir();
+    let out = sharky_in(&dir, &["-c", "printf a > out; printf b >> out; cat out"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "ab");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn redirect_reads_a_file() {
+    let dir = temp_dir();
+    let out = sharky_in(&dir, &["-c", "printf hi > out; cat < out"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn stderr_redirect_captures_diagnostics() {
+    let dir = temp_dir();
+    let out = sharky_in(&dir, &["-c", "sh -c 'printf e >&2' 2> err; cat err"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "e");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn stdout_to_stderr_dup_merges_both_streams() {
+    let dir = temp_dir();
+    let out = sharky_in(&dir, &["-c", "sh -c 'printf o; printf e >&2' > f 2>&1; cat f"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "oe");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn missing_redirect_target_is_a_syntax_error() {
+    let out = sharky(&["-c", "printf hi >"]);
+    assert_eq!(out.status.code(), Some(2));
+}

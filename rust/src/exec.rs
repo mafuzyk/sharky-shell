@@ -4,58 +4,13 @@ use std::path::{Path, PathBuf};
 
 use nix::libc::_exit;
 use nix::sys::wait::{WaitStatus, waitpid};
-use nix::unistd::{ForkResult, execve, fork};
+use nix::unistd::{Pid, execve};
 
 use crate::shell::Shell;
 
 const DEFAULT_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 
-pub fn run(argv: &[String], shell: &Shell) -> i32 {
-    let Some(path) = resolve(&argv[0], shell) else {
-        eprintln!("sharky: command not found: {}", argv[0]);
-        return 127;
-    };
-
-    let argv: Vec<CString> = argv
-        .iter()
-        .map(|arg| CString::new(arg.as_bytes()).unwrap_or_default())
-        .collect();
-    let envp: Vec<CString> = shell
-        .env
-        .iter()
-        .filter_map(|(key, value)| CString::new(format!("{key}={value}")).ok())
-        .collect();
-    let path = match CString::new(path.as_os_str().as_encoded_bytes()) {
-        Ok(path) => path,
-        Err(_) => return 126,
-    };
-
-    // SAFETY: the child only runs execve and _exit, both async-signal-safe.
-    match unsafe { fork() } {
-        Ok(ForkResult::Parent { child }) => match waitpid(child, None) {
-            Ok(WaitStatus::Exited(_, status)) => status,
-            Ok(WaitStatus::Signaled(_, signal, _)) => 128 + signal as i32,
-            Ok(_) => 1,
-            Err(err) => {
-                eprintln!("sharky: wait: {err}");
-                1
-            }
-        },
-        Ok(ForkResult::Child) => {
-            let Err(err) = execve(&path, &argv, &envp);
-            // shortcut: allocates in the forked child; safe because sharky is single-threaded
-            eprintln!("sharky: {}: {err}", path.to_string_lossy());
-            // SAFETY: after a failed exec the child must not unwind or run destructors.
-            unsafe { _exit(126) };
-        }
-        Err(err) => {
-            eprintln!("sharky: fork: {err}");
-            1
-        }
-    }
-}
-
-fn resolve(name: &str, shell: &Shell) -> Option<PathBuf> {
+pub fn resolve(name: &str, shell: &Shell) -> Option<PathBuf> {
     if name.contains('/') {
         return Some(PathBuf::from(name));
     }
@@ -77,6 +32,38 @@ fn resolve(name: &str, shell: &Shell) -> Option<PathBuf> {
         })
         .map(|dir| dir.join(name))
         .find(|candidate| is_executable(candidate))
+}
+
+pub fn exec_replace(path: &Path, argv: &[String], env: &[(String, String)]) -> ! {
+    let argv: Vec<CString> = argv
+        .iter()
+        .map(|arg| CString::new(arg.as_bytes()).unwrap_or_default())
+        .collect();
+    let envp: Vec<CString> = env
+        .iter()
+        .filter_map(|(key, value)| CString::new(format!("{key}={value}")).ok())
+        .collect();
+
+    let Ok(path_c) = CString::new(path.as_os_str().as_encoded_bytes()) else {
+        eprintln!("sharky: {}: invalid path", path.display());
+        unsafe { _exit(126) }
+    };
+
+    let Err(err) = execve(&path_c, &argv, &envp);
+    eprintln!("sharky: {}: {err}", path.display());
+    unsafe { _exit(126) }
+}
+
+pub fn wait(pid: Pid) -> i32 {
+    match waitpid(pid, None) {
+        Ok(WaitStatus::Exited(_, status)) => status,
+        Ok(WaitStatus::Signaled(_, signal, _)) => 128 + signal as i32,
+        Ok(_) => 1,
+        Err(err) => {
+            eprintln!("sharky: wait: {err}");
+            1
+        }
+    }
 }
 
 fn is_executable(path: &Path) -> bool {
