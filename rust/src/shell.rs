@@ -156,6 +156,20 @@ impl Shell {
             Ok(config) => self.apply_config(config),
             Err(err) => eprintln!("sharky: config error in {err}"),
         }
+        self.discover_profile_paths();
+    }
+
+    pub fn discover_profile_paths(&mut self) {
+        if self.setting("profile_paths") == Some("off") {
+            return;
+        }
+        let home = PathBuf::from(self.var("HOME"));
+        if home.as_os_str().is_empty() {
+            return;
+        }
+        for dir in crate::profiles::discover(&home) {
+            self.append_path(&dir);
+        }
     }
 
     fn apply_config(&mut self, config: Config) {
@@ -171,6 +185,19 @@ impl Shell {
         self.settings.extend(config.settings);
         self.colors.extend(config.colors);
         self.styles.extend(config.styles);
+    }
+
+    fn append_path(&mut self, dir: &str) {
+        let current = self.var("PATH");
+        if current.split(':').any(|entry| entry == dir) {
+            return;
+        }
+        let value = if current.is_empty() {
+            dir.to_string()
+        } else {
+            format!("{current}:{dir}")
+        };
+        self.set_var("PATH", value);
     }
 
     fn add_path(&mut self, dir: &str) {
@@ -1421,6 +1448,7 @@ impl Shell {
         match config::load(&dir) {
             Ok(config) => {
                 self.apply_config(config);
+                self.discover_profile_paths();
                 0
             }
             Err(err) => {

@@ -119,7 +119,7 @@ fn validate(config: &Config, file: &str) -> Result<(), ConfigError> {
 
     for (key, value) in &config.settings {
         match key.as_str() {
-            "greeting" | "autosuggest" | "highlight" | "starship" => {
+            "greeting" | "autosuggest" | "highlight" | "starship" | "profile_paths" => {
                 if !matches!(value.as_str(), "on" | "off") {
                     return Err(ConfigError {
                         file: file.to_string(),

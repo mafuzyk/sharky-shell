@@ -132,6 +132,15 @@ and `\t` are escapes. Anything after `//` outside quotes is a comment.
 | `highlight` | `on` / `off` |
 | `history` | number of history entries to keep |
 | `starship` | `on` / `off`; use `starship prompt` for the prompt |
+| `profile_paths` | `on` / `off`; import `PATH` additions from shell profiles |
+
+`profile_paths` is on by default. Sharky reads simple `PATH` additions from
+`~/.profile`, `~/.bash_profile`, `~/.bash_login`, `~/.bashrc`, `~/.zshrc`,
+`~/.zprofile` and `~/.config/fish/config.fish` without executing them: only
+`export PATH=...` values built from literals, `~`, `$HOME` and `$PATH`, plus
+`fish_add_path` and `set -gx PATH`. Anything else is ignored, so command
+substitution and arbitrary shell code never run. Use `current` for anything
+more complex, and `tide profile_paths off` to disable the scan.
 
 `anchor` actions: `history_search`, `complete`, `clear_screen`, `accept_line`,
 `abort`, `backward_char`, `forward_char`, `backward_word`, `forward_word`,

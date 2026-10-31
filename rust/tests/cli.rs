@@ -1172,3 +1172,40 @@ fn first_run_seeds_the_config_directory() {
     std::fs::remove_dir_all(&dir).ok();
     assert_eq!(text, "tide greeting off\n");
 }
+
+#[test]
+fn discovers_path_additions_from_shell_profiles() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = temp_dir();
+    let bin = dir.join(".spicetify");
+    std::fs::create_dir_all(&bin).unwrap();
+    let tool = bin.join("spicetify");
+    std::fs::write(&tool, "#!/bin/sh\nprintf 'spicetify-test'\n").unwrap();
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(
+        dir.join(".bashrc"),
+        "export PATH=\"$HOME/.spicetify:$PATH\"\n",
+    )
+    .unwrap();
+
+    let cfg = dir.join("cfg");
+    std::fs::create_dir_all(&cfg).unwrap();
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_sharky"))
+            .args(["-c", "spicetify"])
+            .env("HOME", &dir)
+            .env("PATH", "/usr/bin:/bin")
+            .env("SHARKY_CONFIG", &cfg)
+            .output()
+            .expect("failed to run sharky")
+    };
+
+    let out = run();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "spicetify-test");
+
+    std::fs::write(cfg.join("config.sharky"), "tide profile_paths off\n").unwrap();
+    let out = run();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(out.status.code(), Some(127));
+}

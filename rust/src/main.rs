@@ -7,6 +7,7 @@ mod exec;
 mod history;
 mod lexer;
 mod parser;
+mod profiles;
 mod prompt;
 mod repl;
 mod term;
