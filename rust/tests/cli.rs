@@ -830,3 +830,66 @@ fn background_jobs_are_tracked_in_scripts() {
     assert!(text.contains("[1]"), "unexpected jobs output {text:?}");
     assert!(text.contains("sleep 0.05"), "unexpected jobs output {text:?}");
 }
+
+#[test]
+fn here_string_feeds_one_line_to_stdin() {
+    let out = sharky(&["-c", "cat <<< \"a b\""]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "a b\n");
+}
+
+#[test]
+fn here_string_expands_variables() {
+    let out = sharky(&["-c", "X=v; cat <<< \"$X\""]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "v\n");
+}
+
+#[test]
+fn combined_redirect_captures_stdout_and_stderr() {
+    let dir = temp_dir();
+    let path = dir.join("both");
+    let command = format!(
+        "sh -c 'echo o; echo e >&2' &> {}; cat {}",
+        path.display(),
+        path.display()
+    );
+    let out = sharky_in(&dir, &["-c", &command]);
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "o\ne\n");
+}
+
+#[test]
+fn combined_append_redirect_keeps_the_file() {
+    let dir = temp_dir();
+    let path = dir.join("both");
+    let command = format!(
+        "printf a &> {}; printf b &>> {}; cat {}",
+        path.display(),
+        path.display(),
+        path.display()
+    );
+    let out = sharky_in(&dir, &["-c", &command]);
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "ab");
+}
+
+#[test]
+fn brace_expansion_expands_lists_and_ranges() {
+    let out = sharky(&["-c", "printf '%s ' a{b,c}d"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "abd acd ");
+    let out = sharky(&["-c", "printf '%s ' {1..3}"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "1 2 3 ");
+    let out = sharky(&["-c", "printf '%s ' {c..a}"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "c b a ");
+}
+
+#[test]
+fn parameter_substitution_replaces_literal_text() {
+    let out = sharky(&["-c", "x=abcabc; printf '%s' \"${x/b/X}\""]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "aXcabc");
+    let out = sharky(&["-c", "x=abcabc; printf '%s' \"${x//b/X}\""]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "aXcaXc");
+}

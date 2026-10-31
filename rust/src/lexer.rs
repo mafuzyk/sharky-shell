@@ -29,6 +29,8 @@ pub enum ParamOp {
     TrimPrefixLong,
     TrimSuffixShort,
     TrimSuffixLong,
+    Substitute,
+    SubstituteAll,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -48,6 +50,9 @@ pub enum TokenKind {
     RedirAppend(Option<i32>),
     RedirIn(Option<i32>),
     RedirDup(i32, i32),
+    RedirBoth,
+    RedirBothAppend,
+    RedirHereString(Option<i32>),
     RedirHere {
         fd: Option<i32>,
         strip: bool,
@@ -165,6 +170,14 @@ impl Lexer {
                     if self.peek() == Some('&') {
                         self.push(TokenKind::AndIf);
                         self.pos += 2;
+                    } else if self.peek() == Some('>') {
+                        if self.chars.get(self.pos + 2) == Some(&'>') {
+                            self.push(TokenKind::RedirBothAppend);
+                            self.pos += 3;
+                        } else {
+                            self.push(TokenKind::RedirBoth);
+                            self.pos += 2;
+                        }
                     } else {
                         self.push(TokenKind::Amp);
                         self.pos += 1;
@@ -462,6 +475,11 @@ impl Lexer {
         self.pos += 1;
 
         if self.current() == Some('<') {
+            if self.peek() == Some('<') {
+                self.pos += 2;
+                self.push_at(TokenKind::RedirHereString(fd), start);
+                return Ok(());
+            }
             let strip = self.peek() == Some('-');
             self.pos += if strip { 2 } else { 1 };
             let index = self.tokens.len();
@@ -744,6 +762,8 @@ fn parse_parameter(content: &str) -> Parameter {
         (":+", ParamOp::Alternate),
         ("##", ParamOp::TrimPrefixLong),
         ("%%", ParamOp::TrimSuffixLong),
+        ("//", ParamOp::SubstituteAll),
+        ("/", ParamOp::Substitute),
         ("#", ParamOp::TrimPrefixShort),
         ("%", ParamOp::TrimSuffixShort),
     ];

@@ -782,6 +782,32 @@ impl Shell {
                         file: temp_file(&text)?,
                     });
                 }
+                RedirectOp::HereString => {
+                    let Some(word) = &redirect.target else {
+                        return Err("redirect without a target".to_string());
+                    };
+                    let text = format!("{}\n", self.expand_text_word(word));
+                    actions.push(Action::Here {
+                        fd: redirect.fd,
+                        file: temp_file(&text)?,
+                    });
+                }
+                RedirectOp::Both { append } => {
+                    let Some(word) = &redirect.target else {
+                        return Err("redirect without a target".to_string());
+                    };
+                    let fields = self.expand_word(word);
+                    if fields.len() != 1 {
+                        return Err("ambiguous redirect".to_string());
+                    }
+                    let path = PathBuf::from(&fields[0]);
+                    actions.push(if *append {
+                        Action::Append(1, path)
+                    } else {
+                        Action::Write(1, path)
+                    });
+                    actions.push(Action::Dup { from: 1, to: 2 });
+                }
                 op => {
                     let Some(word) = &redirect.target else {
                         return Err("redirect without a target".to_string());
@@ -795,7 +821,10 @@ impl Shell {
                         RedirectOp::Out => Action::Write(redirect.fd, path),
                         RedirectOp::Append => Action::Append(redirect.fd, path),
                         RedirectOp::In => Action::Read(redirect.fd, path),
-                        RedirectOp::Dup(_) | RedirectOp::Here { .. } => unreachable!(),
+                        RedirectOp::Dup(_)
+                        | RedirectOp::Here { .. }
+                        | RedirectOp::HereString
+                        | RedirectOp::Both { .. } => unreachable!(),
                     });
                 }
             }
@@ -1157,6 +1186,20 @@ impl Shell {
     }
 
     fn expand_word(&mut self, word: &Word) -> Vec<String> {
+        if let [Part::Literal(text)] = word.parts.as_slice()
+            && text.contains('{')
+            && let Some(alternatives) = brace_expand(text)
+        {
+            let mut fields = Vec::new();
+            for alternative in alternatives {
+                let word = Word {
+                    parts: vec![Part::Literal(alternative)],
+                };
+                fields.extend(self.expand_word(&word));
+            }
+            return fields;
+        }
+
         let mut fields = Fields::new();
 
         for part in &word.parts {
@@ -1286,6 +1329,18 @@ impl Shell {
             Some(ParamOp::TrimPrefixLong) => trim_prefix(&value, &argument, true),
             Some(ParamOp::TrimSuffixShort) => trim_suffix(&value, &argument, false),
             Some(ParamOp::TrimSuffixLong) => trim_suffix(&value, &argument, true),
+            Some(op @ (ParamOp::Substitute | ParamOp::SubstituteAll)) => {
+                let (pattern, replacement) = argument
+                    .split_once('/')
+                    .unwrap_or((argument.as_str(), ""));
+                if pattern.is_empty() {
+                    value
+                } else if op == ParamOp::SubstituteAll {
+                    value.replace(pattern, replacement)
+                } else {
+                    value.replacen(pattern, replacement, 1)
+                }
+            }
         }
     }
 
@@ -1624,6 +1679,140 @@ fn trim_suffix(value: &str, pattern: &str, longest: bool) -> String {
     }
 
     value.to_string()
+}
+
+fn brace_expand(text: &str) -> Option<Vec<String>> {
+    let open = text.find('{')?;
+    let mut depth = 0usize;
+    let mut close = None;
+
+    for (offset, char) in text[open..].char_indices() {
+        match char {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    close = Some(open + offset);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let close = close?;
+    let prefix = &text[..open];
+    let inner = &text[open + 1..close];
+    let suffix = &text[close + 1..];
+    let parts = split_top_level(inner);
+
+    let alternatives: Vec<String> = if parts.len() > 1 {
+        parts
+            .iter()
+            .map(|part| format!("{prefix}{part}{suffix}"))
+            .collect()
+    } else {
+        range_values(inner)?
+            .iter()
+            .map(|value| format!("{prefix}{value}{suffix}"))
+            .collect()
+    };
+
+    let mut out = Vec::new();
+    for alternative in alternatives {
+        match brace_expand(&alternative) {
+            Some(nested) => out.extend(nested),
+            None => out.push(alternative),
+        }
+        if out.len() > 1024 {
+            return None;
+        }
+    }
+
+    Some(out)
+}
+
+fn split_top_level(text: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+
+    for (index, char) in text.char_indices() {
+        match char {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(&text[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&text[start..]);
+    parts
+}
+
+fn range_values(inner: &str) -> Option<Vec<String>> {
+    let parts: Vec<&str> = inner.split("..").collect();
+    if !(2..=3).contains(&parts.len()) {
+        return None;
+    }
+
+    let explicit = if parts.len() == 3 {
+        Some(parts[2].parse::<i64>().ok()?)
+    } else {
+        None
+    };
+
+    if let (Ok(first), Ok(last)) = (parts[0].parse::<i64>(), parts[1].parse::<i64>()) {
+        let mut step = explicit.unwrap_or(if first <= last { 1 } else { -1 });
+        if step == 0 {
+            return None;
+        }
+        if first > last {
+            step = -step.abs();
+        }
+        let mut values = Vec::new();
+        let mut value = first;
+        while (step > 0 && value <= last) || (step < 0 && value >= last) {
+            values.push(value.to_string());
+            if values.len() > 10_000 {
+                return None;
+            }
+            value = value.checked_add(step)?;
+        }
+        return Some(values);
+    }
+
+    let mut first = parts[0].chars();
+    let start = first.next()?;
+    if first.next().is_some() {
+        return None;
+    }
+    let mut last = parts[1].chars();
+    let end = last.next()?;
+    if last.next().is_some() {
+        return None;
+    }
+
+    let mut step = explicit.unwrap_or(if start <= end { 1 } else { -1 });
+    if step == 0 {
+        return None;
+    }
+    if start > end {
+        step = -step.abs();
+    }
+    let mut values = Vec::new();
+    let mut value = start as i64;
+    let end = end as i64;
+    while (step > 0 && value <= end) || (step < 0 && value >= end) {
+        values.push(char::from_u32(value as u32)?.to_string());
+        if values.len() > 10_000 {
+            return None;
+        }
+        value = value.checked_add(step)?;
+    }
+    Some(values)
 }
 
 pub(crate) fn glob_match(pattern: &str, text: &str) -> bool {

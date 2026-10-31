@@ -71,12 +71,13 @@ The prompt, `-c` and script files share one grammar:
 | --- | --- |
 | quotes, escapes, comments | `printf '%s\n' "a b" # comment` |
 | variables | `name=value`, `"$name"`, `${name}` |
-| parameter operators | `${NAME:-default}`, `${#NAME}`, `${NAME#pre}`, `${NAME%%.*}` |
+| parameter operators | `${NAME:-default}`, `${#NAME}`, `${NAME#pre}`, `${NAME/pat/repl}`, `${NAME//pat/repl}` |
+| brace expansion | `file{1..3}.txt`, `a{b,c}d` |
 | command substitution | `files=$(ls \| wc -l)` |
 | arithmetic | `$((2 + 3 * 4))`, `((total > 10))` |
 | globbing and tilde | `src/*.rs`, `~/bin` |
-| pipelines and redirects | `a \| b > out 2>&1` |
-| heredocs | `cat <<EOF` ... `EOF`, `<<-EOF`, `<<'EOF'` |
+| pipelines and redirects | `a \| b > out 2>&1`, `cmd &> out`, `cmd &>> out` |
+| heredocs and here-strings | `cat <<EOF` ... `EOF`, `<<-EOF`, `<<'EOF'`, `cat <<< "text"` |
 | lists | `a; b`, `a && b`, `a \|\| b` |
 | conditionals | `if`, `elif`, `else`, `fi`, `[[ -f x && -n "$y" ]]` |
 | loops | `for x in a b; do ...; done`, `while`, `until` |

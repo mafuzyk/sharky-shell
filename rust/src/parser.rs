@@ -535,6 +535,9 @@ impl Parser {
             TokenKind::RedirOut(fd) => (fd.unwrap_or(1), RedirectOp::Out),
             TokenKind::RedirAppend(fd) => (fd.unwrap_or(1), RedirectOp::Append),
             TokenKind::RedirIn(fd) => (fd.unwrap_or(0), RedirectOp::In),
+            TokenKind::RedirHereString(fd) => (fd.unwrap_or(0), RedirectOp::HereString),
+            TokenKind::RedirBoth => (1, RedirectOp::Both { append: false }),
+            TokenKind::RedirBothAppend => (1, RedirectOp::Both { append: true }),
             TokenKind::RedirDup(to, from) => {
                 self.advance();
                 return Ok(Some(Redirect {

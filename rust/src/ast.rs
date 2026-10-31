@@ -90,6 +90,8 @@ pub enum RedirectOp {
     In,
     Dup(i32),
     Here { body: String, expand: bool },
+    HereString,
+    Both { append: bool },
 }
 
 pub fn literal(word: &Word) -> Option<String> {
