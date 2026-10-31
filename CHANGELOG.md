@@ -4,6 +4,28 @@ All notable changes to sharky are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project uses semantic
 versioning.
 
+## [3.0.0] - 2026-10-31
+
+### Added
+
+- Koral terminal integration: OSC 133 prompt and command marks with a
+  URL-encoded command line, OSC 7 working-directory marks, and the exit status
+  on every command end.
+- `sharky-config` crate shared with Koral: parser, `tokenize`, `INSTRUCTIONS`
+  and `ACTIONS`, with no dependencies and a stable public API.
+- Abbreviations: `shoal` in `config.sharky`, `abbr`/`unabbr` builtins, and
+  expansion on space or Enter at command position.
+- Ctrl-R incremental reverse history search; Enter runs the match and Ctrl-G
+  cancels.
+- Multi-line input in the REPL: unfinished compound commands keep buffering
+  instead of failing at the end of the line.
+
+### Changed
+
+- The configuration parser moved to `rust/config`; the shell depends on it by
+  path. The release binary stays static, with `nix` as the only external
+  dependency.
+
 ## [2.1.0] - 2026-10-31
 
 ### Added
