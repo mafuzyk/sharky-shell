@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use crate::shell::Shell;
 use crate::term::{self, Key};
 
@@ -10,36 +8,26 @@ pub enum Line {
 }
 
 pub struct Editor {
-    history: Vec<String>,
     index: usize,
     draft: String,
-    path: PathBuf,
-    limit: usize,
 }
 
 impl Editor {
-    pub fn new(path: PathBuf, limit: usize) -> Self {
-        let history = std::fs::read_to_string(&path)
-            .map(|text| text.lines().map(str::to_string).collect())
-            .unwrap_or_default();
-
+    pub fn new() -> Self {
         Editor {
-            history,
             index: 0,
             draft: String::new(),
-            path,
-            limit,
         }
     }
 
-    pub fn read_line(&mut self, prompt: &str, shell: &Shell) -> std::io::Result<Line> {
+    pub fn read_line(&mut self, prompt: &str, shell: &mut Shell) -> std::io::Result<Line> {
         let Some(_raw) = term::RawMode::enable() else {
             return fallback_line();
         };
 
         let mut buffer: Vec<char> = Vec::new();
         let mut cursor = 0;
-        self.index = self.history.len();
+        self.index = shell.history_entries().len();
         self.draft.clear();
 
         loop {
@@ -97,8 +85,8 @@ impl Editor {
                         buffer.remove(cursor);
                     }
                 }
-                Key::Up => self.recall_newer(&mut buffer, &mut cursor),
-                Key::Down => self.recall_older(&mut buffer, &mut cursor),
+                Key::Up => self.recall_newer(&mut buffer, &mut cursor, shell),
+                Key::Down => self.recall_older(&mut buffer, &mut cursor, shell),
                 Key::Tab => complete(&mut buffer, &mut cursor, shell),
                 Key::Char(char) => {
                     buffer.insert(cursor, char);
@@ -109,51 +97,29 @@ impl Editor {
         }
     }
 
-    pub fn push_history(&mut self, line: &str) {
-        let line = line.trim_end();
-        if line.is_empty() || line.lines().count() > 1 {
-            return;
-        }
-        if self.history.last().map(String::as_str) == Some(line) {
-            return;
-        }
-        self.history.push(line.to_string());
-        if self.history.len() > self.limit {
-            let excess = self.history.len() - self.limit;
-            self.history.drain(..excess);
-        }
-    }
-
-    pub fn save(&self) {
-        if let Some(parent) = self.path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let start = self.history.len().saturating_sub(self.limit);
-        let text = self.history[start..].join("\n");
-        let _ = std::fs::write(&self.path, text);
-    }
-
-    fn recall_newer(&mut self, buffer: &mut Vec<char>, cursor: &mut usize) {
+    fn recall_newer(&mut self, buffer: &mut Vec<char>, cursor: &mut usize, shell: &Shell) {
+        let history = shell.history_entries();
         if self.index == 0 {
             return;
         }
-        if self.index == self.history.len() {
+        if self.index == history.len() {
             self.draft = buffer.iter().collect();
         }
         self.index -= 1;
-        *buffer = self.history[self.index].chars().collect();
+        *buffer = history[self.index].chars().collect();
         *cursor = buffer.len();
     }
 
-    fn recall_older(&mut self, buffer: &mut Vec<char>, cursor: &mut usize) {
-        if self.index + 1 > self.history.len() {
+    fn recall_older(&mut self, buffer: &mut Vec<char>, cursor: &mut usize, shell: &Shell) {
+        let history = shell.history_entries();
+        if self.index + 1 > history.len() {
             return;
         }
         self.index += 1;
-        *buffer = if self.index == self.history.len() {
+        *buffer = if self.index == history.len() {
             self.draft.clone()
         } else {
-            self.history[self.index].clone()
+            history[self.index].clone()
         }
         .chars()
         .collect();

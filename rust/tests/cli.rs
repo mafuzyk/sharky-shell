@@ -1055,3 +1055,63 @@ fn set_e_propagates_out_of_functions() {
     assert_eq!(out.status.code(), Some(1));
     assert!(out.stdout.is_empty());
 }
+
+#[test]
+fn type_reports_aliases_builtins_and_paths() {
+    let out = sharky(&["-c", "type cd; type printf"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("cd: shell builtin"), "{text:?}");
+    assert!(text.contains("printf: /"), "{text:?}");
+    let out = sharky(&["-c", "type definitely-not-a-command"]);
+    assert_eq!(out.status.code(), Some(1));
+}
+
+#[test]
+fn alias_declares_and_removes_an_alias() {
+    let out = sharky(&["-c", r#"alias hi='echo hello'; hi"#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hello\n");
+    let out = sharky(&["-c", r#"alias hi='echo hello'; unalias hi; hi"#]);
+    assert_eq!(out.status.code(), Some(127));
+}
+
+#[test]
+fn pwd_prints_the_tracked_directory() {
+    let dir = temp_dir();
+    let out = sharky_in(&dir, &["-c", "pwd"]);
+    let expected = dir.canonicalize().unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), expected.display().to_string());
+}
+
+#[test]
+fn history_is_unavailable_without_an_interactive_session() {
+    let out = sharky(&["-c", "history"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not available"));
+}
+
+#[test]
+fn double_bracket_supports_regex_matching() {
+    assert_eq!(sharky(&["-c", "[[ foo =~ ^f ]]"]).status.code(), Some(0));
+    assert_eq!(sharky(&["-c", "[[ foo =~ ^b ]]"]).status.code(), Some(1));
+    assert_eq!(sharky(&["-c", "[[ foo =~ ( ]]"]).status.code(), Some(1));
+}
+
+#[test]
+fn double_bracket_supports_symlinks_and_exists() {
+    let dir = temp_dir();
+    let file = dir.join("file");
+    let link = dir.join("link");
+    std::fs::write(&file, "x").unwrap();
+    std::os::unix::fs::symlink(&file, &link).unwrap();
+    let command = format!("[[ -a '{}' ]] && [[ -L '{}' ]]", file.display(), link.display());
+    let out = sharky_in(&dir, &["-c", &command]);
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn double_bracket_coerces_integers_like_ruby() {
+    assert_eq!(sharky(&["-c", "[[ 1 -eq x ]]"]).status.code(), Some(1));
+    assert_eq!(sharky(&["-c", "[[ 12abc -eq 12 ]]"]).status.code(), Some(0));
+}

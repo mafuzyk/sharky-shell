@@ -89,3 +89,45 @@ fn interactive_shell_keeps_running_after_a_failed_command() {
     let _ = writer.write_all(b"exit\r");
     let _ = child.wait();
 }
+
+#[test]
+fn interactive_shell_persists_history_with_0600() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+
+    let data = std::env::temp_dir().join(format!("sharky-history-{}", std::process::id()));
+    std::fs::create_dir_all(&data).unwrap();
+
+    let pty = openpty(None, None).expect("pty");
+    let stdin = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stdout = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stderr = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .stdin(stdin)
+        .stdout(stdout)
+        .stderr(stderr)
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .env("TERM", "xterm-256color")
+        .env("HOME", "/tmp")
+        .env("XDG_DATA_HOME", &data)
+        .spawn()
+        .expect("spawn sharky");
+
+    let fd = pty.master.as_raw_fd();
+    let mut writer = unsafe { std::fs::File::from_raw_fd(pty.master.try_clone().unwrap().into_raw_fd()) };
+
+    read_until(fd, "❯", Duration::from_secs(5));
+    let _ = writer.write_all(b"printf HISTDONE\r");
+    read_until(fd, "HISTDONE", Duration::from_secs(5));
+    std::thread::sleep(Duration::from_millis(200));
+    let _ = writer.write_all(b"exit\r");
+    let _ = child.wait();
+
+    let path = Path::new(&data).join("sharky/history");
+    let text = std::fs::read_to_string(&path).expect("history file");
+    assert!(text.contains("printf HISTDONE"), "history={text:?}");
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    std::fs::remove_dir_all(&data).ok();
+    assert_eq!(mode, 0o600);
+}

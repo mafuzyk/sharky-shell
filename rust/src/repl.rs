@@ -1,24 +1,13 @@
-use std::path::PathBuf;
-
 use crate::editor::{Editor, Line};
 use crate::prompt;
 use crate::shell::Shell;
-
-pub fn history_path() -> PathBuf {
-    if let Some(dir) = std::env::var_os("XDG_DATA_HOME") {
-        return PathBuf::from(dir).join("sharky/history");
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".local/share/sharky/history");
-    }
-    PathBuf::from("/tmp/sharky-history")
-}
 
 pub fn run(shell: &mut Shell) -> i32 {
     install_signals();
     shell.set_interactive(true);
 
-    let mut editor = Editor::new(history_path(), shell.history_limit());
+    let mut editor = Editor::new();
+    shell.init_history();
     let mut buffer = String::new();
     let mut status = 0;
 
@@ -50,17 +39,17 @@ pub fn run(shell: &mut Shell) -> i32 {
                 match shell.eval(&buffer) {
                     Ok(code) => {
                         status = code;
-                        editor.push_history(&buffer);
+                        shell.push_history(&buffer);
                         buffer.clear();
                         if let Some(exit) = shell.exit_requested {
-                            editor.save();
-                            return exit;
+                            shell.save_history();
+                            return shell.finish(exit);
                         }
                     }
                     Err(err) if err.incomplete => {}
                     Err(err) => {
                         eprintln!("sharky: {}", err.message);
-                        editor.push_history(&buffer);
+                        shell.push_history(&buffer);
                         buffer.clear();
                         status = 2;
                     }
@@ -72,12 +61,12 @@ pub fn run(shell: &mut Shell) -> i32 {
                 status = 130;
             }
             Ok(Line::Eof) => {
-                editor.save();
-                return status;
+                shell.save_history();
+                return shell.finish(status);
             }
             Err(err) => {
                 eprintln!("sharky: {err}");
-                editor.save();
+                shell.save_history();
                 return 1;
             }
         }

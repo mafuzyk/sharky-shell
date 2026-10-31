@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 nix = { version = "0.31", features = ["process", "signal", "term", "fs"] }
+regex-lite = "0.1"
 
 [profile.release]
 lto = true

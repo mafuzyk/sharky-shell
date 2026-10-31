@@ -43,6 +43,8 @@ assert an exit status instead of waiting forever.
 - [x] Brace expansion, here-strings, `&>`, `${var/pat/repl}`
 - [x] Indexed arrays: literals, `[@]`, index, `#`, `+=` and `a[i]=`
 - [x] `set -e/-u/-x`, `pipefail`, `set --`, `trap` EXIT, `read` and `shift`
+- [x] `[[ =~ ]]`, `-a`, `-L/-h`, integer coercion
+- [x] `type`, `alias`/`unalias`, `history`, `pwd`
 - [x] Parser and AST: `if`, `for`, `while`, `until`, `case`, functions,
       groups, subshells, `!`
 - [x] `[[ ]]` conditionals and heredocs (`<<`, `<<-`, quoted delimiters)

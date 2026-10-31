@@ -16,6 +16,7 @@ use crate::ast::{
 };
 use crate::arith;
 use crate::exec;
+use crate::history::History;
 use crate::test_expr;
 use crate::lexer::{self, ParamOp, Parameter, Part, TokenKind, Word};
 use crate::parser;
@@ -40,6 +41,7 @@ pub struct Shell {
     nounset_failed: bool,
     traps: HashMap<String, String>,
     exit_trap_ran: bool,
+    history: Option<History>,
     pub exit_requested: Option<i32>,
     jobs: Vec<Job>,
     next_job: usize,
@@ -117,6 +119,7 @@ impl Shell {
             nounset_failed: false,
             traps: HashMap::new(),
             exit_trap_ran: false,
+            history: None,
             exit_requested: None,
             jobs: Vec::new(),
             next_job: 1,
@@ -1034,6 +1037,14 @@ impl Shell {
             "unset" => Some(Flow::Status(self.unset(&words[1..]))),
             "set" => Some(Flow::Status(self.set(&words[1..]))),
             "jobs" => Some(Flow::Status(self.list_jobs())),
+            "pwd" => {
+                println!("{}", self.cwd.display());
+                Some(Flow::Status(0))
+            }
+            "type" => Some(Flow::Status(self.type_builtin(&words[1..]))),
+            "alias" => Some(Flow::Status(self.alias(&words[1..]))),
+            "unalias" => Some(Flow::Status(self.unalias(&words[1..]))),
+            "history" => Some(Flow::Status(self.history_builtin(&words[1..]))),
             "trap" => Some(Flow::Status(self.trap(&words[1..]))),
             "read" => Some(Flow::Status(self.read(&words[1..]))),
             "shift" => Some(Flow::Status(self.shift(&words[1..]))),
@@ -1319,6 +1330,145 @@ impl Shell {
         let flow = self.run_program(&program);
         self.positional = saved;
         flow
+    }
+
+    pub fn init_history(&mut self) {
+        self.history = Some(History::load(History::default_path(), self.history_limit()));
+    }
+
+    pub fn push_history(&mut self, line: &str) {
+        if let Some(history) = &mut self.history {
+            history.add(line);
+        }
+    }
+
+    pub fn save_history(&self) {
+        if let Some(history) = &self.history {
+            history.save();
+        }
+    }
+
+    pub fn history_entries(&self) -> &[String] {
+        self.history
+            .as_ref()
+            .map(History::entries)
+            .unwrap_or(&[])
+    }
+
+    fn history_builtin(&mut self, args: &[String]) -> i32 {
+        if self.history.is_none() {
+            eprintln!("sharky: history: not available");
+            return 1;
+        }
+
+        if args.is_empty() {
+            for entry in self.history_entries() {
+                println!("{entry}");
+            }
+            return 0;
+        }
+        if args.len() == 1 && args[0] == "-c" {
+            if let Some(history) = &mut self.history {
+                history.clear();
+            }
+            return 0;
+        }
+
+        eprintln!("sharky: history: usage: history [-c]");
+        1
+    }
+
+    fn type_builtin(&mut self, args: &[String]) -> i32 {
+        if args.is_empty() {
+            eprintln!("sharky: type: usage: type name ...");
+            return 1;
+        }
+
+        let mut status = 0;
+        for name in args {
+            if let Some(value) = self.aliases.get(name) {
+                println!("{name}: aliased to {value}");
+            } else if self.funcs.contains_key(name) {
+                println!("{name}: function");
+            } else if is_builtin_name(name) {
+                println!("{name}: shell builtin");
+            } else if let Some(path) = exec::resolve(name, self) {
+                println!("{name}: {}", path.display());
+            } else {
+                eprintln!("sharky: type: {name}: not found");
+                status = 1;
+            }
+        }
+        status
+    }
+
+    fn alias(&mut self, args: &[String]) -> i32 {
+        if args.is_empty() {
+            let mut entries: Vec<_> = self.aliases.iter().collect();
+            entries.sort_by(|left, right| left.0.cmp(right.0));
+            for (name, value) in entries {
+                println!("alias {name}='{value}'");
+            }
+            return 0;
+        }
+
+        let mut status = 0;
+        let mut index = 0;
+        while index < args.len() {
+            let argument = &args[index];
+            let (name, value) = if let Some((name, value)) = argument.split_once('=') {
+                index += 1;
+                (name.to_string(), value.to_string())
+            } else if index + 1 < args.len() {
+                let pair = (argument.clone(), args[index + 1].clone());
+                index += 2;
+                pair
+            } else {
+                index += 1;
+                match self.aliases.get(argument) {
+                    Some(value) => {
+                        println!("alias {argument}='{value}'");
+                        continue;
+                    }
+                    None => {
+                        eprintln!("sharky: alias: {argument}: not found");
+                        status = 1;
+                        continue;
+                    }
+                }
+            };
+
+            if name.is_empty() {
+                eprintln!("sharky: alias: empty alias name");
+                status = 1;
+            } else if alias_has_control_operator(&value) {
+                eprintln!("sharky: alias: {name}: control operator in alias value");
+                status = 1;
+            } else {
+                self.aliases.insert(name, value);
+            }
+        }
+        status
+    }
+
+    fn unalias(&mut self, args: &[String]) -> i32 {
+        if args.is_empty() {
+            eprintln!("sharky: unalias: usage: unalias [-a] name ...");
+            return 1;
+        }
+        if args.len() == 1 && args[0] == "-a" {
+            self.aliases.clear();
+            return 0;
+        }
+
+        let mut status = 0;
+        for name in args {
+            if self.aliases.remove(name).is_none() {
+                eprintln!("sharky: unalias: {name}: not found");
+                status = 1;
+            }
+        }
+        status
     }
 
     fn trap(&mut self, args: &[String]) -> i32 {
@@ -1844,6 +1994,39 @@ fn flow_status(flow: Flow) -> i32 {
 
 // shortcut: heredoc bodies go through an unlinked temp file instead of a pipe,
 // so a large body cannot deadlock before the child starts reading.
+fn alias_has_control_operator(value: &str) -> bool {
+    value.contains('\n') || value.chars().any(|char| matches!(char, '|' | '&' | ';' | '<' | '>'))
+}
+
+fn is_builtin_name(name: &str) -> bool {
+    matches!(
+        name,
+        ":" | "true"
+            | "false"
+            | "cd"
+            | "exit"
+            | "export"
+            | "unset"
+            | "set"
+            | "source"
+            | "."
+            | "break"
+            | "continue"
+            | "return"
+            | "jobs"
+            | "fg"
+            | "bg"
+            | "pwd"
+            | "type"
+            | "alias"
+            | "unalias"
+            | "trap"
+            | "read"
+            | "history"
+            | "shift"
+    )
+}
+
 fn is_special_name(name: &str) -> bool {
     matches!(name, "?" | "#" | "@" | "*" | "!" | "$" | "-")
         || (!name.is_empty() && name.chars().all(|char| char.is_ascii_digit()))

@@ -83,11 +83,12 @@ The prompt, `-c` and script files share one grammar:
 | options | `set -e`, `set -u`, `set -x`, `set -o pipefail`, `set -- a b` |
 | traps | `trap 'cleanup' EXIT`, `trap -l` |
 | read and shift | `read -r name`, `shift 2` |
-| conditionals | `if`, `elif`, `else`, `fi`, `[[ -f x && -n "$y" ]]` |
+| conditionals | `if`, `elif`, `else`, `fi`, `[[ -f x && "$y" =~ ^f ]]` |
 | loops | `for x in a b; do ...; done`, `while`, `until` |
 | case | `case $x in f*) ...;; *) ...;; esac` |
 | functions | `greet() { printf 'hi %s\n' "$1"; }` |
 | groups and subshells | `{ a; b; }`, `( a; b )` |
+| builtins | `type`, `alias`, `unalias`, `history`, `pwd`, `read`, `shift` |
 | job control | `cmd &`, `jobs`, `fg`, `bg`, Ctrl-Z |
 | scripts | `source lib.sh`, `sharky file.sh args` |
 

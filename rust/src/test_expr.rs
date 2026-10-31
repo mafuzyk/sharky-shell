@@ -87,7 +87,8 @@ impl Parser<'_> {
         if let Some(operator) = bare(&word)
             && matches!(
                 operator.as_str(),
-                "-n" | "-z" | "-e" | "-f" | "-d" | "-r" | "-w" | "-x" | "-s"
+                "-n" | "-z" | "-e" | "-a" | "-f" | "-d" | "-r" | "-w" | "-x" | "-s" | "-L"
+                    | "-h"
             )
             && self.pos < self.words.len()
         {
@@ -104,7 +105,8 @@ impl Parser<'_> {
 
         if !matches!(
             operator.as_str(),
-            "==" | "=" | "!=" | "<" | ">" | "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge"
+            "==" | "=" | "!=" | "=~" | "<" | ">" | "-eq" | "-ne" | "-lt" | "-le" | "-gt"
+                    | "-ge"
         ) {
             return Ok(!left.is_empty());
         }
@@ -126,11 +128,24 @@ fn bare(word: &Word) -> Option<String> {
     }
 }
 
+fn to_i(value: &str) -> i64 {
+    let value = value.trim();
+    let mut end = usize::from(value.starts_with('-') || value.starts_with('+'));
+
+    while end < value.len() && value.as_bytes()[end].is_ascii_digit() {
+        end += 1;
+    }
+
+    value[..end].parse().unwrap_or(0)
+}
+
 fn unary(operator: &str, value: &str) -> bool {
     match operator {
         "-n" => !value.is_empty(),
         "-z" => value.is_empty(),
-        "-e" => std::fs::symlink_metadata(value).is_ok(),
+        "-e" | "-a" => std::fs::symlink_metadata(value).is_ok(),
+        "-L" | "-h" => std::fs::symlink_metadata(value)
+            .is_ok_and(|meta| meta.file_type().is_symlink()),
         "-f" => std::fs::metadata(value).is_ok_and(|meta| meta.is_file()),
         "-d" => std::fs::metadata(value).is_ok_and(|meta| meta.is_dir()),
         "-s" => std::fs::metadata(value).is_ok_and(|meta| meta.len() > 0),
@@ -157,17 +172,14 @@ fn binary(operator: &str, left: &str, right: &str) -> Result<bool, String> {
     match operator {
         "==" | "=" => Ok(glob_match(right, left)),
         "!=" => Ok(!glob_match(right, left)),
+        "=~" => Ok(regex_lite::Regex::new(right)
+            .map(|regex| regex.is_match(left))
+            .unwrap_or(false)),
         "<" => Ok(left < right),
         ">" => Ok(left > right),
         _ => {
-            let left: i64 = left
-                .trim()
-                .parse()
-                .map_err(|_| format!("'{left}' is not an integer"))?;
-            let right: i64 = right
-                .trim()
-                .parse()
-                .map_err(|_| format!("'{right}' is not an integer"))?;
+            let left = to_i(left);
+            let right = to_i(right);
             Ok(match operator {
                 "-eq" => left == right,
                 "-ne" => left != right,
