@@ -1233,3 +1233,11 @@ fn abbr_declares_lists_and_removes_abbreviations() {
 
     assert_eq!(sharky(&["-c", "unabbr"]).status.code(), Some(1));
 }
+
+#[test]
+fn non_interactive_runs_emit_no_terminal_marks() {
+    let out = sharky(&["-c", "printf hi"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi");
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("\x1b]"));
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("\x1b]"));
+}

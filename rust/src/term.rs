@@ -183,6 +183,49 @@ fn read_byte_with_timeout(milliseconds: i32) -> io::Result<Option<u8>> {
     Ok(Some(byte[0]))
 }
 
+pub const MARK_PROMPT_START: &str = "\x1b]133;A\x1b\\";
+pub const MARK_INPUT_START: &str = "\x1b]133;B\x1b\\";
+
+pub fn mark_command_start(command: &str) -> String {
+    format!(
+        "\x1b]133;C;cmdline_url={}\x1b\\",
+        percent_encode(command, false)
+    )
+}
+
+pub fn mark_command_end(status: i32) -> String {
+    format!("\x1b]133;D;{status}\x1b\\")
+}
+
+pub fn mark_working_directory(path: &std::path::Path) -> String {
+    format!(
+        "\x1b]7;file://{}{}\x1b\\",
+        hostname(),
+        percent_encode(&path.to_string_lossy(), true)
+    )
+}
+
+pub fn percent_encode(value: &str, keep_slash: bool) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        let keep = byte.is_ascii_alphanumeric()
+            || matches!(byte, b'-' | b'.' | b'_' | b'~')
+            || (keep_slash && *byte == b'/');
+        if keep {
+            out.push(*byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+fn hostname() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .map(|name| name.trim().to_string())
+        .unwrap_or_default()
+}
+
 pub fn write_stdout(text: &str) -> io::Result<()> {
     use std::io::Write;
     let mut out = io::stdout();

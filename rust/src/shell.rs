@@ -277,7 +277,16 @@ impl Shell {
     }
 
     pub fn eval(&mut self, source: &str) -> Result<i32, parser::ParseError> {
+        self.eval_with(source, || {})
+    }
+
+    pub fn eval_with(
+        &mut self,
+        source: &str,
+        before_run: impl FnOnce(),
+    ) -> Result<i32, parser::ParseError> {
         let program = parser::parse(source)?;
+        before_run();
         Ok(match self.run_program(&program) {
             Flow::Status(code) | Flow::Exit(code) | Flow::Return(code) => code,
             Flow::Break | Flow::Continue => 0,

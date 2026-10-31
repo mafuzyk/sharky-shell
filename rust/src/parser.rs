@@ -604,12 +604,13 @@ impl Parser {
     }
 
     fn unexpected(&self) -> ParseError {
+        let incomplete = matches!(self.kind(), TokenKind::Eof);
         let found = match self.kind() {
             TokenKind::Eof => "end of input".to_string(),
             TokenKind::Word(word) => format!("'{}'", literal(&word).unwrap_or_default()),
             other => format!("{other:?}"),
         };
-        ParseError::new(format!("syntax error: unexpected {found}"), false)
+        ParseError::new(format!("syntax error: unexpected {found}"), incomplete)
     }
 }
 

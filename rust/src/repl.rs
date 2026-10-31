@@ -1,6 +1,7 @@
 use crate::editor::{Editor, Line};
 use crate::prompt;
 use crate::shell::Shell;
+use crate::term;
 
 pub fn run(shell: &mut Shell) -> i32 {
     install_signals();
@@ -10,6 +11,7 @@ pub fn run(shell: &mut Shell) -> i32 {
     shell.init_history();
     let mut buffer = String::new();
     let mut status = 0;
+    let mut pending_end: Option<i32> = None;
 
     if shell.setting("greeting") == Some("on") {
         println!("sharky {}", env!("CARGO_PKG_VERSION"));
@@ -22,11 +24,20 @@ pub fn run(shell: &mut Shell) -> i32 {
     loop {
         shell.reap_jobs();
 
-        let prompt = if buffer.is_empty() {
+        let primary = buffer.is_empty();
+        let mut prompt = if primary {
             prompt::render(shell)
         } else {
             "... ".to_string()
         };
+        if primary {
+            if let Some(code) = pending_end.take() {
+                let _ = term::write_stdout(&term::mark_command_end(code));
+            }
+            let _ = term::write_stdout(&term::mark_working_directory(&shell.cwd));
+            let _ = term::write_stdout(term::MARK_PROMPT_START);
+            prompt.push_str(term::MARK_INPUT_START);
+        }
 
         match editor.read_line(&prompt, shell) {
             Ok(Line::Content(text)) => {
@@ -41,12 +52,15 @@ pub fn run(shell: &mut Shell) -> i32 {
                 buffer.push_str(&text);
 
                 let started = std::time::Instant::now();
-                let outcome = shell.eval(&buffer);
+                let outcome = shell.eval_with(&buffer, || {
+                    let _ = term::write_stdout(&term::mark_command_start(&buffer));
+                });
                 shell.last_duration_ms = started.elapsed().as_millis() as u64;
 
                 match outcome {
                     Ok(code) => {
                         status = code;
+                        pending_end = Some(code);
                         shell.push_history(&buffer);
                         buffer.clear();
                         if let Some(exit) = shell.exit_requested {
@@ -57,6 +71,7 @@ pub fn run(shell: &mut Shell) -> i32 {
                     Err(err) if err.incomplete => {}
                     Err(err) => {
                         eprintln!("sharky: {}", err.message);
+                        pending_end = Some(2);
                         shell.push_history(&buffer);
                         buffer.clear();
                         status = 2;
