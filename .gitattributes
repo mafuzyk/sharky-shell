@@ -5,3 +5,10 @@
 *.yml text
 *.yaml text
 LICENSE text
+
+# The Ruby v1 tree is the frozen behavioural oracle, not the product.
+lib/** linguist-detectable=false
+bin/sharky linguist-detectable=false
+test/** linguist-detectable=false
+bench/** linguist-detectable=false
+dist/** linguist-detectable=false
