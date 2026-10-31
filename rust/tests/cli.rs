@@ -1115,3 +1115,23 @@ fn double_bracket_coerces_integers_like_ruby() {
     assert_eq!(sharky(&["-c", "[[ 1 -eq x ]]"]).status.code(), Some(1));
     assert_eq!(sharky(&["-c", "[[ 12abc -eq 12 ]]"]).status.code(), Some(0));
 }
+
+#[test]
+fn wait_returns_the_job_status() {
+    let out = sharky(&["-c", r#"sleep 0.05 & wait; printf 'st=%s' "$?""#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout).lines().last(), Some("st=0"));
+    let out = sharky(&["-c", r#"sleep 5 & kill %1; wait %1; printf 'st=%s' "$?""#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout).lines().last(), Some("st=143"));
+}
+
+#[test]
+fn kill_accepts_signals_and_job_specs() {
+    let out = sharky(&["-c", r#"sleep 5 & kill -9 %1; wait %1; printf 'st=%s' "$?""#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout).lines().last(), Some("st=137"));
+}
+
+#[test]
+fn wait_and_kill_report_unknown_jobs() {
+    assert_eq!(sharky(&["-c", "kill %99"]).status.code(), Some(1));
+    assert_eq!(sharky(&["-c", "wait %99"]).status.code(), Some(127));
+}

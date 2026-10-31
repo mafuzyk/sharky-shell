@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStringExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use nix::fcntl::OFlag;
 use nix::libc::_exit;
@@ -18,6 +18,7 @@ use crate::arith;
 use crate::exec;
 use crate::history::History;
 use crate::test_expr;
+use crate::z::Z;
 use crate::lexer::{self, ParamOp, Parameter, Part, TokenKind, Word};
 use crate::parser;
 
@@ -43,6 +44,8 @@ pub struct Shell {
     traps: HashMap<String, String>,
     exit_trap_ran: bool,
     history: Option<History>,
+    z: Option<Z>,
+    config_dir: Option<PathBuf>,
     pub exit_requested: Option<i32>,
     jobs: Vec<Job>,
     next_job: usize,
@@ -122,6 +125,8 @@ impl Shell {
             traps: HashMap::new(),
             exit_trap_ran: false,
             history: None,
+            z: None,
+            config_dir: None,
             exit_requested: None,
             jobs: Vec::new(),
             next_job: 1,
@@ -143,6 +148,7 @@ impl Shell {
             return;
         };
 
+        self.config_dir = Some(dir.clone());
         match config::load(&dir) {
             Ok(config) => self.apply_config(config),
             Err(err) => eprintln!("sharky: config error in {err}"),
@@ -1051,6 +1057,11 @@ impl Shell {
             "alias" => Some(Flow::Status(self.alias(&words[1..]))),
             "unalias" => Some(Flow::Status(self.unalias(&words[1..]))),
             "history" => Some(Flow::Status(self.history_builtin(&words[1..]))),
+            "wait" => Some(Flow::Status(self.wait_builtin(&words[1..]))),
+            "kill" => Some(Flow::Status(self.kill_builtin(&words[1..]))),
+            "z" => Some(Flow::Status(self.z_builtin(&words[1..], false))),
+            "zi" => Some(Flow::Status(self.z_builtin(&words[1..], true))),
+            "reload" => Some(Flow::Status(self.reload())),
             "trap" => Some(Flow::Status(self.trap(&words[1..]))),
             "read" => Some(Flow::Status(self.read(&words[1..]))),
             "shift" => Some(Flow::Status(self.shift(&words[1..]))),
@@ -1359,6 +1370,152 @@ impl Shell {
             .as_ref()
             .map(History::entries)
             .unwrap_or(&[])
+    }
+
+    fn z_builtin(&mut self, args: &[String], interactive: bool) -> i32 {
+        if args.is_empty() {
+            return self.cd(None);
+        }
+        if args.len() == 1 && args[0] == "-" {
+            return self.cd(Some("-"));
+        }
+
+        if self.z.is_none() {
+            self.z = Z::new();
+        }
+        let target = if interactive {
+            self.z
+                .as_ref()
+                .and_then(|z| z.matches(args).into_iter().next())
+        } else {
+            self.z.as_ref().and_then(|z| z.query(args))
+        };
+        let Some(target) = target else {
+            if args.is_empty() {
+                eprintln!("sharky: z: no directories visited");
+            } else {
+                eprintln!("sharky: z: no match: {}", args.join(" "));
+            }
+            return 1;
+        };
+        self.cd(Some(&target))
+    }
+
+    fn reload(&mut self) -> i32 {
+        let Some(dir) = self.config_dir.clone() else {
+            return 0;
+        };
+        self.aliases.clear();
+        self.keybinds.clear();
+        self.settings.clear();
+        self.colors.clear();
+        self.styles.clear();
+        match config::load(&dir) {
+            Ok(config) => {
+                self.apply_config(config);
+                0
+            }
+            Err(err) => {
+                eprintln!("sharky: config error in {err}");
+                1
+            }
+        }
+    }
+
+    fn wait_builtin(&mut self, args: &[String]) -> i32 {
+        if args.is_empty() {
+            let jobs = std::mem::take(&mut self.jobs);
+            for job in jobs {
+                for pid in &job.pids {
+                    let _ = exec::wait(*pid);
+                }
+            }
+            return 0;
+        }
+
+        let target = &args[0];
+        if target.starts_with('%') {
+            let Some(index) = self.job_index(Some(target)) else {
+                eprintln!("sharky: wait: {target}: no such process");
+                return 127;
+            };
+            let job = self.jobs.remove(index);
+            let mut status = 0;
+            for pid in &job.pids {
+                status = exec::wait(*pid);
+            }
+            return status;
+        }
+
+        let Ok(pid) = target.parse::<i32>() else {
+            eprintln!("sharky: wait: {target}: no such process");
+            return 127;
+        };
+        if let Some(index) = self
+            .jobs
+            .iter()
+            .position(|job| job.pids.iter().any(|child| child.as_raw() == pid))
+        {
+            let job = self.jobs.remove(index);
+            let mut status = 0;
+            for child in &job.pids {
+                status = exec::wait(*child);
+            }
+            return status;
+        }
+
+        exec::wait(Pid::from_raw(pid))
+    }
+
+    fn kill_builtin(&mut self, args: &[String]) -> i32 {
+        if args.is_empty() {
+            eprintln!("sharky: kill: usage: kill [-SIGNAL] %job|pid ...");
+            return 2;
+        }
+
+        let mut args = args;
+        let mut signal = Signal::SIGTERM;
+        if let Some(option) = args.first().and_then(|arg| arg.strip_prefix('-')) {
+            let Some(parsed) = parse_signal(option) else {
+                eprintln!("sharky: kill: invalid signal: {option}");
+                return 2;
+            };
+            signal = parsed;
+            args = &args[1..];
+        }
+
+        if args.is_empty() {
+            eprintln!("sharky: kill: usage: kill [-SIGNAL] %job|pid ...");
+            return 2;
+        }
+
+        let mut status = 0;
+        for target in args {
+            if target.starts_with('%') {
+                let Some(index) = self.job_index(Some(target)) else {
+                    eprintln!("sharky: kill: {target}: no such job");
+                    status = 1;
+                    continue;
+                };
+                let pgid = self.jobs[index].pgid;
+                if killpg(pgid, signal).is_err() {
+                    eprintln!("sharky: kill: {target}: no such process");
+                    status = 1;
+                }
+                continue;
+            }
+
+            let Ok(pid) = target.parse::<i32>() else {
+                eprintln!("sharky: kill: {target}: no such process");
+                status = 1;
+                continue;
+            };
+            if nix::sys::signal::kill(Pid::from_raw(pid), signal).is_err() {
+                eprintln!("sharky: kill: {target}: no such process");
+                status = 1;
+            }
+        }
+        status
     }
 
     fn history_builtin(&mut self, args: &[String]) -> i32 {
@@ -1672,6 +1829,13 @@ impl Shell {
                 self.cwd = std::env::current_dir().unwrap_or_else(|_| self.cwd.clone());
                 self.set_var("OLDPWD", previous.display().to_string());
                 self.set_var("PWD", self.cwd.display().to_string());
+                let cwd = self.cwd.display().to_string();
+                if self.z.is_none() {
+                    self.z = Z::new();
+                }
+                if let Some(z) = &mut self.z {
+                    z.record(&cwd);
+                }
                 0
             }
             Err(err) => {
@@ -2000,6 +2164,28 @@ fn flow_status(flow: Flow) -> i32 {
 
 // shortcut: heredoc bodies go through an unlinked temp file instead of a pipe,
 // so a large body cannot deadlock before the child starts reading.
+fn parse_signal(name: &str) -> Option<Signal> {
+    let name = name.trim_start_matches("SIG").to_ascii_uppercase();
+    if let Ok(number) = name.parse::<i32>() {
+        return Signal::try_from(number).ok();
+    }
+    match name.as_str() {
+        "HUP" => Some(Signal::SIGHUP),
+        "INT" => Some(Signal::SIGINT),
+        "QUIT" => Some(Signal::SIGQUIT),
+        "KILL" => Some(Signal::SIGKILL),
+        "TERM" => Some(Signal::SIGTERM),
+        "USR1" => Some(Signal::SIGUSR1),
+        "USR2" => Some(Signal::SIGUSR2),
+        "PIPE" => Some(Signal::SIGPIPE),
+        "ALRM" => Some(Signal::SIGALRM),
+        "STOP" => Some(Signal::SIGSTOP),
+        "CONT" => Some(Signal::SIGCONT),
+        "TSTP" => Some(Signal::SIGTSTP),
+        _ => None,
+    }
+}
+
 fn alias_has_control_operator(value: &str) -> bool {
     value.contains('\n') || value.chars().any(|char| matches!(char, '|' | '&' | ';' | '<' | '>'))
 }
@@ -2029,6 +2215,11 @@ fn is_builtin_name(name: &str) -> bool {
             | "trap"
             | "read"
             | "history"
+            | "wait"
+            | "kill"
+            | "z"
+            | "zi"
+            | "reload"
             | "shift"
     )
 }

@@ -11,6 +11,7 @@ mod prompt;
 mod repl;
 mod term;
 mod test_expr;
+mod z;
 mod shell;
 
 fn main() {
