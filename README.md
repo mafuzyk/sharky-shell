@@ -130,6 +130,7 @@ and `\t` are escapes. Anything after `//` outside quotes is a comment.
 | `autosuggest` | `on` / `off` |
 | `highlight` | `on` / `off` |
 | `history` | number of history entries to keep |
+| `starship` | `on` / `off`; use `starship prompt` for the prompt |
 
 `anchor` actions: `history_search`, `complete`, `clear_screen`, `accept_line`,
 `abort`, `backward_char`, `forward_char`, `backward_word`, `forward_word`,

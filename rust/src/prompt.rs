@@ -1,6 +1,16 @@
+use std::io::Read;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
 use crate::shell::Shell;
 
 pub fn render(shell: &Shell) -> String {
+    if shell.setting("starship") == Some("on")
+        && let Some(prompt) = starship_prompt(shell)
+    {
+        return prompt;
+    }
+
     let template = shell
         .style("prompt")
         .map(str::to_string)
@@ -36,6 +46,47 @@ pub fn render(shell: &Shell) -> String {
 
     out.push_str(rest);
     out
+}
+
+fn starship_prompt(shell: &Shell) -> Option<String> {
+    let mut child = Command::new("starship")
+        .args([
+            "prompt",
+            "--status",
+            &shell.last_status.to_string(),
+            "--cmd-duration",
+            &shell.last_duration_ms.to_string(),
+            "--jobs",
+            &shell.jobs_count().to_string(),
+        ])
+        .env("STARSHIP_SHELL", "sharky")
+        .env("PWD", &shell.cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let deadline = Instant::now() + Duration::from_millis(200);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+
+    let mut stdout = child.stdout.take()?;
+    let mut text = String::new();
+    stdout.read_to_string(&mut text).ok()?;
+    let _ = child.wait();
+    if text.is_empty() { None } else { Some(text) }
 }
 
 pub fn display_cwd(shell: &Shell) -> String {

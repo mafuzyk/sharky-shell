@@ -131,3 +131,44 @@ fn interactive_shell_persists_history_with_0600() {
     std::fs::remove_dir_all(&data).ok();
     assert_eq!(mode, 0o600);
 }
+
+#[test]
+fn starship_can_provide_the_prompt() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = std::env::temp_dir().join(format!("sharky-starship-{}", std::process::id()));
+    let config = dir.join("config");
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(config.join("config.sharky"), "tide starship on\n").unwrap();
+
+    let fake = bin.join("starship");
+    std::fs::write(&fake, "#!/bin/sh\nprintf 'STARSHIP-PROMPT> '\n").unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let pty = openpty(None, None).expect("pty");
+    let stdin = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stdout = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stderr = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .stdin(stdin)
+        .stdout(stdout)
+        .stderr(stderr)
+        .env("SHARKY_CONFIG", &config)
+        .env("TERM", "xterm-256color")
+        .env("HOME", "/tmp")
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .spawn()
+        .expect("spawn sharky");
+
+    let fd = pty.master.as_raw_fd();
+    let seen = read_until(fd, "STARSHIP-PROMPT>", Duration::from_secs(5));
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(seen.contains("STARSHIP-PROMPT>"), "no starship prompt in {seen:?}");
+
+    let mut writer = unsafe { std::fs::File::from_raw_fd(pty.master.try_clone().unwrap().into_raw_fd()) };
+    let _ = writer.write_all(b"exit\r");
+    let _ = child.wait();
+}

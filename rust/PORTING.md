@@ -45,6 +45,7 @@ assert an exit status instead of waiting forever.
 - [x] `set -e/-u/-x`, `pipefail`, `set --`, `trap` EXIT, `read` and `shift`
 - [x] `[[ =~ ]]`, `-a`, `-L/-h`, integer coercion
 - [x] `type`, `alias`/`unalias`, `history`, `pwd`
+- [x] Starship prompt integration (`tide starship on`)
 - [x] Parser and AST: `if`, `for`, `while`, `until`, `case`, functions,
       groups, subshells, `!`
 - [x] `[[ ]]` conditionals and heredocs (`<<`, `<<-`, quoted delimiters)

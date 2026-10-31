@@ -25,6 +25,7 @@ pub struct Shell {
     pub env: Vec<(String, String)>,
     pub cwd: PathBuf,
     pub last_status: i32,
+    pub last_duration_ms: u64,
     funcs: HashMap<String, List>,
     arrays: HashMap<String, Vec<String>>,
     positional: Vec<String>,
@@ -103,6 +104,7 @@ impl Shell {
             env,
             cwd: cwd.clone(),
             last_status: 0,
+            last_duration_ms: 0,
             funcs: HashMap::new(),
             arrays: HashMap::new(),
             positional: Vec::new(),
@@ -248,6 +250,10 @@ impl Shell {
 
     pub fn setting(&self, key: &str) -> Option<&str> {
         self.settings.get(key).map(String::as_str)
+    }
+
+    pub fn jobs_count(&self) -> usize {
+        self.jobs.len()
     }
 
     pub fn history_limit(&self) -> usize {

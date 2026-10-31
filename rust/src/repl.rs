@@ -36,7 +36,11 @@ pub fn run(shell: &mut Shell) -> i32 {
                 }
                 buffer.push_str(&text);
 
-                match shell.eval(&buffer) {
+                let started = std::time::Instant::now();
+                let outcome = shell.eval(&buffer);
+                shell.last_duration_ms = started.elapsed().as_millis() as u64;
+
+                match outcome {
                     Ok(code) => {
                         status = code;
                         shell.push_history(&buffer);
