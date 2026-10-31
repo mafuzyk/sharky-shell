@@ -48,8 +48,17 @@ pub fn run() -> i32 {
         (Some(source), _) => shell.run(&source),
         (None, Some(path)) => shell.run_script(&path, &script_args),
         (None, None) => {
-            eprintln!("sharky: interactive mode is not implemented yet");
-            2
+            if crate::term::is_tty(0) && crate::term::is_tty(1) {
+                crate::repl::run(&mut shell)
+            } else {
+                match crate::term::read_stdin_lines() {
+                    Ok(text) => shell.run(&text),
+                    Err(err) => {
+                        eprintln!("sharky: {err}");
+                        1
+                    }
+                }
+            }
         }
     }
 }

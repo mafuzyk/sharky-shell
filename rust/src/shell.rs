@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use nix::fcntl::OFlag;
 use nix::libc::_exit;
-use nix::unistd::{ForkResult, Pid, fork, pipe2};
+use nix::unistd::{ForkResult, Pid, fork, getpgrp, pipe2, setpgid, tcsetpgrp};
 
 use crate::config::{self, Config};
 use crate::ast::{
@@ -26,6 +26,8 @@ pub struct Shell {
     keybinds: HashMap<String, String>,
     settings: HashMap<String, String>,
     script: Option<String>,
+    interactive: bool,
+    pub exit_requested: Option<i32>,
     colors: HashMap<String, String>,
     styles: HashMap<String, String>,
 }
@@ -72,6 +74,8 @@ impl Shell {
             keybinds: HashMap::new(),
             settings: HashMap::new(),
             script: None,
+            interactive: false,
+            exit_requested: None,
             colors: HashMap::new(),
             styles: HashMap::new(),
         }
@@ -146,17 +150,76 @@ impl Shell {
     }
 
     pub fn run(&mut self, source: &str) -> i32 {
-        let program = match parser::parse(source) {
-            Ok(program) => program,
+        match self.eval(source) {
+            Ok(code) => code,
             Err(err) => {
                 eprintln!("sharky: {}", err.message);
-                return 2;
+                2
             }
-        };
+        }
+    }
 
-        match self.run_program(&program) {
+    pub fn eval(&mut self, source: &str) -> Result<i32, parser::ParseError> {
+        let program = parser::parse(source)?;
+        Ok(match self.run_program(&program) {
             Flow::Status(code) | Flow::Exit(code) | Flow::Return(code) => code,
             Flow::Break | Flow::Continue => 0,
+        })
+    }
+
+    pub fn set_interactive(&mut self, interactive: bool) {
+        self.interactive = interactive;
+    }
+
+    pub fn setting(&self, key: &str) -> Option<&str> {
+        self.settings.get(key).map(String::as_str)
+    }
+
+    pub fn history_limit(&self) -> usize {
+        self.settings
+            .get("history")
+            .and_then(|value| value.parse().ok())
+            .filter(|limit| *limit > 0)
+            .unwrap_or(1000)
+    }
+
+    pub fn style(&self, key: &str) -> Option<&str> {
+        self.styles.get(key).map(String::as_str)
+    }
+
+    pub fn colour(&self, name: &str) -> Option<&str> {
+        self.colors.get(name).map(String::as_str)
+    }
+
+    pub fn colour_enabled(&self) -> bool {
+        !self.styles.is_empty() && std::env::var_os("NO_COLOR").is_none()
+    }
+
+    pub fn command_words(&self) -> Vec<String> {
+        let mut words: Vec<String> = [
+            ":", "true", "false", "cd", "exit", "export", "unset", "set", "source", ".",
+            "break", "continue", "return",
+        ]
+        .iter()
+        .map(|word| word.to_string())
+        .collect();
+        words.extend(self.aliases.keys().cloned());
+        words.extend(self.funcs.keys().cloned());
+        words
+    }
+
+    pub fn path_dirs(&self) -> Vec<String> {
+        self.var("PATH")
+            .split(':')
+            .filter(|dir| !dir.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn reclaim_terminal(&self) {
+        if self.interactive {
+            // SAFETY: fd 0 is the terminal for the whole life of an interactive shell.
+            let _ = tcsetpgrp(unsafe { std::os::fd::BorrowedFd::borrow_raw(0) }, getpgrp());
         }
     }
 
@@ -232,14 +295,32 @@ impl Shell {
         }
 
         let mut pids = Vec::with_capacity(pipeline.commands.len());
+        let mut leader: Option<Pid> = None;
         for (index, command) in pipeline.commands.iter().enumerate() {
             let stdin = index.checked_sub(1).map(|i| pipes[i].0.as_raw_fd());
             let stdout = pipes.get(index).map(|pair| pair.1.as_raw_fd());
 
             // SAFETY: the child runs shell code and exits without unwinding.
             match unsafe { fork() } {
-                Ok(ForkResult::Parent { child }) => pids.push(child),
+                Ok(ForkResult::Parent { child }) => {
+                    if self.interactive {
+                        if leader.is_none() {
+                            // SAFETY: fd 0 is the terminal; this child leads the job.
+                            let _ = tcsetpgrp(
+                                unsafe { std::os::fd::BorrowedFd::borrow_raw(0) },
+                                child,
+                            );
+                            leader = Some(child);
+                        } else if let Some(leader) = leader {
+                            let _ = setpgid(child, leader);
+                        }
+                    }
+                    pids.push(child);
+                }
                 Ok(ForkResult::Child) => {
+                    if self.interactive {
+                        let _ = setpgid(Pid::from_raw(0), leader.unwrap_or(Pid::from_raw(0)));
+                    }
                     if let Some(fd) = stdin
                         && move_fd(fd, 0).is_err()
                     {
@@ -266,6 +347,7 @@ impl Shell {
         for pid in pids {
             status = exec::wait(pid);
         }
+        self.reclaim_terminal();
         Flow::Status(status)
     }
 
@@ -350,8 +432,13 @@ impl Shell {
             &prepared.env,
             None,
             None,
+            None,
         ) {
-            Ok(pid) => Flow::Status(exec::wait(pid)),
+            Ok(pid) => {
+                let status = exec::wait(pid);
+                self.reclaim_terminal();
+                Flow::Status(status)
+            }
             Err(message) => {
                 eprintln!("sharky: {message}");
                 Flow::Status(1)
@@ -420,7 +507,11 @@ impl Shell {
     fn run_subshell(&mut self, list: &List) -> Flow {
         // SAFETY: the child runs shell code and exits without unwinding.
         match unsafe { fork() } {
-            Ok(ForkResult::Parent { child }) => Flow::Status(exec::wait(child)),
+            Ok(ForkResult::Parent { child }) => {
+                let status = exec::wait(child);
+                self.reclaim_terminal();
+                Flow::Status(status)
+            }
             Ok(ForkResult::Child) => {
                 let code = flow_status(self.run_list(list));
                 unsafe { _exit(code) }
@@ -443,7 +534,11 @@ impl Shell {
 
         // SAFETY: the child runs shell code and exits without unwinding.
         match unsafe { fork() } {
-            Ok(ForkResult::Parent { child }) => Flow::Status(exec::wait(child)),
+            Ok(ForkResult::Parent { child }) => {
+                let status = exec::wait(child);
+                self.reclaim_terminal();
+                Flow::Status(status)
+            }
             Ok(ForkResult::Child) => {
                 if let Err(message) = apply_actions(&actions) {
                     eprintln!("sharky: {message}");
@@ -623,11 +718,24 @@ impl Shell {
         env: &[(String, String)],
         stdin: Option<RawFd>,
         stdout: Option<RawFd>,
+        leader: Option<Pid>,
     ) -> Result<Pid, String> {
         // SAFETY: the child only runs syscalls and allocation-safe code before exec.
         match unsafe { fork() } {
-            Ok(ForkResult::Parent { child }) => Ok(child),
+            Ok(ForkResult::Parent { child }) => {
+                if self.interactive && leader.is_none() {
+                    // SAFETY: fd 0 is the terminal; the child was just placed in its own group.
+                    let _ = tcsetpgrp(
+                        unsafe { std::os::fd::BorrowedFd::borrow_raw(0) },
+                        child,
+                    );
+                }
+                Ok(child)
+            }
             Ok(ForkResult::Child) => {
+                if self.interactive {
+                    let _ = setpgid(Pid::from_raw(0), leader.unwrap_or(Pid::from_raw(0)));
+                }
                 if let Some(fd) = stdin
                     && move_fd(fd, 0).is_err()
                 {
@@ -664,12 +772,14 @@ impl Shell {
         match words[0].as_str() {
             ":" | "true" => Some(Flow::Status(0)),
             "false" => Some(Flow::Status(1)),
-            "exit" => Some(Flow::Exit(
-                words
+            "exit" => {
+                let code = words
                     .get(1)
                     .and_then(|n| n.parse().ok())
-                    .unwrap_or(self.last_status),
-            )),
+                    .unwrap_or(self.last_status);
+                self.exit_requested = Some(code);
+                Some(Flow::Exit(code))
+            }
             "return" => Some(Flow::Return(
                 words
                     .get(1)

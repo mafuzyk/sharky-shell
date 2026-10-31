@@ -43,7 +43,9 @@ assert an exit status instead of waiting forever.
       groups, subshells, `!`
 - [ ] `[[ ]]`, `((...))` as commands, heredocs, `&` background lists
 - [x] `source`, script files, positional parameters in scripts
-- [ ] Interactive shell: REPL, line editor, prompt, history, completion
+- [x] Interactive REPL: raw-mode line editor, prompt, history, completion,
+      process groups and terminal handoff
+- [ ] Job control: `&`, `jobs`, `fg`, `bg`, Ctrl-Z
 - [ ] Job control, signals, `trap`
 - [x] Configuration parser: `config.sharky` and `theme.sharky`
 - [ ] Configuration applied by the interactive shell (prompt, keybinds)

@@ -1,0 +1,95 @@
+use std::path::PathBuf;
+
+use crate::editor::{Editor, Line};
+use crate::prompt;
+use crate::shell::Shell;
+
+pub fn history_path() -> PathBuf {
+    if let Some(dir) = std::env::var_os("XDG_DATA_HOME") {
+        return PathBuf::from(dir).join("sharky/history");
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home).join(".local/share/sharky/history");
+    }
+    PathBuf::from("/tmp/sharky-history")
+}
+
+pub fn run(shell: &mut Shell) -> i32 {
+    install_signals();
+    shell.set_interactive(true);
+
+    let mut editor = Editor::new(history_path(), shell.history_limit());
+    let mut buffer = String::new();
+    let mut status = 0;
+
+    if shell.setting("greeting") == Some("on") {
+        println!("sharky {}", env!("CARGO_PKG_VERSION"));
+    }
+
+    loop {
+        let prompt = if buffer.is_empty() {
+            prompt::render(shell)
+        } else {
+            "... ".to_string()
+        };
+
+        match editor.read_line(&prompt, shell) {
+            Ok(Line::Content(text)) => {
+                if buffer.is_empty() && text.trim().is_empty() {
+                    status = shell.last_status;
+                    continue;
+                }
+
+                if !buffer.is_empty() {
+                    buffer.push('\n');
+                }
+                buffer.push_str(&text);
+
+                match shell.eval(&buffer) {
+                    Ok(code) => {
+                        status = code;
+                        editor.push_history(&buffer);
+                        buffer.clear();
+                        if let Some(exit) = shell.exit_requested {
+                            editor.save();
+                            return exit;
+                        }
+                    }
+                    Err(err) if err.incomplete => {}
+                    Err(err) => {
+                        eprintln!("sharky: {}", err.message);
+                        editor.push_history(&buffer);
+                        buffer.clear();
+                        status = 2;
+                    }
+                }
+            }
+            Ok(Line::Interrupted) => {
+                buffer.clear();
+                shell.last_status = 130;
+                status = 130;
+            }
+            Ok(Line::Eof) => {
+                editor.save();
+                return status;
+            }
+            Err(err) => {
+                eprintln!("sharky: {err}");
+                editor.save();
+                return 1;
+            }
+        }
+    }
+}
+
+fn install_signals() {
+    use nix::sys::signal::{SigHandler, Signal, signal};
+
+    // SAFETY: ignoring these signals is how an interactive shell survives them;
+    // foreground jobs run in their own process group and receive their own copy.
+    unsafe {
+        let _ = signal(Signal::SIGINT, SigHandler::SigIgn);
+        let _ = signal(Signal::SIGQUIT, SigHandler::SigIgn);
+        let _ = signal(Signal::SIGTSTP, SigHandler::SigIgn);
+    }
+}

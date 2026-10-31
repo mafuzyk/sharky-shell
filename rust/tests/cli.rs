@@ -609,3 +609,26 @@ fn source_passes_positional_arguments() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "hi");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn reads_commands_from_stdin_when_not_a_tty() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn sharky");
+
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"printf '%s' piped\n")
+        .unwrap();
+
+    let out = child.wait_with_output().expect("wait");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "piped");
+}
