@@ -1135,3 +1135,34 @@ fn wait_and_kill_report_unknown_jobs() {
     assert_eq!(sharky(&["-c", "kill %99"]).status.code(), Some(1));
     assert_eq!(sharky(&["-c", "wait %99"]).status.code(), Some(127));
 }
+
+#[test]
+fn first_run_seeds_the_config_directory() {
+    let dir = temp_dir();
+    let config_home = dir.join("config");
+    let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args(["-c", "true"])
+        .env_remove("SHARKY_CONFIG")
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("HOME", &dir)
+        .output()
+        .expect("failed to run sharky");
+    assert_eq!(out.status.code(), Some(0));
+
+    let config = config_home.join("sharky/config.sharky");
+    let theme = config_home.join("sharky/theme.sharky");
+    let text = std::fs::read_to_string(&config).expect("seeded config");
+    assert!(text.contains("// Sharky"), "config={text:?}");
+    assert!(std::fs::read_to_string(&theme).is_ok(), "theme not seeded");
+
+    std::fs::write(&config, "tide greeting off\n").unwrap();
+    let _ = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args(["-c", "true"])
+        .env_remove("SHARKY_CONFIG")
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("HOME", &dir)
+        .output();
+    let text = std::fs::read_to_string(&config).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(text, "tide greeting off\n");
+}

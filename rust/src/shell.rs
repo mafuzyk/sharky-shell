@@ -148,6 +148,7 @@ impl Shell {
             return;
         };
 
+        ensure_config_layout(&dir);
         self.config_dir = Some(dir.clone());
         match config::load(&dir) {
             Ok(config) => self.apply_config(config),
@@ -2131,6 +2132,23 @@ fn describe_command(command: &Command) -> String {
         Command::Test(_) => "[[ ... ]]".to_string(),
         Command::Arithmetic(_) => "(( ... ))".to_string(),
     }
+}
+
+fn ensure_config_layout(dir: &Path) {
+    // Do not populate an explicitly chosen config directory.
+    if std::env::var_os("SHARKY_CONFIG").is_some() {
+        return;
+    }
+
+    let config_file = dir.join("config.sharky");
+    let theme_file = dir.join("theme.sharky");
+    if config_file.exists() || theme_file.exists() {
+        return;
+    }
+
+    let _ = std::fs::create_dir_all(dir);
+    let _ = std::fs::write(config_file, include_str!("../examples/config.sharky"));
+    let _ = std::fs::write(theme_file, include_str!("../examples/theme.sharky"));
 }
 
 fn config_dir() -> Option<PathBuf> {
