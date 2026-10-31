@@ -2,7 +2,6 @@ mod arith;
 mod ast;
 mod cli;
 mod editor;
-mod config;
 mod exec;
 mod history;
 mod lexer;

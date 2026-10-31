@@ -59,8 +59,10 @@ assert an exit status instead of waiting forever.
       terminal handoff (child signal dispositions are reset before exec)
 - [ ] Job control, signals, `trap`
 - [x] Configuration parser: `config.sharky` and `theme.sharky`
+- [x] Koral shell integration marks (OSC 133 and OSC 7)
+- [x] `sharky-config` crate shared with Koral
 - [ ] Configuration applied by the interactive shell (prompt, keybinds)
-- [ ] AUR packaging
+- [x] AUR packaging
 
 ## Decisions
 
@@ -76,13 +78,19 @@ assert an exit status instead of waiting forever.
   | `pearl` | environment variables |
   | `current` | prepend a directory to `PATH` |
   | `reef` | aliases |
+  | `shoal` | abbreviations |
   | `anchor` | key bindings, validated against a fixed action list |
   | `coral` | named colours |
   | `wave` | prompt template and highlight styles |
+  | `wake` | commands run once before the first interactive prompt |
 
   Unknown instructions, wrong arity, bad colours, unknown keybind actions and
   dangling `@colour` references are errors with file and line, reported without
   stopping the shell.
+- **The configuration parser is a crate.** `rust/config` is `sharky-config`,
+  versioned separately and pinned by Koral as a git dependency. It has no
+  dependencies and no knowledge of the shell, so `src/config.rs` never returns.
+  The tag `sharky-config-v0.1.0` is created only when the maintainer asks.
 - **No async runtime.** A shell is fork/exec plus poll; tokio would fight the
   fork model.
 - **Single-threaded at fork time.** Between `fork` and `exec` only

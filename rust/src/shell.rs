@@ -9,7 +9,7 @@ use nix::sys::signal::{SigHandler, Signal, killpg, signal};
 use nix::sys::wait::WaitStatus;
 use nix::unistd::{ForkResult, Pid, fork, getpid, getpgrp, pipe2, setpgid, tcsetpgrp};
 
-use crate::config::{self, Config};
+use sharky_config::{self as config, Config};
 use crate::ast::{
     AndOr, Assignment, AssignmentValue, Command, List, Pipeline, Program, Redirect, RedirectOp,
     Simple, literal,

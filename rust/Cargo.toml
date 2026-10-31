@@ -7,9 +7,13 @@ description = "Unix-first interactive shell"
 license = "GPL-3.0-only"
 publish = false
 
+[workspace]
+members = ["config"]
+
 [dependencies]
 nix = { version = "0.31", features = ["process", "signal", "term", "fs"] }
 regex-lite = "0.1"
+sharky-config = { path = "config" }
 
 [profile.release]
 lto = true

@@ -50,4 +50,9 @@ version = "2.1.0"
 dependencies = [
  "nix",
  "regex-lite",
+ "sharky-config",
 ]
+
+[[package]]
+name = "sharky-config"
+version = "0.1.0"

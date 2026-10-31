@@ -239,7 +239,7 @@ fn is_colour(value: &str) -> bool {
     hex.len() == 6 && hex.chars().all(|char| char.is_ascii_hexdigit())
 }
 
-fn tokenize(line: &str) -> Result<Vec<String>, String> {
+pub fn tokenize(line: &str) -> Result<Vec<String>, String> {
     let chars: Vec<char> = line.chars().collect();
     let mut tokens = Vec::new();
     let mut pos = 0;
@@ -346,6 +346,14 @@ anchor ctrl+r history_search
     }
 
     #[test]
+    fn keeps_koral_theme_keys() {
+        let source = "coral abyss #071923\nwave terminal.background @abyss\nwave tab.active @abyss\n";
+        let theme = parse_theme(source, "theme.sharky").unwrap();
+        assert_eq!(theme.styles["terminal.background"], "@abyss");
+        assert_eq!(theme.styles["tab.active"], "@abyss");
+    }
+
+    #[test]
     fn parses_the_theme_example() {
         let source = r#"
 coral kelp #8CCFA8
@@ -409,7 +417,9 @@ wave command @sea
     #[test]
     fn shipped_examples_are_valid() {
         for name in ["examples/config.sharky", "examples/theme.sharky"] {
-            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(name);
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join(name);
             let source = std::fs::read_to_string(&path).expect("example must exist");
             parse(&source, name).unwrap_or_else(|error| panic!("{error}"));
         }
