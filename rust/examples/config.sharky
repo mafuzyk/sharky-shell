@@ -15,6 +15,9 @@ pearl BROWSER "firefox"
 current "~/.cargo/bin"
 current "~/.local/bin"
 
+// Startup commands, run once before the first prompt
+// wake "fastfetch"
+
 // Aliases
 reef ll "ls -lah"
 reef gs "git status"
