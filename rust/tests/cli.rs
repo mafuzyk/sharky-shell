@@ -707,3 +707,15 @@ fn heredoc_works_inside_a_pipeline() {
     let out = sharky(&["-c", "cat <<EOF | wc -l\none\ntwo\nEOF"]);
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "2");
 }
+
+#[test]
+fn arithmetic_command_status_follows_the_value() {
+    assert_eq!(sharky(&["-c", "((1 + 1))"]).status.code(), Some(0));
+    assert_eq!(sharky(&["-c", "((0))"]).status.code(), Some(1));
+}
+
+#[test]
+fn arithmetic_command_works_in_a_condition() {
+    let out = sharky(&["-c", "if ((2 > 1)); then printf yes; fi"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "yes");
+}

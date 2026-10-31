@@ -42,7 +42,7 @@ assert an exit status instead of waiting forever.
 - [x] Parser and AST: `if`, `for`, `while`, `until`, `case`, functions,
       groups, subshells, `!`
 - [x] `[[ ]]` conditionals and heredocs (`<<`, `<<-`, quoted delimiters)
-- [ ] `((...))` as a command (arithmetic expansion `$((...))` works)
+- [x] `((...))` as a command
 - [x] `source`, script files, positional parameters in scripts
 - [x] Interactive REPL: raw-mode line editor, prompt, history, completion,
       process groups and terminal handoff

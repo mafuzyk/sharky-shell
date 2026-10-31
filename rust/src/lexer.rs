@@ -61,6 +61,7 @@ pub enum TokenKind {
     RBrace,
     TestStart,
     TestEnd,
+    Arithmetic(String),
     Newline,
     Eof,
 }
@@ -179,6 +180,7 @@ impl Lexer {
                     }
                 }
                 ' ' | '\t' => self.pos += 1,
+                '(' if self.peek() == Some('(') => self.scan_arithmetic_command()?,
                 '(' => {
                     self.push(TokenKind::LParen);
                     self.pos += 1;
@@ -267,6 +269,35 @@ impl Lexer {
             None => true,
             Some(char) => is_word_break(char),
         }
+    }
+
+    fn scan_arithmetic_command(&mut self) -> Result<(), LexError> {
+        let start = self.pos;
+        self.pos += 2;
+        let content_start = self.pos;
+        let mut depth: usize = 0;
+
+        while self.pos < self.chars.len() {
+            match self.chars[self.pos] {
+                '(' => {
+                    depth += 1;
+                    self.pos += 1;
+                }
+                ')' if depth == 0 && self.chars.get(self.pos + 1) == Some(&')') => {
+                    let source: String = self.chars[content_start..self.pos].iter().collect();
+                    self.pos += 2;
+                    self.push_at(TokenKind::Arithmetic(source.trim().to_string()), start);
+                    return Ok(());
+                }
+                ')' => {
+                    depth = depth.saturating_sub(1);
+                    self.pos += 1;
+                }
+                _ => self.pos += 1,
+            }
+        }
+
+        Err(LexError::new("unclosed arithmetic command", start, true))
     }
 
     fn scan_test_word(&mut self) -> Result<Word, LexError> {
@@ -609,7 +640,7 @@ impl Lexer {
     fn scan_arithmetic(&mut self, start: usize) -> Part {
         self.pos += 2;
         let content_start = self.pos;
-        let mut depth = 0;
+        let mut depth: usize = 0;
 
         while self.pos < self.chars.len() {
             match self.chars[self.pos] {

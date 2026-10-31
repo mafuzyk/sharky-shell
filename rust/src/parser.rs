@@ -176,6 +176,9 @@ impl Parser {
             self.parse_function_keyword()?
         } else if matches!(self.kind(), TokenKind::TestStart) {
             self.parse_test()?
+        } else if let TokenKind::Arithmetic(source) = self.kind() {
+            self.advance();
+            Command::Arithmetic(source)
         } else if matches!(self.kind(), TokenKind::LBrace) {
             Command::Group(self.parse_group()?)
         } else if matches!(self.kind(), TokenKind::LParen) {

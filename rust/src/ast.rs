@@ -56,6 +56,7 @@ pub enum Command {
         body: List,
     },
     Test(Vec<Word>),
+    Arithmetic(String),
     Redirected {
         command: Box<Command>,
         redirects: Vec<Redirect>,

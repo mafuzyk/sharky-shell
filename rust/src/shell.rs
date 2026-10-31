@@ -437,6 +437,14 @@ impl Shell {
                 redirects,
             } => self.run_redirected(command, redirects),
             Command::Test(words) => Flow::Status(self.run_test(words)),
+            Command::Arithmetic(source) => Flow::Status(match arith::evaluate(source, self) {
+                Ok(0) => 1,
+                Ok(_) => 0,
+                Err(message) => {
+                    eprintln!("sharky: arithmetic: {message}");
+                    2
+                }
+            }),
         }
     }
 
@@ -1354,6 +1362,7 @@ fn describe_command(command: &Command) -> String {
         Command::Case { .. } => "case ...".to_string(),
         Command::Function { name, .. } => format!("{name}()"),
         Command::Test(_) => "[[ ... ]]".to_string(),
+        Command::Arithmetic(_) => "(( ... ))".to_string(),
     }
 }
 
