@@ -9,9 +9,10 @@ read it, run it, but do not edit it.
   (lists, pipelines, expansion, builtins), `exec.rs` (PATH lookup, fork/exec,
   wait), `cli.rs` (arguments).
 - `conformance/cases/*.sh` — one command per file.
-- `tests/differential.rs` — runs every case through `../bin/sharky` and the
-  Rust binary, comparing stdout, stderr and exit status. Skipped when no
-  reference binary is present; override with `SHARKY_REF=/path/to/sharky`.
+- `tests/differential.rs` — runs every case through a local Ruby v1 checkout
+  (`.ruby-oracle/bin/sharky` by default) and the Rust binary, comparing stdout,
+  stderr and exit status. Skipped when no reference binary is present; override
+  with `SHARKY_REF=/path/to/sharky`.
 - `tests/cli.rs` — black-box behaviour tests against the built binary.
 
 ## Commands

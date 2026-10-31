@@ -26,7 +26,7 @@ fn run(bin: &Path, source: &str) -> Output {
 
 fn reference() -> Option<PathBuf> {
     let path = std::env::var("SHARKY_REF").map(PathBuf::from).unwrap_or_else(|_| {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../bin/sharky")
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../.ruby-oracle/bin/sharky")
     });
     path.exists().then_some(path)
 }

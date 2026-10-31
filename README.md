@@ -11,8 +11,10 @@ wraps Bash or `/bin/sh`.
 - an interactive editor with history and completion, plus real job control;
 - a small declarative configuration language for settings and themes.
 
-The Ruby v1 implementation is frozen at tag `v1-ruby` and stays in the tree as
-the behavioural oracle for the differential test suite.
+The Ruby v1 implementation is frozen at tag `v1-ruby`. It is not published in
+this tree: the source of truth is the Rust code under `rust/`. Keep a local
+checkout at `.ruby-oracle/` (gitignored) only when you need the differential
+oracle.
 
 ## Install
 
@@ -211,8 +213,15 @@ cargo clippy -j 6 --all-targets
 
 `rust/PORTING.md` documents the architecture and the porting milestones;
 `rust/RELEASING.md` has the release checklist. `rust/conformance/cases/` holds
-one command per file, compared against the frozen Ruby implementation when
-`bin/sharky` is present.
+one command per file, compared against a local Ruby v1 checkout at
+`.ruby-oracle/bin/sharky` (override with `SHARKY_REF`). Recreate that checkout
+with:
+
+```sh
+git archive v1-ruby | tar -x -C .ruby-oracle
+```
+
+The differential suite is skipped when the oracle is absent.
 
 ## License
 

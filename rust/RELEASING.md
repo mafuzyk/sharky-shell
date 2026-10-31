@@ -13,8 +13,8 @@ systemd-run --user --scope --quiet -p MemoryMax=2G -- cargo build --release --lo
 ./target/release/sharky --version
 ```
 
-The differential suite needs the frozen Ruby tree; it is skipped when
-`../bin/sharky` is absent.
+The differential suite needs a local Ruby v1 checkout; it is skipped when
+`.ruby-oracle/bin/sharky` is absent (override with `SHARKY_REF`).
 
 ## 2. Merge and tag
 

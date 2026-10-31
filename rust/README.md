@@ -73,11 +73,11 @@ Stored in `$XDG_DATA_HOME/sharky/history` (default
 
 ## Tests
 
-The suite drives the built binary, plus a differential run against the frozen
-Ruby implementation when it is present:
+The suite drives the built binary, plus a differential run against a local
+Ruby v1 checkout when `../.ruby-oracle/bin/sharky` is present:
 
 ```sh
-cargo test -j 6                      # unit, CLI, PTY and differential tests
+cargo test -j 6                               # unit, CLI, PTY and differential tests
 SHARKY_REF=/path/to/ruby/bin/sharky cargo test -j 6 --test differential
 ```
 

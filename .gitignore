@@ -12,3 +12,4 @@ coverage/
 docs/
 
 dist/
+.ruby-oracle/

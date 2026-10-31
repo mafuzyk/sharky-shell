@@ -4,14 +4,14 @@
 
 ## Tests
 
-- [ ] `ruby test/run.rb`
-- [ ] `ruby -w test/run.rb`
+- [ ] `cd rust && cargo test -j 6`
+- [ ] `cd rust && cargo clippy -j 6 --all-targets`
 - [ ] Interactive/PTY checks, if the editor, prompt, job control or terminal changed
 
 ## Checklist
 
 - [ ] The change stays inside the documented compatibility boundary.
-- [ ] No third-party runtime gems were added.
+- [ ] No new dependency was added without a reason.
 - [ ] User-facing files and code comments are in English.
 - [ ] The change is covered by a test or the reason it cannot be is explained below.
 - [ ] I have read `CONTRIBUTING.md` and license the contribution under GPL-3.0-only.
