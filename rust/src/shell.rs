@@ -11,7 +11,8 @@ use nix::unistd::{ForkResult, Pid, fork, getpid, getpgrp, pipe2, setpgid, tcsetp
 
 use crate::config::{self, Config};
 use crate::ast::{
-    AndOr, Command, List, Pipeline, Program, Redirect, RedirectOp, Simple, literal,
+    AndOr, Assignment, AssignmentValue, Command, List, Pipeline, Program, Redirect, RedirectOp,
+    Simple, literal,
 };
 use crate::arith;
 use crate::exec;
@@ -24,6 +25,7 @@ pub struct Shell {
     pub cwd: PathBuf,
     pub last_status: i32,
     funcs: HashMap<String, List>,
+    arrays: HashMap<String, Vec<String>>,
     positional: Vec<String>,
     aliases: HashMap<String, String>,
     keybinds: HashMap<String, String>,
@@ -86,6 +88,7 @@ impl Shell {
             cwd: cwd.clone(),
             last_status: 0,
             funcs: HashMap::new(),
+            arrays: HashMap::new(),
             positional: Vec::new(),
             aliases: HashMap::new(),
             keybinds: HashMap::new(),
@@ -466,8 +469,7 @@ impl Shell {
     fn run_simple(&mut self, simple: &Simple) -> Flow {
         if simple.words.is_empty() && simple.redirects.is_empty() {
             for assignment in &simple.assignments {
-                let value = self.expand_assignment(&assignment.value);
-                self.set_var(&assignment.name, value);
+                self.assign(assignment);
             }
             return Flow::Status(0);
         }
@@ -536,8 +538,7 @@ impl Shell {
     fn run_simple_child(&mut self, simple: &Simple) -> i32 {
         if simple.words.is_empty() && simple.redirects.is_empty() {
             for assignment in &simple.assignments {
-                let value = self.expand_assignment(&assignment.value);
-                self.set_var(&assignment.name, value);
+                self.assign(assignment);
             }
             return 0;
         }
@@ -726,10 +727,18 @@ impl Shell {
 
         let mut env = self.env.clone();
         for assignment in &simple.assignments {
-            let value = self.expand_assignment(&assignment.value);
-            match env.iter_mut().find(|(key, _)| key == &assignment.name) {
-                Some(entry) => entry.1 = value,
-                None => env.push((assignment.name.clone(), value)),
+            match &assignment.value {
+                AssignmentValue::Array(_) => self.assign(assignment),
+                AssignmentValue::Word(word) if assignment.index.is_some() => {
+                    self.assign(assignment);
+                }
+                AssignmentValue::Word(word) => {
+                    let value = self.expand_assignment(word);
+                    match env.iter_mut().find(|(key, _)| key == &assignment.name) {
+                        Some(entry) => entry.1 = value,
+                        None => env.push((assignment.name.clone(), value)),
+                    }
+                }
             }
         }
 
@@ -954,11 +963,51 @@ impl Shell {
             _ => {}
         }
 
+        if let Some(values) = self.arrays.get(name) {
+            return values.first().cloned().unwrap_or_default();
+        }
+
         self.env
             .iter()
             .find(|(key, _)| key == name)
             .map(|(_, value)| value.clone())
             .unwrap_or_default()
+    }
+
+    fn assign(&mut self, assignment: &Assignment) {
+        match &assignment.value {
+            AssignmentValue::Array(elements) => {
+                let mut values = Vec::new();
+                for element in elements {
+                    values.extend(self.expand_word(element));
+                }
+                self.set_array(&assignment.name, values, assignment.append);
+            }
+            AssignmentValue::Word(word) => {
+                let value = self.expand_assignment(word);
+                match &assignment.index {
+                    Some(index) => self.set_array_element(&assignment.name, index, value),
+                    None => self.set_var(&assignment.name, value),
+                }
+            }
+        }
+    }
+
+    fn set_array(&mut self, name: &str, values: Vec<String>, append: bool) {
+        if append {
+            self.arrays.entry(name.to_string()).or_default().extend(values);
+        } else {
+            self.arrays.insert(name.to_string(), values);
+        }
+    }
+
+    fn set_array_element(&mut self, name: &str, index: &str, value: String) {
+        let index: usize = index.trim().parse().unwrap_or(0);
+        let array = self.arrays.entry(name.to_string()).or_default();
+        while array.len() <= index {
+            array.push(String::new());
+        }
+        array[index] = value;
     }
 
     fn set_var(&mut self, name: &str, value: String) {
@@ -1290,7 +1339,22 @@ impl Shell {
     }
 
     fn parameter_value(&mut self, parameter: &Parameter) -> String {
-        let value = self.var(&parameter.name);
+        if parameter.operator == Some(ParamOp::Length)
+            && parameter.index.is_some()
+            && let Some(array) = self.arrays.get(&parameter.name)
+        {
+            return array.len().to_string();
+        }
+
+        let value = if let Some(array) = self.arrays.get(&parameter.name) {
+            match parameter.index.as_deref() {
+                Some("@") | Some("*") => array.join(" "),
+                Some(index) => array_index(array, index).unwrap_or_default(),
+                None => array.first().cloned().unwrap_or_default(),
+            }
+        } else {
+            self.var(&parameter.name)
+        };
         let argument = parameter.argument.clone().unwrap_or_default();
 
         match parameter.operator {
@@ -1679,6 +1743,19 @@ fn trim_suffix(value: &str, pattern: &str, longest: bool) -> String {
     }
 
     value.to_string()
+}
+
+fn array_index(array: &[String], index: &str) -> Option<String> {
+    let index: isize = index.trim().parse().unwrap_or(0);
+    let position = if index < 0 {
+        array.len() as isize + index
+    } else {
+        index
+    };
+    if position < 0 {
+        return None;
+    }
+    array.get(position as usize).cloned()
 }
 
 fn brace_expand(text: &str) -> Option<Vec<String>> {

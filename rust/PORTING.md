@@ -41,6 +41,7 @@ assert an exit status instead of waiting forever.
 - [x] Assignments, prefix assignments, `export`, `unset`
 - [x] `$(...)`, `${...}` operators, `$((...))`, globbing, tilde
 - [x] Brace expansion, here-strings, `&>`, `${var/pat/repl}`
+- [x] Indexed arrays: literals, `[@]`, index, `#`, `+=` and `a[i]=`
 - [x] Parser and AST: `if`, `for`, `while`, `until`, `case`, functions,
       groups, subshells, `!`
 - [x] `[[ ]]` conditionals and heredocs (`<<`, `<<-`, quoted delimiters)

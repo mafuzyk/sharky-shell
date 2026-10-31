@@ -16,6 +16,7 @@ pub struct Parameter {
     pub name: String,
     pub operator: Option<ParamOp>,
     pub argument: Option<String>,
+    pub index: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -745,6 +746,26 @@ enum Quote {
 
 fn parse_parameter(content: &str) -> Parameter {
     if let Some(rest) = content.strip_prefix('#')
+        && let Some((name, index)) = array_reference(rest)
+    {
+        return Parameter {
+            name,
+            operator: Some(ParamOp::Length),
+            argument: None,
+            index: Some(index),
+        };
+    }
+
+    if let Some((name, index)) = array_reference(content) {
+        return Parameter {
+            name,
+            operator: None,
+            argument: None,
+            index: Some(index),
+        };
+    }
+
+    if let Some(rest) = content.strip_prefix('#')
         && !rest.is_empty()
         && rest.chars().all(|char| char.is_ascii_alphanumeric() || char == '_')
     {
@@ -752,6 +773,7 @@ fn parse_parameter(content: &str) -> Parameter {
             name: rest.to_string(),
             operator: Some(ParamOp::Length),
             argument: None,
+            index: None,
         };
     }
 
@@ -774,6 +796,7 @@ fn parse_parameter(content: &str) -> Parameter {
                 name: content[..index].to_string(),
                 operator: Some(*kind),
                 argument: Some(content[index + operator.len()..].to_string()),
+                index: None,
             };
         }
     }
@@ -782,7 +805,23 @@ fn parse_parameter(content: &str) -> Parameter {
         name: content.to_string(),
         operator: None,
         argument: None,
+        index: None,
     }
+}
+
+fn array_reference(text: &str) -> Option<(String, String)> {
+    let open = text.find('[')?;
+    if !text.ends_with(']') {
+        return None;
+    }
+    let name = &text[..open];
+    let index = &text[open + 1..text.len() - 1];
+    let mut chars = name.chars();
+    let first = chars.next()?;
+    if !is_name_start(first) || !chars.all(is_name_char) || index.is_empty() {
+        return None;
+    }
+    Some((name.to_string(), index.to_string()))
 }
 
 pub fn heredoc_word(text: &str) -> Result<Word, LexError> {

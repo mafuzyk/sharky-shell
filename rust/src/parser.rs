@@ -234,7 +234,7 @@ impl Parser {
         let TokenKind::Word(word) = self.kind() else {
             return false;
         };
-        if literal(&word).is_none() {
+        if literal(&word).is_none() || as_assignment(&word).is_some() {
             return false;
         }
         matches!(
@@ -506,15 +506,19 @@ impl Parser {
 
         loop {
             match self.kind() {
-                TokenKind::Word(word) => {
+                TokenKind::Word(_) => {
+                    let word = self.take_word()?;
                     if simple.words.is_empty()
-                        && let Some(assignment) = as_assignment(&word)
+                        && let Some(mut assignment) = as_assignment(&word)
                     {
+                        if matches!(self.kind(), TokenKind::LParen) {
+                            assignment.value =
+                                AssignmentValue::Array(self.parse_array_elements()?);
+                        }
                         simple.assignments.push(assignment);
                     } else {
                         simple.words.push(word);
                     }
-                    self.advance();
                 }
                 _ => match self.redirect()? {
                     Some(redirect) => simple.redirects.push(redirect),
@@ -528,6 +532,28 @@ impl Parser {
         }
 
         Ok(simple)
+    }
+
+    fn parse_array_elements(&mut self) -> Result<Vec<Word>, ParseError> {
+        self.advance();
+        let mut elements = Vec::new();
+
+        loop {
+            match self.kind() {
+                TokenKind::RParen => {
+                    self.advance();
+                    return Ok(elements);
+                }
+                TokenKind::Word(_) => elements.push(self.take_word()?),
+                TokenKind::Newline => {
+                    self.advance();
+                }
+                TokenKind::Eof => {
+                    return Err(ParseError::new("unclosed array assignment", true));
+                }
+                _ => return Err(self.unexpected()),
+            }
+        }
     }
 
     fn redirect(&mut self) -> Result<Option<Redirect>, ParseError> {
@@ -591,8 +617,25 @@ fn as_assignment(word: &Word) -> Option<Assignment> {
     let Part::Literal(text) = word.parts.first()? else {
         return None;
     };
-    let (name, rest) = text.split_once('=')?;
-    if !is_name(name) {
+    let (prefix, rest) = text.split_once('=')?;
+
+    let (name, index, append) = if let Some(open) = prefix.find('[') {
+        if !prefix.ends_with(']') {
+            return None;
+        }
+        let name = &prefix[..open];
+        let index = &prefix[open + 1..prefix.len() - 1];
+        if !is_name(name) || index.is_empty() || !index.chars().all(|char| char.is_ascii_digit()) {
+            return None;
+        }
+        (name.to_string(), Some(index.to_string()), false)
+    } else if let Some(name) = prefix.strip_suffix('+') {
+        (name.to_string(), None, true)
+    } else {
+        (prefix.to_string(), None, false)
+    };
+
+    if !is_name(&name) {
         return None;
     }
 
@@ -602,8 +645,10 @@ fn as_assignment(word: &Word) -> Option<Assignment> {
     }
     parts.extend(word.parts[1..].iter().cloned());
     Some(Assignment {
-        name: name.to_string(),
-        value: Word { parts },
+        name,
+        index,
+        append,
+        value: AssignmentValue::Word(Word { parts }),
     })
 }
 

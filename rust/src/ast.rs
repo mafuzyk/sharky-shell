@@ -73,7 +73,15 @@ pub struct Simple {
 #[derive(Debug, Clone)]
 pub struct Assignment {
     pub name: String,
-    pub value: Word,
+    pub index: Option<String>,
+    pub append: bool,
+    pub value: AssignmentValue,
+}
+
+#[derive(Debug, Clone)]
+pub enum AssignmentValue {
+    Word(Word),
+    Array(Vec<Word>),
 }
 
 #[derive(Debug, Clone)]

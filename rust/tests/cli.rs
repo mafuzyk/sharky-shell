@@ -893,3 +893,46 @@ fn parameter_substitution_replaces_literal_text() {
     let out = sharky(&["-c", "x=abcabc; printf '%s' \"${x//b/X}\""]);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "aXcaXc");
 }
+
+#[test]
+fn array_assignment_expands_elements() {
+    let out = sharky(&["-c", r#"a=(one two); printf '[%s]' "${a[@]}""#]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "[one two]");
+}
+
+#[test]
+fn array_unquoted_expansion_splits_fields() {
+    let out = sharky(&["-c", r#"a=(one two); printf '[%s]' ${a[@]}"#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "[one][two]");
+}
+
+#[test]
+fn array_index_and_length() {
+    let out = sharky(&["-c", r#"a=(one two); printf '%s|%s' "${a[1]}" "${#a[@]}""#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "two|2");
+}
+
+#[test]
+fn array_append_and_element_assignment() {
+    let out = sharky(&[
+        "-c",
+        r#"a=(one two); a+=(three); a[0]=zero; printf '%s|' ${a[@]}"#,
+    ]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "zero|two|three|");
+}
+
+#[test]
+fn sparse_array_assignment_pads_with_empty_elements() {
+    let out = sharky(&[
+        "-c",
+        r#"a=(one); a[3]=x; printf '%s|%s' "${#a[@]}" "${a[2]}""#,
+    ]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "4|");
+}
+
+#[test]
+fn empty_array_has_zero_length() {
+    let out = sharky(&["-c", r#"a=(); printf '%s' "${#a[@]}""#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "0");
+}

@@ -73,6 +73,7 @@ The prompt, `-c` and script files share one grammar:
 | variables | `name=value`, `"$name"`, `${name}` |
 | parameter operators | `${NAME:-default}`, `${#NAME}`, `${NAME#pre}`, `${NAME/pat/repl}`, `${NAME//pat/repl}` |
 | brace expansion | `file{1..3}.txt`, `a{b,c}d` |
+| indexed arrays | `a=(one two)`, `"${a[1]}"`, `"${a[@]}"`, `"${#a[@]}"` |
 | command substitution | `files=$(ls \| wc -l)` |
 | arithmetic | `$((2 + 3 * 4))`, `((total > 10))` |
 | globbing and tilde | `src/*.rs`, `~/bin` |
