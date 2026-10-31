@@ -29,6 +29,7 @@ enum Flow {
 
 #[derive(Default)]
 struct SimpleCommand {
+    assignments: Vec<(String, Word)>,
     words: Vec<Word>,
     redirects: Vec<Redirect>,
 }
@@ -141,7 +142,15 @@ impl Shell {
     }
 
     fn run_single(&mut self, command: &SimpleCommand) -> Flow {
-        let (argv, actions) = match self.prepare(command) {
+        if command.words.is_empty() && command.redirects.is_empty() {
+            for (name, word) in &command.assignments {
+                let value = expand_assignment(word, self);
+                self.set_var(name, value);
+            }
+            return Flow::Status(0);
+        }
+
+        let (argv, actions, env) = match self.prepare(command) {
             Ok(prepared) => prepared,
             Err(message) => {
                 eprintln!("sharky: {message}");
@@ -158,7 +167,7 @@ impl Shell {
             }
         }
 
-        match self.spawn(&argv, &actions, None, None) {
+        match self.spawn(&argv, &actions, &env, None, None) {
             Ok(pid) => Flow::Status(exec::wait(pid)),
             Err(message) => {
                 eprintln!("sharky: {message}");
@@ -192,10 +201,10 @@ impl Shell {
         }
 
         let mut pids = Vec::with_capacity(commands.len());
-        for (index, (argv, actions)) in prepared.iter().enumerate() {
+        for (index, (argv, actions, env)) in prepared.iter().enumerate() {
             let stdin = index.checked_sub(1).map(|i| pipes[i].0.as_raw_fd());
             let stdout = pipes.get(index).map(|pair| pair.1.as_raw_fd());
-            match self.spawn(argv, actions, stdin, stdout) {
+            match self.spawn(argv, actions, env, stdin, stdout) {
                 Ok(pid) => pids.push(pid),
                 Err(message) => {
                     eprintln!("sharky: {message}");
@@ -213,7 +222,10 @@ impl Shell {
         status
     }
 
-    fn prepare(&self, command: &SimpleCommand) -> Result<(Vec<String>, Vec<Action>), String> {
+    fn prepare(
+        &self,
+        command: &SimpleCommand,
+    ) -> Result<(Vec<String>, Vec<Action>, Vec<(String, String)>), String> {
         let argv: Vec<String> = command
             .words
             .iter()
@@ -246,13 +258,23 @@ impl Shell {
             }
         }
 
-        Ok((argv, actions))
+        let mut env = self.env.clone();
+        for (name, word) in &command.assignments {
+            let value = expand_assignment(word, self);
+            match env.iter_mut().find(|(key, _)| key == name) {
+                Some(entry) => entry.1 = value,
+                None => env.push((name.clone(), value)),
+            }
+        }
+
+        Ok((argv, actions, env))
     }
 
     fn spawn(
         &mut self,
         argv: &[String],
         actions: &[Action],
+        env: &[(String, String)],
         stdin: Option<RawFd>,
         stdout: Option<RawFd>,
     ) -> Result<Pid, String> {
@@ -284,7 +306,7 @@ impl Shell {
                     unsafe { _exit(code) }
                 }
                 match exec::resolve(&argv[0], self) {
-                    Some(path) => exec::exec_replace(&path, argv, &self.env),
+                    Some(path) => exec::exec_replace(&path, argv, env),
                     None => {
                         eprintln!("sharky: command not found: {}", argv[0]);
                         unsafe { _exit(127) }
@@ -306,8 +328,33 @@ impl Shell {
                     .unwrap_or(self.last_status),
             )),
             "cd" => Some(Flow::Status(self.cd(words.get(1).map(String::as_str)))),
+            "export" => Some(Flow::Status(self.export(&words[1..]))),
+            "unset" => Some(Flow::Status(self.unset(&words[1..]))),
             _ => None,
         }
+    }
+
+    fn set_var(&mut self, name: &str, value: String) {
+        match self.env.iter_mut().find(|(key, _)| key == name) {
+            Some(entry) => entry.1 = value,
+            None => self.env.push((name.to_string(), value)),
+        }
+    }
+
+    fn export(&mut self, args: &[String]) -> i32 {
+        for arg in args {
+            if let Some((name, value)) = arg.split_once('=') {
+                self.set_var(name, value.to_string());
+            }
+        }
+        0
+    }
+
+    fn unset(&mut self, args: &[String]) -> i32 {
+        for name in args {
+            self.env.retain(|(key, _)| key != name);
+        }
+        0
     }
 
     fn cd(&mut self, target: Option<&str>) -> i32 {
@@ -392,7 +439,14 @@ fn parse_items(tokens: Vec<Token>) -> Result<Vec<Item>, String> {
         }
 
         match token.kind {
-            TokenKind::Word(word) => command.words.push(word),
+            TokenKind::Word(word) => {
+                match as_assignment(&word) {
+                    Some((name, value)) if command.words.is_empty() => {
+                        command.assignments.push((name, value));
+                    }
+                    _ => command.words.push(word),
+                }
+            }
             TokenKind::RedirOut(fd) => pending = Some((fd.unwrap_or(1), RedirectKind::Write)),
             TokenKind::RedirAppend(fd) => pending = Some((fd.unwrap_or(1), RedirectKind::Append)),
             TokenKind::RedirIn(fd) => pending = Some((fd.unwrap_or(0), RedirectKind::Read)),
@@ -451,9 +505,42 @@ fn parse_items(tokens: Vec<Token>) -> Result<Vec<Item>, String> {
 }
 
 fn push_command(pipeline: &mut Vec<SimpleCommand>, command: &mut SimpleCommand) {
-    if !command.words.is_empty() || !command.redirects.is_empty() {
+    if !command.words.is_empty() || !command.redirects.is_empty() || !command.assignments.is_empty()
+    {
         pipeline.push(std::mem::take(command));
     }
+}
+
+fn as_assignment(word: &Word) -> Option<(String, Word)> {
+    let Part::Literal(text) = word.parts.first()? else {
+        return None;
+    };
+    let (name, rest) = text.split_once('=')?;
+    if !is_name(name) {
+        return None;
+    }
+
+    let mut parts = Vec::new();
+    if !rest.is_empty() {
+        parts.push(Part::Literal(rest.to_string()));
+    }
+    parts.extend(word.parts[1..].iter().cloned());
+    Some((name.to_string(), Word { parts }))
+}
+
+fn is_name(text: &str) -> bool {
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|char| char.is_ascii_alphanumeric() || char == '_')
+}
+
+fn expand_assignment(word: &Word, shell: &Shell) -> String {
+    let mut out = String::new();
+    expand_text(&word.parts, shell, &mut out);
+    out
 }
 
 fn expand_word(word: &Word, shell: &Shell) -> Vec<String> {

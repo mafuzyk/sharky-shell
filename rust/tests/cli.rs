@@ -234,3 +234,33 @@ fn missing_redirect_target_is_a_syntax_error() {
     let out = sharky(&["-c", "printf hi >"]);
     assert_eq!(out.status.code(), Some(2));
 }
+
+#[test]
+fn assignment_sets_a_shell_variable() {
+    let out = sharky(&["-c", "X=hi; printf '%s' $X"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi");
+}
+
+#[test]
+fn assignment_value_keeps_quoted_spaces() {
+    let out = sharky(&["-c", r#"X="a b"; printf '[%s]' "$X""#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "[a b]");
+}
+
+#[test]
+fn prefix_assignment_is_visible_to_the_command_only() {
+    let out = sharky(&["-c", r#"X=1 sh -c 'printf %s "$X"'; printf '[%s]' "$X""#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "1[]");
+}
+
+#[test]
+fn unset_removes_a_variable() {
+    let out = sharky_with(&["-c", r#"unset X; printf '[%s]' "$X""#], &[("X", "1")]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "[]");
+}
+
+#[test]
+fn export_keeps_a_variable_for_children() {
+    let out = sharky(&["-c", r#"X=1; export X; sh -c 'printf %s "$X"'"#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "1");
+}
