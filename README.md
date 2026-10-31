@@ -8,7 +8,7 @@ wraps Bash or `/bin/sh`.
 
 - one static binary, no runtime dependency, startup around half a millisecond;
 - a Bash-like language subset, from pipes and heredocs to `[[ ]]` and functions;
-- an interactive editor with history, completion and Ctrl-R style job control;
+- an interactive editor with history and completion, plus real job control;
 - a small declarative configuration language for settings and themes.
 
 The Ruby v1 implementation is frozen at tag `v1-ruby` and stays in the tree as
