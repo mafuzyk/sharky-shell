@@ -120,6 +120,7 @@ and `\t` are escapes. Anything after `//` outside quotes is a comment.
 | `pearl` | environment variable | `pearl EDITOR "nvim"` |
 | `current` | prepend a directory to `PATH` | `current "~/.cargo/bin"` |
 | `reef` | alias | `reef ll "ls -lah"` |
+| `wake` | run a command at interactive startup | `wake "fastfetch"` |
 | `anchor` | key binding | `anchor ctrl+r history_search` |
 
 `tide` keys:
@@ -146,6 +147,7 @@ tide history 10000
 
 pearl EDITOR "nvim"
 pearl BROWSER "firefox"
+wake "fastfetch"
 
 current "~/.cargo/bin"
 current "~/.local/bin"

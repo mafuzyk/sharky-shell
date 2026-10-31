@@ -31,6 +31,7 @@ pub struct Shell {
     arrays: HashMap<String, Vec<String>>,
     positional: Vec<String>,
     aliases: HashMap<String, String>,
+    wake: Vec<String>,
     keybinds: HashMap<String, String>,
     settings: HashMap<String, String>,
     script: Option<String>,
@@ -112,6 +113,7 @@ impl Shell {
             arrays: HashMap::new(),
             positional: Vec::new(),
             aliases: HashMap::new(),
+            wake: Vec::new(),
             keybinds: HashMap::new(),
             settings: HashMap::new(),
             script: None,
@@ -164,6 +166,7 @@ impl Shell {
             self.add_path(&dir);
         }
         self.aliases.extend(config.aliases);
+        self.wake.extend(config.wake);
         self.keybinds.extend(config.keybinds);
         self.settings.extend(config.settings);
         self.colors.extend(config.colors);
@@ -257,6 +260,10 @@ impl Shell {
 
     pub fn setting(&self, key: &str) -> Option<&str> {
         self.settings.get(key).map(String::as_str)
+    }
+
+    pub fn wake_commands(&self) -> &[String] {
+        &self.wake
     }
 
     pub fn jobs_count(&self) -> usize {

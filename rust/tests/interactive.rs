@@ -218,3 +218,42 @@ fn a_multi_line_prompt_is_drawn_once_per_read_line() {
     let count = seen.matches("TOP").count();
     assert_eq!(count, 1, "prompt redrawn {count} times: {seen:?}");
 }
+
+#[test]
+fn wake_runs_commands_before_the_first_prompt() {
+    let dir = std::env::temp_dir().join(format!("sharky-wake-{}", std::process::id()));
+    let config = dir.join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("config.sharky"),
+        "wave prompt \"PROMPT> \"\ntide greeting off\nwake \"printf WAKE-UP\"\n",
+    )
+    .unwrap();
+
+    let pty = openpty(None, None).expect("pty");
+    let stdin = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stdout = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stderr = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .stdin(stdin)
+        .stdout(stdout)
+        .stderr(stderr)
+        .env("SHARKY_CONFIG", &config)
+        .env("TERM", "xterm-256color")
+        .env("HOME", "/tmp")
+        .spawn()
+        .expect("spawn sharky");
+
+    let fd = pty.master.as_raw_fd();
+    let seen = read_until(fd, "PROMPT> ", Duration::from_secs(5));
+    let mut writer = unsafe { std::fs::File::from_raw_fd(pty.master.try_clone().unwrap().into_raw_fd()) };
+    let _ = writer.write_all(b"exit\r");
+    let _ = child.wait();
+    std::fs::remove_dir_all(&dir).ok();
+
+    let wake = seen.find("WAKE-UP").expect("wake output");
+    let prompt = seen.find("PROMPT>").expect("prompt");
+    assert!(wake < prompt, "wake output after prompt: {seen:?}");
+    assert_eq!(seen.matches("WAKE-UP").count(), 1);
+}

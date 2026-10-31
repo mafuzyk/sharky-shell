@@ -14,6 +14,10 @@ pub fn run(shell: &mut Shell) -> i32 {
     if shell.setting("greeting") == Some("on") {
         println!("sharky {}", env!("CARGO_PKG_VERSION"));
     }
+    for command in shell.wake_commands().to_vec() {
+        let _ = shell.eval(&command);
+    }
+    shell.last_status = 0;
 
     loop {
         shell.reap_jobs();

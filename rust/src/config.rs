@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
 
-pub const INSTRUCTIONS: &[&str] = &["tide", "pearl", "current", "reef", "anchor", "coral", "wave"];
+pub const INSTRUCTIONS: &[&str] = &[
+    "tide", "pearl", "current", "reef", "anchor", "coral", "wave", "wake",
+];
 
 pub const ACTIONS: &[&str] = &[
     "history_search",
@@ -33,6 +35,7 @@ pub struct Config {
     pub env: Vec<(String, String)>,
     pub paths: Vec<String>,
     pub aliases: HashMap<String, String>,
+    pub wake: Vec<String>,
     pub keybinds: HashMap<String, String>,
     pub colors: HashMap<String, String>,
     pub styles: HashMap<String, String>,
@@ -144,6 +147,7 @@ fn merge(into: &mut Config, from: Config) {
     into.env.extend(from.env);
     into.paths.extend(from.paths);
     into.aliases.extend(from.aliases);
+    into.wake.extend(from.wake);
     into.keybinds.extend(from.keybinds);
     into.colors.extend(from.colors);
     into.styles.extend(from.styles);
@@ -174,6 +178,12 @@ fn apply(config: &mut Config, tokens: &[String]) -> Result<(), String> {
         "reef" => {
             let (key, value) = pair(rest, "reef")?;
             config.aliases.insert(key, value);
+        }
+        "wake" => {
+            let [value] = rest else {
+                return Err("wake takes one command".to_string());
+            };
+            config.wake.push(value.clone());
         }
         "anchor" => {
             let (key, value) = pair(rest, "anchor")?;
@@ -309,6 +319,15 @@ anchor ctrl+r history_search
         assert_eq!(config.paths, vec!["~/.cargo/bin".to_string()]);
         assert_eq!(config.aliases["ll"], "ls -lah");
         assert_eq!(config.keybinds["ctrl+r"], "history_search");
+    }
+
+    #[test]
+    fn parses_wake_commands() {
+        let config = parse("wake \"fastfetch --logo none\"\n", "config.sharky").unwrap();
+        assert_eq!(config.wake, vec!["fastfetch --logo none".to_string()]);
+
+        let error = parse("wake\n", "config.sharky").unwrap_err();
+        assert!(error.message.contains("one command"), "{error}");
     }
 
     #[test]

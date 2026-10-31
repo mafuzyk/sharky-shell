@@ -390,6 +390,12 @@ fn run_with_config(config: &str, command: &str) -> Output {
 }
 
 #[test]
+fn wake_does_not_run_in_a_non_interactive_shell() {
+    let out = run_with_config("wake \"printf WAKE\"\n", "printf cmd");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "cmd");
+}
+
+#[test]
 fn config_sets_environment_and_aliases() {
     let out = run_with_config(
         "pearl GREETING hello\nreef hi \"printf %s world\"\n",
