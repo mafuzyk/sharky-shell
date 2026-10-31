@@ -768,7 +768,8 @@ impl Shell {
                 }),
                 RedirectOp::Here { body, expand } => {
                     let text = if *expand {
-                        let word = lexer::heredoc_word(body);
+                        let word =
+                            lexer::heredoc_word(body).map_err(|err| err.message)?;
                         self.expand_text_word(&word)
                     } else {
                         body.clone()

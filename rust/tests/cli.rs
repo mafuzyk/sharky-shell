@@ -719,3 +719,36 @@ fn arithmetic_command_works_in_a_condition() {
     let out = sharky(&["-c", "if ((2 > 1)); then printf yes; fi"]);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "yes");
 }
+
+#[test]
+fn background_command_continues_on_the_same_line() {
+    assert_eq!(sharky(&["-c", "true & false"]).status.code(), Some(1));
+    assert_eq!(sharky(&["-c", "false & true"]).status.code(), Some(0));
+}
+
+#[test]
+fn background_command_continues_inside_a_case_body() {
+    let out = sharky(&["-c", "case x in x) true & false;; esac"]);
+    assert_eq!(out.status.code(), Some(1));
+}
+
+#[test]
+fn case_fallthrough_is_a_syntax_error_not_a_panic() {
+    let out = sharky(&["-c", "case a in a) :;;& esac"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("syntax error"));
+}
+
+#[test]
+fn for_without_a_variable_is_a_syntax_error() {
+    let out = sharky(&["-c", "for ; do :; done"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("syntax error"));
+}
+
+#[test]
+fn c_style_for_is_rejected_cleanly() {
+    let out = sharky(&["-c", "for ((i=0;i<2;i++)); do :; done"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("syntax error"));
+}

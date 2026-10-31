@@ -311,7 +311,7 @@ impl Lexer {
                 '\'' => parts.push(Part::Single(self.scan_single()?)),
                 '"' => parts.push(Part::Double(self.scan_double()?)),
                 '\\' => self.scan_escape(&mut parts)?,
-                '$' => parts.push(self.scan_dollar()),
+                '$' => parts.push(self.scan_dollar()?),
                 _ => {
                     push_literal(&mut parts, char);
                     self.pos += 1;
@@ -332,7 +332,7 @@ impl Lexer {
                 '\'' => parts.push(Part::Single(self.scan_single()?)),
                 '"' => parts.push(Part::Double(self.scan_double()?)),
                 '\\' => self.scan_escape(&mut parts)?,
-                '$' => parts.push(self.scan_dollar()),
+                '$' => parts.push(self.scan_dollar()?),
                 '~' if parts.is_empty() && matches!(self.peek(), None | Some('/')) =>
                 {
                     parts.push(Part::Tilde);
@@ -399,7 +399,7 @@ impl Lexer {
                         self.pos += 1;
                     }
                 },
-                Some('$') => parts.push(self.scan_dollar()),
+                Some('$') => parts.push(self.scan_dollar()?),
                 Some(char) => {
                     push_literal(&mut parts, char);
                     self.pos += 1;
@@ -561,7 +561,7 @@ impl Lexer {
         self.tokens.push(Token { kind, pos });
     }
 
-    fn scan_dollar(&mut self) -> Part {
+    fn scan_dollar(&mut self) -> Result<Part, LexError> {
         let start = self.pos;
         self.pos += 1;
 
@@ -573,13 +573,13 @@ impl Lexer {
                     self.scan_command_substitution(start)
                 }
             }
-            Some('{') => match self.scan_braced_parameter(start) {
-                Some(parameter) => Part::Parameter(Box::new(parameter)),
-                None => Part::Literal("$".to_string()),
+            Some('{') => match self.scan_braced_parameter() {
+                Some(parameter) => Ok(Part::Parameter(Box::new(parameter))),
+                None => Err(LexError::new("unclosed parameter expansion", start, true)),
             },
             Some(char @ ('?' | '$' | '!' | '#' | '@' | '*')) => {
                 self.pos += 1;
-                Part::Variable(char.to_string())
+                Ok(Part::Variable(char.to_string()))
             }
             Some(char) if char.is_ascii_digit() => {
                 let mut name = String::new();
@@ -590,7 +590,7 @@ impl Lexer {
                     name.push(char);
                     self.pos += 1;
                 }
-                Part::Variable(name)
+                Ok(Part::Variable(name))
             }
             Some(char) if is_name_start(char) => {
                 let mut name = String::new();
@@ -601,13 +601,13 @@ impl Lexer {
                     name.push(char);
                     self.pos += 1;
                 }
-                Part::Variable(name)
+                Ok(Part::Variable(name))
             }
-            _ => Part::Literal("$".to_string()),
+            _ => Ok(Part::Literal("$".to_string())),
         }
     }
 
-    fn scan_braced_parameter(&mut self, start: usize) -> Option<Parameter> {
+    fn scan_braced_parameter(&mut self) -> Option<Parameter> {
         self.pos += 1;
         let content_start = self.pos;
         let mut depth = 0;
@@ -633,11 +633,10 @@ impl Lexer {
             }
         }
 
-        self.pos = start;
         None
     }
 
-    fn scan_arithmetic(&mut self, start: usize) -> Part {
+    fn scan_arithmetic(&mut self, start: usize) -> Result<Part, LexError> {
         self.pos += 2;
         let content_start = self.pos;
         let mut depth: usize = 0;
@@ -651,7 +650,7 @@ impl Lexer {
                 ')' if depth == 0 && self.chars.get(self.pos + 1) == Some(&')') => {
                     let source: String = self.chars[content_start..self.pos].iter().collect();
                     self.pos += 2;
-                    return Part::Arithmetic(source.trim().to_string());
+                    return Ok(Part::Arithmetic(source.trim().to_string()));
                 }
                 ')' => {
                     depth -= 1;
@@ -661,11 +660,10 @@ impl Lexer {
             }
         }
 
-        self.pos = start;
-        Part::Literal("$((".to_string())
+        Err(LexError::new("unclosed arithmetic expansion", start, true))
     }
 
-    fn scan_command_substitution(&mut self, start: usize) -> Part {
+    fn scan_command_substitution(&mut self, start: usize) -> Result<Part, LexError> {
         let content_start = self.pos + 1;
         let mut index = content_start;
         let mut depth = 1;
@@ -708,7 +706,7 @@ impl Lexer {
                         if depth == 0 {
                             let source: String = self.chars[content_start..index].iter().collect();
                             self.pos = index + 1;
-                            return Part::CmdSub(source);
+                            return Ok(Part::CmdSub(source));
                         }
                         index += 1;
                     }
@@ -717,8 +715,7 @@ impl Lexer {
             }
         }
 
-        self.pos = start;
-        Part::Literal("$(".to_string())
+        Err(LexError::new("unclosed command substitution", start, true))
     }
 }
 
@@ -768,13 +765,13 @@ fn parse_parameter(content: &str) -> Parameter {
     }
 }
 
-pub fn heredoc_word(text: &str) -> Word {
+pub fn heredoc_word(text: &str) -> Result<Word, LexError> {
     let mut lexer = Lexer::new(text);
     let mut parts = Vec::new();
 
     while let Some(char) = lexer.current() {
         match char {
-            '$' => parts.push(lexer.scan_dollar()),
+            '$' => parts.push(lexer.scan_dollar()?),
             '\\' => match lexer.peek() {
                 Some(next @ ('$' | '`' | '\\')) => {
                     parts.push(Part::Escaped(next.to_string()));
@@ -793,7 +790,7 @@ pub fn heredoc_word(text: &str) -> Word {
         }
     }
 
-    Word { parts }
+    Ok(Word { parts })
 }
 
 fn word_text(word: &Word) -> String {

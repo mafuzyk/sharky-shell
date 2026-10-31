@@ -56,10 +56,14 @@ impl Parser {
         }
     }
 
-    fn word(&mut self) -> Word {
-        match self.advance().kind {
-            TokenKind::Word(word) => word,
-            _ => unreachable!("word() called on a non-word token"),
+    fn take_word(&mut self) -> Result<Word, ParseError> {
+        match self.kind() {
+            TokenKind::Word(word) => {
+                let word = word.clone();
+                self.advance();
+                Ok(word)
+            }
+            _ => Err(self.unexpected()),
         }
     }
 
@@ -109,7 +113,9 @@ impl Parser {
             }
             entries.push(Entry { background, and_or });
 
-            if matches!(self.kind(), TokenKind::Semi | TokenKind::Newline) {
+            if background {
+                self.skip_newlines();
+            } else if matches!(self.kind(), TokenKind::Semi | TokenKind::Newline) {
                 self.skip_separators();
             } else if !self.terminated(keywords, rbrace) {
                 return Err(self.unexpected());
@@ -241,7 +247,7 @@ impl Parser {
     }
 
     fn parse_function_definition(&mut self) -> Result<Command, ParseError> {
-        let name = literal(&self.word()).unwrap_or_default();
+        let name = literal(&self.take_word()?).unwrap_or_default();
         self.advance();
         self.advance();
         self.skip_newlines();
@@ -310,7 +316,9 @@ impl Parser {
                 self.advance();
             }
             entries.push(Entry { background, and_or });
-            if matches!(self.kind(), TokenKind::Semi | TokenKind::Newline) {
+            if background {
+                self.skip_newlines();
+            } else if matches!(self.kind(), TokenKind::Semi | TokenKind::Newline) {
                 self.skip_separators();
             } else if !matches!(self.kind(), TokenKind::RParen | TokenKind::Eof) {
                 return Err(self.unexpected());
@@ -326,6 +334,9 @@ impl Parser {
 
         loop {
             let condition = self.parse_list(&["then"], false)?;
+            if condition.entries.is_empty() {
+                return Err(ParseError::new("syntax error: missing condition after 'if'", false));
+            }
             self.expect_word("then")?;
             let body = self.parse_list(&["elif", "else", "fi"], false)?;
             branches.push((condition, body));
@@ -351,7 +362,7 @@ impl Parser {
 
     fn parse_for(&mut self) -> Result<Command, ParseError> {
         self.advance();
-        let name = literal(&self.word()).unwrap_or_default();
+        let name = literal(&self.take_word()?).unwrap_or_default();
         if name.is_empty() {
             return Err(self.unexpected());
         }
@@ -361,7 +372,7 @@ impl Parser {
         if self.at_word("in") {
             self.advance();
             while matches!(self.kind(), TokenKind::Word(_)) {
-                words.push(self.word());
+                words.push(self.take_word()?);
             }
         }
 
@@ -375,6 +386,9 @@ impl Parser {
     fn parse_while(&mut self, until: bool) -> Result<Command, ParseError> {
         self.advance();
         let condition = self.parse_list(&["do"], false)?;
+        if condition.entries.is_empty() {
+            return Err(ParseError::new("syntax error: missing loop condition", false));
+        }
         self.expect_word("do")?;
         let body = self.parse_list(&["done"], false)?;
         self.expect_word("done")?;
@@ -387,7 +401,7 @@ impl Parser {
 
     fn parse_case(&mut self) -> Result<Command, ParseError> {
         self.advance();
-        let word = self.word();
+        let word = self.take_word()?;
         self.skip_newlines();
         self.expect_word("in")?;
         self.skip_separators();
@@ -404,7 +418,7 @@ impl Parser {
 
             let mut patterns = Vec::new();
             loop {
-                patterns.push(self.word());
+                patterns.push(self.take_word()?);
                 if !matches!(self.kind(), TokenKind::Pipe) {
                     break;
                 }
@@ -460,7 +474,9 @@ impl Parser {
             }
             entries.push(Entry { background, and_or });
 
-            if matches!(self.kind(), TokenKind::Semi) {
+            if background {
+                self.skip_newlines();
+            } else if matches!(self.kind(), TokenKind::Semi) {
                 if self.at_double_semi() {
                     break;
                 }
