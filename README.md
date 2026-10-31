@@ -1,195 +1,214 @@
 # sharky
 
-[![Ruby 3.4](https://img.shields.io/badge/ruby-3.4-CC342D?logo=ruby&logoColor=white)](https://www.ruby-lang.org/)
-[![Linux](https://img.shields.io/badge/platform-Linux-FCC624?logo=linux&logoColor=black)](https://www.kernel.org/)
-[![License: GPL--3.0](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
-[![ci](https://github.com/mafuzyk/sharky-shell/actions/workflows/ci.yml/badge.svg)](https://github.com/mafuzyk/sharky-shell/actions/workflows/ci.yml)
+An interactive Unix shell written in Rust.
 
-sharky is a Unix-first interactive shell written in Ruby. Commands run as real Unix processes; the parser, executor, job control, prompt, editor and completion are owned by the shell.
+sharky runs commands as real Unix processes. The parser, executor, line editor,
+prompt, history, completion and job control belong to the shell itself; it never
+wraps Bash or `/bin/sh`.
 
-Internal design notes and implementation plans are kept outside the published repository.
+- one static binary, no runtime dependency, startup around half a millisecond;
+- a Bash-like language subset, from pipes and heredocs to `[[ ]]` and functions;
+- an interactive editor with history, completion and Ctrl-R style job control;
+- a small declarative configuration language for settings and themes.
 
-## Requirements
-
-- Ruby 3.4 on Linux
-- Standard library and default gems only; no third-party runtime gems
-
-sharky is not a login shell in v1.0. Start it from Bash or another shell and test it there first.
+The Ruby v1 implementation is frozen at tag `v1-ruby` and stays in the tree as
+the behavioural oracle for the differential test suite.
 
 ## Install
 
-Install into a prefix (default `/usr/local`):
+### Arch Linux (AUR)
 
-~~~sh
-make install
-# user-local:
-make install PREFIX="$HOME/.local"
-# packaging:
-make install DESTDIR="$pkgdir" PREFIX=/usr
-~~~
+```sh
+paru -S sharky-shell-git       # or: yay -S sharky-shell-git
+```
 
-This installs `bin/sharky`, `lib/sharky.rb`, `lib/sharky/*.rb` and `man/man1/sharky.1`; the installed binary no longer depends on the source checkout. Read the manual with `man sharky` (or `man -l man/sharky.1` from a checkout). Remove with:
+### Prebuilt binary (GitHub)
 
-~~~sh
-make uninstall PREFIX="$HOME/.local"
-~~~
+```sh
+curl -fsSLO https://github.com/mafuzyk/sharky-shell/releases/latest/download/sharky-x86_64-unknown-linux-musl.tar.gz
+tar -xzf sharky-x86_64-unknown-linux-musl.tar.gz
+install -Dm755 sharky ~/.local/bin/sharky
+install -Dm644 sharky.1 ~/.local/share/man/man1/sharky.1
+```
 
-For a throwaway checkout without installing, symlink `bin/sharky` and keep the source tree in place:
+The tarball is statically linked and also carries `config.sharky`,
+`theme.sharky` and the man page.
 
-~~~sh
-mkdir -p ~/.local/bin
-ln -s "$PWD/bin/sharky" ~/.local/bin/sharky
-~~~
+### From source
 
-Build a source tarball with `make dist`; it includes tests and benchmarks so `make test` also works from the extracted source. The Arch recipe is `packaging/PKGBUILD`.
+```sh
+git clone https://github.com/mafuzyk/sharky-shell.git
+cd sharky-shell/rust
+cargo build --release --locked --jobs 6
+install -Dm755 target/release/sharky ~/.local/bin/sharky
+install -Dm644 man/sharky.1 ~/.local/share/man/man1/sharky.1
+```
+
+Requires Rust 1.85 or newer and Linux.
 
 ## First run
 
-~~~sh
+```sh
 sharky --version
 sharky -c 'printf "a b\n" | wc -w'
-sharky
-~~~
+sharky                      # interactive, needs a TTY
+sharky script.sh argument   # runs a script through sharky's own parser
+echo 'printf hi' | sharky   # reads stdin when there is no terminal
+```
 
-`-c` runs one command string and exits with its status. With no arguments, sharky starts interactively and requires a TTY. `--no-config` skips the configuration file.
+## Shell language
 
-## Machine-readable output
+The prompt, `-c` and script files share one grammar:
 
-`sharky --json -c COMMAND` writes exactly one JSON object to stdout and exits with the command status:
+| Feature | Example |
+| --- | --- |
+| quotes, escapes, comments | `printf '%s\n' "a b" # comment` |
+| variables | `name=value`, `"$name"`, `${name}` |
+| parameter operators | `${NAME:-default}`, `${#NAME}`, `${NAME#pre}`, `${NAME%%.*}` |
+| command substitution | `files=$(ls \| wc -l)` |
+| arithmetic | `$((2 + 3 * 4))`, `((total > 10))` |
+| globbing and tilde | `src/*.rs`, `~/bin` |
+| pipelines and redirects | `a \| b > out 2>&1` |
+| heredocs | `cat <<EOF` ... `EOF`, `<<-EOF`, `<<'EOF'` |
+| lists | `a; b`, `a && b`, `a \|\| b` |
+| conditionals | `if`, `elif`, `else`, `fi`, `[[ -f x && -n "$y" ]]` |
+| loops | `for x in a b; do ...; done`, `while`, `until` |
+| case | `case $x in f*) ...;; *) ...;; esac` |
+| functions | `greet() { printf 'hi %s\n' "$1"; }` |
+| groups and subshells | `{ a; b; }`, `( a; b )` |
+| job control | `cmd &`, `jobs`, `fg`, `bg`, Ctrl-Z |
+| scripts | `source lib.sh`, `sharky file.sh args` |
 
-~~~json
-{"schema_version":1,"status":0,"stdout":"hi\n","stderr":"","duration_ms":3,"cwd":"/tmp","env_delta":{"FOO":"bar"}}
-~~~
-
-`sharky state --json` writes the current shell state without the environment:
-
-~~~json
-{"schema_version":1,"cwd":"/tmp","last_status":0,"pid":1234}
-~~~
-
-Pass `--env` to include the full environment explicitly:
-
-~~~json
-{"schema_version":1,"cwd":"/tmp","env":{"PATH":"/usr/bin"},"last_status":0,"pid":1234}
-~~~
-
-The default omits environment variables so secrets are not written to logs or agent transcripts. With `--env`, `state.env` is the full environment. `env_delta` maps each changed environment name to its new value; a removed variable is `null`. `pid` is the sharky process. JSON mode keeps stdout machine-readable: configuration warnings and other diagnostics go to stderr, while command stderr is captured in the envelope.
+This is a subset of Bash, not a drop-in replacement. Unsupported syntax fails
+with status 2 instead of silently falling back to another shell.
 
 ## Configuration
 
-The configuration directory is `$SHARKY_CONFIG`, or `${XDG_CONFIG_HOME:-~/.config}/sharky`:
+Configuration lives in `$SHARKY_CONFIG`, or
+`${XDG_CONFIG_HOME:-~/.config}/sharky`. Two files are read at startup:
+`config.sharky` and `theme.sharky`.
 
-- `sharky.rb` is loaded at startup and by the `reload` builtin.
-- `themes/<name>.toml` is loaded on demand by `Sharky.theme :name`; a `.rb` theme is the fallback for computed themes.
-- `functions/<name>.rb` becomes the command `<name>`, autoloaded on first use.
+The format is deliberately not shell code. It is a declarative language with
+one statement per line, `//` comments, optional double quotes, and no `=`,
+braces or semicolons. A configuration file cannot execute anything.
 
-`init.rb` is still read as a legacy fallback with a warning; use `sharky.rb` for new configurations.
+```
+instruction property value
+```
 
-~~~ruby
-# ~/.config/sharky/sharky.rb
-Sharky.prompt = ->(ctx) { "#{ctx.cwd} #{ctx.git_branch} ❯ " }
-Sharky.alias "ll", "eza -lah"
-Sharky.abbr "gco", "git checkout"
-Sharky.bind "ctrl-r", :history_search
+Values are bare words or `"quoted strings"`. Inside quotes, `\"`, `\\`, `\n`
+and `\t` are escapes. Anything after `//` outside quotes is a comment.
 
-Sharky.command :hello do |argv, _stdin|
-  puts "hello #{argv.first || 'world'}"
-  0
-end
+### `config.sharky`
 
-Sharky.complete "deploy" do |word, _line, _cursor|
-  %w[staging production].grep(/\A#{Regexp.escape(word)}/)
-end
-~~~
+| Instruction | Meaning | Example |
+| --- | --- | --- |
+| `tide` | shell preference | `tide history 10000` |
+| `pearl` | environment variable | `pearl EDITOR "nvim"` |
+| `current` | prepend a directory to `PATH` | `current "~/.cargo/bin"` |
+| `reef` | alias | `reef ll "ls -lah"` |
+| `anchor` | key binding | `anchor ctrl+r history_search` |
 
-Config errors print `sharky: config error in <file>: <message>` and the shell continues with defaults. Configuration and function files are user-owned Ruby and run with your privileges.
+`tide` keys:
 
-`reload` re-evaluates `sharky.rb` and clears aliases, abbreviations, bindings, completions, prompt and theme state. Function files that are already loaded stay in memory; start a new shell after editing one. New function files load on first use.
+| Key | Values |
+| --- | --- |
+| `greeting` | `on` / `off` |
+| `autosuggest` | `on` / `off` |
+| `highlight` | `on` / `off` |
+| `history` | number of history entries to keep |
 
-## Supported language
+`anchor` actions: `history_search`, `complete`, `clear_screen`, `accept_line`,
+`abort`, `backward_char`, `forward_char`, `backward_word`, `forward_word`,
+`beginning_of_line`, `end_of_line`, `delete_char`, `backward_delete_char`,
+`kill_line`, `yank`, `transpose_chars`, `upcase_word`, `downcase_word`,
+`capitalize_word`, `undo`.
 
-sharky implements a native Bash-like subset at the prompt, in `sharky -c`, and in `.sh` scripts:
+```text
+// Sharky ~ settings
+tide greeting off
+tide autosuggest on
+tide history 10000
 
-- single and double quotes, escapes, comments and backslash-newline continuation;
-- variables, positional parameters, parameter and tilde expansion, arithmetic expansion `$((...))` and arithmetic commands `((...))`;
-- indexed arrays, brace expansion, globbing and nested command substitution `$(...)`;
-- pipes, redirects, here-documents, here-strings, lists with `;`/`&&`/`||`, background jobs, subshells and brace groups;
-- `[[ ]]`, `if`/`elif`/`else`, `for`, `while`, `until`, `case`, shell functions, `break`, `continue`, `return`, `source`/`.`, `set -e/-u/-x`, `pipefail` and `trap` (EXIT actions execute).
+pearl EDITOR "nvim"
+pearl BROWSER "firefox"
 
-This is not full Bash/POSIX compatibility. Unsupported features include associative arrays, array slices, process substitution, extglob, `coproc`, custom `IFS` and full `[[ =~ ]]` parity. Bash `complete`/`compgen` are not emulated; Ruby configs can register a completion block with `Sharky.complete`, but context detection and quote/escape insertion there are still limited. Signal traps are stored, but only EXIT actions execute in v1.
+current "~/.cargo/bin"
+current "~/.local/bin"
 
-Unsupported reserved words and operators at command position produce:
+reef ll "ls -lah"
+reef gs "git status"
+reef cls "clear"
 
-~~~text
-sharky: unsupported syntax: 'coproc'. Use bash -c '...' or a Ruby function.
-~~~
+anchor ctrl+r history_search
+anchor tab complete
+```
 
-The status is 2 and nothing runs. sharky never falls back to Bash silently.
+### `theme.sharky`
 
-## Shell scripts
+| Instruction | Meaning | Example |
+| --- | --- | --- |
+| `coral` | define a colour | `coral kelp #8CCFA8` |
+| `wave` | prompt template or style | `wave prompt.cwd @kelp` |
 
-`.sh` files and scripts with a `#!/usr/bin/env sharky` shebang run through sharky's native parser:
+Colours are `#RRGGBB`. Styles reference a colour with `@name`; a reference to a
+colour that was never defined is an error.
 
-~~~sh
-sharky script.sh arg1 arg2
-~~~
+Prompt placeholders: `{cwd}`, `{symbol}`, `{status}`, `{user}`, `{host}`.
 
-The script path is `$0`; arguments are available as `$1`, `$2`, `$@` and `$#`. Use `source FILE [ARG...]` (or `. FILE`) to run a file in the current shell.
+```text
+// Sharky ~ under the sea
+coral abyss #071923
+coral foam #E4F5F4
+coral sea #35B8C5
+coral kelp #8CCFA8
+coral danger #FF8F80
 
-For scripts that need unsupported Bash features, run `bash script.sh` explicitly. sharky never silently falls back to Bash or `/bin/sh`. Launching an executable script directly without a shebang fails with status 126 and a hint to select an interpreter or add a shebang.
+wave prompt "{cwd} {symbol} "
+wave prompt.cwd @kelp
+wave prompt.symbol @sea
 
-## Ruby
+wave command @foam
+wave builtin @sea
+wave string @kelp
+wave variable @sea
+wave error @danger
+wave suggestion @kelp
+wave selection @sea
+```
 
-- `ruby` starts IRB in-process with the `Sharky` API and shell helpers.
-- `sharky script.rb` runs a Ruby script with the API.
-- `Sharky.sh("line")` and `Sharky.capture("line")` use the parser and executor.
-- `Sharky.cwd`, `Sharky.env`, `Sharky.last_status` and `Sharky.pid` expose shell state.
+Set `NO_COLOR=1` to keep the prompt plain.
 
-## Performance
+### Errors
 
-Startup is dominated by the Ruby VM, not by shell work. On the reference
-machine (Arch Linux, NTFS checkout):
+Invalid instructions, wrong arity, bad colours, unknown key actions and
+undefined `@colour` references are reported as `file:line: message`. The shell
+continues with defaults, so a typo never locks you out of your own shell.
 
-| Command | Median |
-| --- | ---: |
-| `bash -c true` | ~1 ms |
-| `fish --no-config -c true` | ~2 ms |
-| `ruby --disable-gems -e ''` | ~7 ms |
-| `Sharky::Prompt.render` (renderer only, prebuilt context) | ~0.003 ms median / p95 |
-| `sharky --no-config -c true` | ~42 ms |
+## Files
 
-Fish's interactive startup is commonly in the 20–30 ms range; sharky is in that
-range, not Bash's. sharky does **not** claim to be the fastest shell. The v1
-target is startup under 50 ms and interactive prompt p95 under 20 ms. Measured
-on the reference machine: startup median 41.9 ms (`--no-config -c true`) and
-renderer p95 0.003 ms with prebuilt context. The interactive prompt also runs
-`git status` for branch and dirty state, with a short cache and a timeout; that
-work is not included in the renderer measurement. `ruby bench/prompt.rb` measures
-rendering only, not the complete interactive prompt. See also `ruby bench/startup.rb`.
+| Path | Purpose |
+| --- | --- |
+| `~/.config/sharky/config.sharky` | settings, environment, PATH, aliases, keys |
+| `~/.config/sharky/theme.sharky` | palette and prompt styles |
+| `~/.local/share/sharky/history` | command history |
 
-## Tests and benchmarks
+Environment: `SHARKY_CONFIG`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `NO_COLOR`,
+`PATH`.
 
-~~~sh
-ruby test/run.rb
-ruby bench/startup.rb
-ruby bench/parser.rb
-ruby bench/prompt.rb
-ruby bench/soak.rb
-~~~
+## Development
 
-The suite includes a Bash conformance matrix and PTY tests. Benchmarks print
-their results; the CI soak job runs repeated command and PTY sessions.
+```sh
+cd rust
+cargo test -j 6
+cargo clippy -j 6 --all-targets
+```
 
-## Roadmap
-
-v1.0 is the stable daily-driver release: installable, job-control hardened,
-CI-tested, documented, and built around the session contract. Login-shell
-installation remains post-v1.
+`rust/PORTING.md` documents the architecture and the porting milestones;
+`rust/RELEASING.md` has the release checklist. `rust/conformance/cases/` holds
+one command per file, compared against the frozen Ruby implementation when
+`bin/sharky` is present.
 
 ## License
 
-sharky is free software: you can redistribute it and/or modify it under the
-terms of the GNU General Public License as published by the Free Software
-Foundation, version 3 only.
-
-See [LICENSE](LICENSE). Copyright (C) 2026 mafuzyk.
+GPL-3.0-only. Copyright (C) 2026 mafuzyk.

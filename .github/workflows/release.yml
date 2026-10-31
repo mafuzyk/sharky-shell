@@ -1,0 +1,41 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  binary:
+    name: Static binary
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build
+        working-directory: rust
+        run: cargo build --release --locked --jobs 6 --target x86_64-unknown-linux-musl
+      - name: Package
+        run: |
+          install -Dm755 rust/target/x86_64-unknown-linux-musl/release/sharky sharky
+          install -Dm644 rust/man/sharky.1 sharky.1
+          install -Dm644 rust/examples/config.sharky config.sharky
+          install -Dm644 rust/examples/theme.sharky theme.sharky
+          tar -czf sharky-x86_64-unknown-linux-musl.tar.gz \
+            sharky sharky.1 config.sharky theme.sharky
+          sha256sum sharky-x86_64-unknown-linux-musl.tar.gz \
+            > sharky-x86_64-unknown-linux-musl.tar.gz.sha256
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            sharky-x86_64-unknown-linux-musl.tar.gz
+            sharky-x86_64-unknown-linux-musl.tar.gz.sha256
+          generate_release_notes: true

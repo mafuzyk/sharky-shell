@@ -1,0 +1,31 @@
+name: rust
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Rust
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Test
+        working-directory: rust
+        # The differential suite needs the frozen Ruby tree; it is skipped here
+        # and exercised locally, where the oracle is available.
+        env:
+          SHARKY_REF: /nonexistent/sharky
+        run: cargo test --locked --jobs 6
+      - name: Lint
+        working-directory: rust
+        run: cargo clippy --locked --all-targets --jobs 6
