@@ -3,7 +3,7 @@
 # and fill in the checksum with `updpkgsums`.
 
 pkgname=sharky-shell-git
-pkgver=2.1.0.r0.g0000000
+pkgver=2.1.0.r82.g115d429
 pkgrel=1
 pkgdesc="Unix-first interactive shell written in Rust"
 arch=('x86_64' 'aarch64')
