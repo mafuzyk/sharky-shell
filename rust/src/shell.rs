@@ -5,11 +5,13 @@ use std::path::PathBuf;
 
 use nix::fcntl::OFlag;
 use nix::libc::_exit;
-use nix::unistd::{ForkResult, Pid, fork, getpgrp, pipe2, setpgid, tcsetpgrp};
+use nix::sys::signal::{SigHandler, Signal, killpg, signal};
+use nix::sys::wait::WaitStatus;
+use nix::unistd::{ForkResult, Pid, fork, getpid, getpgrp, pipe2, setpgid, tcsetpgrp};
 
 use crate::config::{self, Config};
 use crate::ast::{
-    AndOr, Command, List, Pipeline, Program, Redirect, RedirectOp, Simple,
+    AndOr, Command, List, Pipeline, Program, Redirect, RedirectOp, Simple, literal,
 };
 use crate::arith;
 use crate::exec;
@@ -28,8 +30,19 @@ pub struct Shell {
     script: Option<String>,
     interactive: bool,
     pub exit_requested: Option<i32>,
+    jobs: Vec<Job>,
+    next_job: usize,
+    job_pgid: Option<Pid>,
     colors: HashMap<String, String>,
     styles: HashMap<String, String>,
+}
+
+struct Job {
+    id: usize,
+    pgid: Pid,
+    pids: Vec<Pid>,
+    command: String,
+    stopped: bool,
 }
 
 enum Flow {
@@ -76,6 +89,9 @@ impl Shell {
             script: None,
             interactive: false,
             exit_requested: None,
+            jobs: Vec::new(),
+            next_job: 1,
+            job_pgid: None,
             colors: HashMap::new(),
             styles: HashMap::new(),
         }
@@ -198,7 +214,7 @@ impl Shell {
     pub fn command_words(&self) -> Vec<String> {
         let mut words: Vec<String> = [
             ":", "true", "false", "cd", "exit", "export", "unset", "set", "source", ".",
-            "break", "continue", "return",
+            "break", "continue", "return", "jobs", "fg", "bg",
         ]
         .iter()
         .map(|word| word.to_string())
@@ -216,8 +232,12 @@ impl Shell {
             .collect()
     }
 
+    fn foreground_control(&self) -> bool {
+        self.interactive && self.job_pgid.is_none()
+    }
+
     fn reclaim_terminal(&self) {
-        if self.interactive {
+        if self.foreground_control() {
             // SAFETY: fd 0 is the terminal for the whole life of an interactive shell.
             let _ = tcsetpgrp(unsafe { std::os::fd::BorrowedFd::borrow_raw(0) }, getpgrp());
         }
@@ -244,8 +264,10 @@ impl Shell {
 
         for entry in &list.entries {
             if entry.background {
-                eprintln!("sharky: background jobs are not implemented yet");
-                return Flow::Status(2);
+                self.run_background(&entry.and_or);
+                status = 0;
+                self.last_status = 0;
+                continue;
             }
 
             match self.run_and_or(&entry.and_or) {
@@ -258,6 +280,38 @@ impl Shell {
         }
 
         Flow::Status(status)
+    }
+
+    fn run_background(&mut self, and_or: &AndOr) {
+        // SAFETY: the child runs shell code and exits without unwinding.
+        match unsafe { fork() } {
+            Ok(ForkResult::Parent { child }) => {
+                if self.interactive {
+                    let id = self.next_job;
+                    self.next_job += 1;
+                    println!("[{id}] {child}");
+                    self.jobs.push(Job {
+                        id,
+                        pgid: child,
+                        pids: vec![child],
+                        command: describe_and_or(and_or),
+                        stopped: false,
+                    });
+                }
+            }
+            Ok(ForkResult::Child) => {
+                if self.interactive {
+                    let _ = setpgid(Pid::from_raw(0), Pid::from_raw(0));
+                }
+                reset_child_signals();
+                self.job_pgid = Some(getpid());
+                let code = flow_status(self.run_and_or(and_or));
+                unsafe { _exit(code) }
+            }
+            Err(err) => {
+                eprintln!("sharky: fork: {err}");
+            }
+        }
     }
 
     fn run_and_or(&mut self, and_or: &AndOr) -> Flow {
@@ -305,11 +359,13 @@ impl Shell {
                 Ok(ForkResult::Parent { child }) => {
                     if self.interactive {
                         if leader.is_none() {
-                            // SAFETY: fd 0 is the terminal; this child leads the job.
-                            let _ = tcsetpgrp(
-                                unsafe { std::os::fd::BorrowedFd::borrow_raw(0) },
-                                child,
-                            );
+                            if self.foreground_control() {
+                                // SAFETY: fd 0 is the terminal; this child leads the job.
+                                let _ = tcsetpgrp(
+                                    unsafe { std::os::fd::BorrowedFd::borrow_raw(0) },
+                                    child,
+                                );
+                            }
                             leader = Some(child);
                         } else if let Some(leader) = leader {
                             let _ = setpgid(child, leader);
@@ -319,8 +375,10 @@ impl Shell {
                 }
                 Ok(ForkResult::Child) => {
                     if self.interactive {
-                        let _ = setpgid(Pid::from_raw(0), leader.unwrap_or(Pid::from_raw(0)));
+                        let target = self.job_pgid.or(leader).unwrap_or(Pid::from_raw(0));
+                        let _ = setpgid(Pid::from_raw(0), target);
                     }
+                    reset_child_signals();
                     if let Some(fd) = stdin
                         && move_fd(fd, 0).is_err()
                     {
@@ -343,12 +401,9 @@ impl Shell {
 
         drop(pipes);
 
-        let mut status = 0;
-        for pid in pids {
-            status = exec::wait(pid);
-        }
-        self.reclaim_terminal();
-        Flow::Status(status)
+        let command = describe_pipeline(pipeline);
+        let pgid = leader.unwrap_or_else(getpgrp);
+        Flow::Status(self.wait_foreground(&pids, pgid, command))
     }
 
     fn run_command(&mut self, command: &Command) -> Flow {
@@ -426,6 +481,7 @@ impl Shell {
             }
         }
 
+        let command = prepared.argv.join(" ");
         match self.spawn(
             &prepared.argv,
             &prepared.actions,
@@ -434,11 +490,7 @@ impl Shell {
             None,
             None,
         ) {
-            Ok(pid) => {
-                let status = exec::wait(pid);
-                self.reclaim_terminal();
-                Flow::Status(status)
-            }
+            Ok(pid) => Flow::Status(self.wait_foreground(&[pid], pid, command)),
             Err(message) => {
                 eprintln!("sharky: {message}");
                 Flow::Status(1)
@@ -513,6 +565,7 @@ impl Shell {
                 Flow::Status(status)
             }
             Ok(ForkResult::Child) => {
+                reset_child_signals();
                 let code = flow_status(self.run_list(list));
                 unsafe { _exit(code) }
             }
@@ -540,6 +593,7 @@ impl Shell {
                 Flow::Status(status)
             }
             Ok(ForkResult::Child) => {
+                reset_child_signals();
                 if let Err(message) = apply_actions(&actions) {
                     eprintln!("sharky: {message}");
                     unsafe { _exit(1) }
@@ -723,7 +777,7 @@ impl Shell {
         // SAFETY: the child only runs syscalls and allocation-safe code before exec.
         match unsafe { fork() } {
             Ok(ForkResult::Parent { child }) => {
-                if self.interactive && leader.is_none() {
+                if self.foreground_control() && leader.is_none() {
                     // SAFETY: fd 0 is the terminal; the child was just placed in its own group.
                     let _ = tcsetpgrp(
                         unsafe { std::os::fd::BorrowedFd::borrow_raw(0) },
@@ -734,8 +788,10 @@ impl Shell {
             }
             Ok(ForkResult::Child) => {
                 if self.interactive {
-                    let _ = setpgid(Pid::from_raw(0), leader.unwrap_or(Pid::from_raw(0)));
+                    let target = self.job_pgid.or(leader).unwrap_or(Pid::from_raw(0));
+                    let _ = setpgid(Pid::from_raw(0), target);
                 }
+                reset_child_signals();
                 if let Some(fd) = stdin
                     && move_fd(fd, 0).is_err()
                 {
@@ -792,6 +848,9 @@ impl Shell {
             "export" => Some(Flow::Status(self.export(&words[1..]))),
             "unset" => Some(Flow::Status(self.unset(&words[1..]))),
             "set" => Some(Flow::Status(self.set(&words[1..]))),
+            "jobs" => Some(Flow::Status(self.list_jobs())),
+            "fg" => Some(Flow::Status(self.fg(&words[1..]))),
+            "bg" => Some(Flow::Status(self.bg(&words[1..]))),
             "source" | "." => Some(self.source(&words[1..])),
             _ => None,
         }
@@ -848,6 +907,127 @@ impl Shell {
         for name in args {
             self.env.retain(|(key, _)| key != name);
         }
+        0
+    }
+
+    pub fn reap_jobs(&mut self) {
+        if self.jobs.is_empty() {
+            return;
+        }
+
+        let mut finished = Vec::new();
+        for (index, job) in self.jobs.iter_mut().enumerate() {
+            match exec::wait_scan(job.pids[0]) {
+                WaitStatus::Exited(_, _) | WaitStatus::Signaled(_, _, _) => {
+                    finished.push(index);
+                }
+                WaitStatus::Stopped(_, _) if !job.stopped => {
+                    job.stopped = true;
+                    println!("\n[{}]+  Stopped                 {}", job.id, job.command);
+                }
+                _ => {}
+            }
+        }
+
+        for index in finished.into_iter().rev() {
+            let job = self.jobs.remove(index);
+            if self.interactive {
+                println!("[{}]+  Done                    {}", job.id, job.command);
+            }
+        }
+    }
+
+    fn wait_foreground(&mut self, pids: &[Pid], pgid: Pid, command: String) -> i32 {
+        let mut status = 0;
+        let mut stopped = false;
+
+        for pid in pids {
+            match exec::wait_traced(*pid) {
+                WaitStatus::Exited(_, code) => status = code,
+                WaitStatus::Signaled(_, signal, _) => status = 128 + signal as i32,
+                WaitStatus::Stopped(_, _) => {
+                    stopped = true;
+                    status = 128 + Signal::SIGTSTP as i32;
+                }
+                _ => {}
+            }
+        }
+
+        self.reclaim_terminal();
+
+        if stopped && self.interactive {
+            let id = self.next_job;
+            self.next_job += 1;
+            self.jobs.push(Job {
+                id,
+                pgid,
+                pids: pids.to_vec(),
+                command: command.clone(),
+                stopped: true,
+            });
+            println!("\n[{id}]+  Stopped                 {command}");
+        }
+
+        status
+    }
+
+    fn list_jobs(&self) -> i32 {
+        let count = self.jobs.len();
+        for (index, job) in self.jobs.iter().enumerate() {
+            let marker = if index + 1 == count {
+                '+'
+            } else if index + 2 == count {
+                '-'
+            } else {
+                ' '
+            };
+            let state = if job.stopped { "Stopped" } else { "Running" };
+            println!("[{}]{}  {state:<24}{}", job.id, marker, job.command);
+        }
+        0
+    }
+
+    fn job_index(&self, spec: Option<&String>) -> Option<usize> {
+        let Some(spec) = spec else {
+            return self.jobs.len().checked_sub(1);
+        };
+        let spec = spec.strip_prefix('%').unwrap_or(spec);
+        if spec.is_empty() || spec == "+" {
+            return self.jobs.len().checked_sub(1);
+        }
+        let id: usize = spec.parse().ok()?;
+        self.jobs.iter().position(|job| job.id == id)
+    }
+
+    fn fg(&mut self, args: &[String]) -> i32 {
+        let Some(index) = self.job_index(args.first()) else {
+            eprintln!("sharky: fg: no such job");
+            return 1;
+        };
+
+        let mut job = self.jobs.remove(index);
+        job.stopped = false;
+        println!("{}", job.command);
+
+        if self.foreground_control() {
+            // SAFETY: fd 0 is the terminal for the life of an interactive shell.
+            let _ = tcsetpgrp(unsafe { std::os::fd::BorrowedFd::borrow_raw(0) }, job.pgid);
+        }
+        let _ = killpg(job.pgid, Signal::SIGCONT);
+
+        self.wait_foreground(&job.pids, job.pgid, job.command)
+    }
+
+    fn bg(&mut self, args: &[String]) -> i32 {
+        let Some(index) = self.job_index(args.first()) else {
+            eprintln!("sharky: bg: no such job");
+            return 1;
+        };
+
+        let job = &mut self.jobs[index];
+        job.stopped = false;
+        let _ = killpg(job.pgid, Signal::SIGCONT);
+        println!("[{}]+ {} &", job.id, job.command);
         0
     }
 
@@ -1068,6 +1248,7 @@ impl Shell {
                 output
             }
             Ok(ForkResult::Child) => {
+                reset_child_signals();
                 let _ = move_fd(write.as_raw_fd(), 1);
                 unsafe {
                     nix::libc::close(read.as_raw_fd());
@@ -1104,6 +1285,50 @@ impl Shell {
     }
 }
 
+fn describe_and_or(and_or: &AndOr) -> String {
+    let mut text = describe_pipeline(&and_or.first);
+    for (is_and, pipeline) in &and_or.rest {
+        text.push_str(if *is_and { " && " } else { " || " });
+        text.push_str(&describe_pipeline(pipeline));
+    }
+    text
+}
+
+fn describe_pipeline(pipeline: &Pipeline) -> String {
+    pipeline
+        .commands
+        .iter()
+        .map(describe_command)
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn describe_command(command: &Command) -> String {
+    match command {
+        Command::Simple(simple) => simple
+            .words
+            .iter()
+            .filter_map(literal)
+            .collect::<Vec<_>>()
+            .join(" "),
+        Command::Not(inner) => format!("! {}", describe_command(inner)),
+        Command::Redirected { command, .. } => describe_command(command),
+        Command::Subshell(_) => "( ... )".to_string(),
+        Command::Group(_) => "{ ...; }".to_string(),
+        Command::If { .. } => "if ...".to_string(),
+        Command::For { name, .. } => format!("for {name} ..."),
+        Command::While { until, .. } => {
+            if *until {
+                "until ...".to_string()
+            } else {
+                "while ...".to_string()
+            }
+        }
+        Command::Case { .. } => "case ...".to_string(),
+        Command::Function { name, .. } => format!("{name}()"),
+    }
+}
+
 fn config_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("SHARKY_CONFIG") {
         return Some(PathBuf::from(dir));
@@ -1112,6 +1337,18 @@ fn config_dir() -> Option<PathBuf> {
         return Some(PathBuf::from(dir).join("sharky"));
     }
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config/sharky"))
+}
+
+fn reset_child_signals() {
+    // SAFETY: called in a forked child before exec; restoring default
+    // dispositions is required because ignored signals survive exec.
+    unsafe {
+        let _ = signal(Signal::SIGINT, SigHandler::SigDfl);
+        let _ = signal(Signal::SIGQUIT, SigHandler::SigDfl);
+        let _ = signal(Signal::SIGTSTP, SigHandler::SigDfl);
+        let _ = signal(Signal::SIGTTOU, SigHandler::SigDfl);
+        let _ = signal(Signal::SIGTTIN, SigHandler::SigDfl);
+    }
 }
 
 fn flow_status(flow: Flow) -> i32 {

@@ -4,8 +4,8 @@ An interactive Unix shell written in Rust. This directory is the v2
 implementation; the Ruby v1 tree at the repository root is frozen at tag
 `v1-ruby` and only serves as the behavioural oracle for the differential tests.
 
-Status: the shell runs commands, scripts and an interactive session. Job
-control (`&`, `fg`, `bg`) is not implemented yet.
+Status: the shell runs commands, scripts and an interactive session, with job
+control (`&`, `jobs`, `fg`, `bg`, Ctrl-Z).
 
 ## Build
 

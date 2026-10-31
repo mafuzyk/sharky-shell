@@ -45,7 +45,8 @@ assert an exit status instead of waiting forever.
 - [x] `source`, script files, positional parameters in scripts
 - [x] Interactive REPL: raw-mode line editor, prompt, history, completion,
       process groups and terminal handoff
-- [ ] Job control: `&`, `jobs`, `fg`, `bg`, Ctrl-Z
+- [x] Job control: `&`, `jobs`, `fg`, `bg`, Ctrl-Z, process groups and
+      terminal handoff (child signal dispositions are reset before exec)
 - [ ] Job control, signals, `trap`
 - [x] Configuration parser: `config.sharky` and `theme.sharky`
 - [ ] Configuration applied by the interactive shell (prompt, keybinds)

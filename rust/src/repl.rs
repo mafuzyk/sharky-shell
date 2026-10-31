@@ -27,6 +27,8 @@ pub fn run(shell: &mut Shell) -> i32 {
     }
 
     loop {
+        shell.reap_jobs();
+
         let prompt = if buffer.is_empty() {
             prompt::render(shell)
         } else {
@@ -91,5 +93,7 @@ fn install_signals() {
         let _ = signal(Signal::SIGINT, SigHandler::SigIgn);
         let _ = signal(Signal::SIGQUIT, SigHandler::SigIgn);
         let _ = signal(Signal::SIGTSTP, SigHandler::SigIgn);
+        let _ = signal(Signal::SIGTTOU, SigHandler::SigIgn);
+        let _ = signal(Signal::SIGTTIN, SigHandler::SigIgn);
     }
 }

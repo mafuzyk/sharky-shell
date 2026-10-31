@@ -3,7 +3,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use nix::libc::_exit;
-use nix::sys::wait::{WaitStatus, waitpid};
+use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::{Pid, execve};
 
 use crate::shell::Shell;
@@ -64,6 +64,16 @@ pub fn wait(pid: Pid) -> i32 {
             1
         }
     }
+}
+
+pub fn wait_traced(pid: Pid) -> WaitStatus {
+    waitpid(pid, Some(WaitPidFlag::WUNTRACED))
+        .unwrap_or(WaitStatus::Exited(pid, 1))
+}
+
+pub fn wait_scan(pid: Pid) -> WaitStatus {
+    waitpid(pid, Some(WaitPidFlag::WNOHANG | WaitPidFlag::WUNTRACED))
+        .unwrap_or(WaitStatus::StillAlive)
 }
 
 fn is_executable(path: &Path) -> bool {
