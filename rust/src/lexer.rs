@@ -48,10 +48,19 @@ pub enum TokenKind {
     RedirAppend(Option<i32>),
     RedirIn(Option<i32>),
     RedirDup(i32, i32),
+    RedirHere {
+        fd: Option<i32>,
+        strip: bool,
+        delimiter: String,
+        quoted: bool,
+        body: String,
+    },
     LParen,
     RParen,
     LBrace,
     RBrace,
+    TestStart,
+    TestEnd,
     Newline,
     Eof,
 }
@@ -87,6 +96,9 @@ struct Lexer {
     chars: Vec<char>,
     pos: usize,
     tokens: Vec<Token>,
+    test: bool,
+    pending_heredocs: Vec<usize>,
+    here_awaiting: Option<usize>,
 }
 
 impl Lexer {
@@ -95,6 +107,9 @@ impl Lexer {
             chars: source.chars().collect(),
             pos: 0,
             tokens: Vec::new(),
+            test: false,
+            pending_heredocs: Vec::new(),
+            here_awaiting: None,
         }
     }
 
@@ -107,10 +122,38 @@ impl Lexer {
             };
 
             let start = self.pos;
+
+            if self.test {
+                if char == ']' && self.peek() == Some(']') {
+                    self.push(TokenKind::TestEnd);
+                    self.pos += 2;
+                    self.test = false;
+                    continue;
+                }
+                if char.is_whitespace() {
+                    self.pos += 1;
+                    continue;
+                }
+                let word = self.scan_test_word()?;
+                self.push_at(TokenKind::Word(word), start);
+                continue;
+            }
+
+            if char == '['
+                && self.peek() == Some('[')
+                && delimiter_after(self.chars.get(self.pos + 2).copied())
+            {
+                self.push(TokenKind::TestStart);
+                self.pos += 2;
+                self.test = true;
+                continue;
+            }
+
             match char {
                 '\n' => {
                     self.push(TokenKind::Newline);
                     self.pos += 1;
+                    self.read_heredoc_bodies()?;
                 }
                 '#' => self.skip_comment(),
                 ';' => {
@@ -163,6 +206,24 @@ impl Lexer {
                             false,
                         ));
                     }
+                    if let Some(index) = self.here_awaiting.take() {
+                        let word = self.scan_word()?;
+                        let delimiter = word_text(&word);
+                        let quoted = word
+                            .parts
+                            .iter()
+                            .any(|part| !matches!(part, Part::Literal(_)));
+                        if let TokenKind::RedirHere {
+                            delimiter: slot,
+                            quoted: quoted_slot,
+                            ..
+                        } = &mut self.tokens[index].kind
+                        {
+                            *slot = delimiter;
+                            *quoted_slot = quoted;
+                        }
+                        continue;
+                    }
                     let word = self.scan_word()?;
                     self.tokens.push(Token {
                         kind: TokenKind::Word(word),
@@ -206,6 +267,28 @@ impl Lexer {
             None => true,
             Some(char) => is_word_break(char),
         }
+    }
+
+    fn scan_test_word(&mut self) -> Result<Word, LexError> {
+        let mut parts = Vec::new();
+
+        while let Some(char) = self.current() {
+            if char.is_whitespace() {
+                break;
+            }
+            match char {
+                '\'' => parts.push(Part::Single(self.scan_single()?)),
+                '"' => parts.push(Part::Double(self.scan_double()?)),
+                '\\' => self.scan_escape(&mut parts)?,
+                '$' => parts.push(self.scan_dollar()),
+                _ => {
+                    push_literal(&mut parts, char);
+                    self.pos += 1;
+                }
+            }
+        }
+
+        Ok(Word { parts })
     }
 
     fn scan_word(&mut self) -> Result<Word, LexError> {
@@ -348,10 +431,76 @@ impl Lexer {
         self.pos += 1;
 
         if self.current() == Some('<') {
-            return Err(LexError::new("unsupported syntax: heredoc", start, false));
+            let strip = self.peek() == Some('-');
+            self.pos += if strip { 2 } else { 1 };
+            let index = self.tokens.len();
+            self.push_at(
+                TokenKind::RedirHere {
+                    fd,
+                    strip,
+                    delimiter: String::new(),
+                    quoted: false,
+                    body: String::new(),
+                },
+                start,
+            );
+            self.pending_heredocs.push(index);
+            self.here_awaiting = Some(index);
+            return Ok(());
         }
 
         self.push_at(TokenKind::RedirIn(Some(fd.unwrap_or(0))), start);
+        Ok(())
+    }
+
+    fn read_heredoc_bodies(&mut self) -> Result<(), LexError> {
+        let pending = std::mem::take(&mut self.pending_heredocs);
+
+        for index in pending {
+            let (strip, delimiter) = match &self.tokens.get(index).map(|token| &token.kind) {
+                Some(TokenKind::RedirHere {
+                    strip, delimiter, ..
+                }) => (*strip, delimiter.clone()),
+                _ => continue,
+            };
+
+            let mut body = String::new();
+            loop {
+                if self.pos >= self.chars.len() {
+                    return Err(LexError::new("unclosed heredoc", self.pos, true));
+                }
+
+                let mut end = self.pos;
+                while end < self.chars.len() && self.chars[end] != '\n' {
+                    end += 1;
+                }
+                let line: String = self.chars[self.pos..end].iter().collect();
+                let candidate = if strip {
+                    line.trim_start_matches('\t')
+                } else {
+                    &line
+                };
+
+                self.pos = end;
+                if candidate == delimiter {
+                    if self.pos < self.chars.len() {
+                        self.pos += 1;
+                    }
+                    break;
+                }
+
+                body.push_str(candidate);
+                body.push('\n');
+                if self.pos < self.chars.len() {
+                    self.pos += 1;
+                }
+            }
+
+            if let TokenKind::RedirHere { body: slot, .. } = &mut self.tokens[index].kind {
+                *slot = body;
+            }
+        }
+
         Ok(())
     }
 
@@ -586,6 +735,53 @@ fn parse_parameter(content: &str) -> Parameter {
         operator: None,
         argument: None,
     }
+}
+
+pub fn heredoc_word(text: &str) -> Word {
+    let mut lexer = Lexer::new(text);
+    let mut parts = Vec::new();
+
+    while let Some(char) = lexer.current() {
+        match char {
+            '$' => parts.push(lexer.scan_dollar()),
+            '\\' => match lexer.peek() {
+                Some(next @ ('$' | '`' | '\\')) => {
+                    parts.push(Part::Escaped(next.to_string()));
+                    lexer.pos += 2;
+                }
+                Some('\n') => lexer.pos += 2,
+                _ => {
+                    push_literal(&mut parts, '\\');
+                    lexer.pos += 1;
+                }
+            },
+            _ => {
+                push_literal(&mut parts, char);
+                lexer.pos += 1;
+            }
+        }
+    }
+
+    Word { parts }
+}
+
+fn word_text(word: &Word) -> String {
+    let mut text = String::new();
+
+    fn walk(parts: &[Part], out: &mut String) {
+        for part in parts {
+            match part {
+                Part::Literal(value) | Part::Single(value) | Part::Escaped(value) => {
+                    out.push_str(value)
+                }
+                Part::Double(inner) => walk(inner, out),
+                _ => {}
+            }
+        }
+    }
+
+    walk(&word.parts, &mut text);
+    text
 }
 
 fn push_literal(parts: &mut Vec<Part>, char: char) {

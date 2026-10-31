@@ -9,6 +9,7 @@ mod parser;
 mod prompt;
 mod repl;
 mod term;
+mod test_expr;
 mod shell;
 
 fn main() {

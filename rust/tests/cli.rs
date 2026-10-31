@@ -632,3 +632,78 @@ fn reads_commands_from_stdin_when_not_a_tty() {
     let out = child.wait_with_output().expect("wait");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "piped");
 }
+
+#[test]
+fn double_bracket_tests_strings() {
+    assert_eq!(sharky(&["-c", "[[ -n x ]]"]).status.code(), Some(0));
+    assert_eq!(sharky(&["-c", "[[ -z '' ]]"]).status.code(), Some(0));
+}
+
+#[test]
+fn double_bracket_matches_glob_patterns() {
+    assert_eq!(sharky(&["-c", "[[ foo == f* ]]"]).status.code(), Some(0));
+    assert_eq!(sharky(&["-c", "[[ foo != f* ]]"]).status.code(), Some(1));
+}
+
+#[test]
+fn double_bracket_compares_integers() {
+    assert_eq!(sharky(&["-c", "[[ 3 -gt 2 ]]"]).status.code(), Some(0));
+    assert_eq!(sharky(&["-c", "[[ 3 -lt 2 ]]"]).status.code(), Some(1));
+}
+
+#[test]
+fn double_bracket_keeps_quoted_spaces() {
+    assert_eq!(
+        sharky(&["-c", r#"X="a b"; [[ "$X" == "a b" ]]"#])
+            .status
+            .code(),
+        Some(0)
+    );
+}
+
+#[test]
+fn double_bracket_supports_file_tests_and_negation() {
+    let dir = temp_dir();
+    let file = dir.join("thing");
+    std::fs::write(&file, "x").unwrap();
+    let command = format!("[[ -f '{}' ]] && ! [[ -d '{}' ]]", file.display(), file.display());
+    let out = sharky_in(&dir, &["-c", &command]);
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn double_bracket_combines_conditions_with_precedence() {
+    let out = sharky(&["-c", r#"[[ -n x || -n "" ]] && [[ -z "" ]]"#]);
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn heredoc_feeds_stdin() {
+    let out = sharky(&["-c", "cat <<EOF\nhello\nworld\nEOF"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hello\nworld\n");
+}
+
+#[test]
+fn heredoc_expands_variables_by_default() {
+    let out = sharky(&["-c", "X=v; cat <<EOF\nx=$X\nEOF"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "x=v\n");
+}
+
+#[test]
+fn quoted_heredoc_delimiter_keeps_text_literal() {
+    let out = sharky(&["-c", "X=v; cat <<'EOF'\n$X\nEOF"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "$X\n");
+}
+
+#[test]
+fn heredoc_strip_removes_leading_tabs() {
+    let out = sharky(&["-c", "cat <<-EOF\n\tline\n\t\tEOF"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "line\n");
+}
+
+#[test]
+fn heredoc_works_inside_a_pipeline() {
+    let out = sharky(&["-c", "cat <<EOF | wc -l\none\ntwo\nEOF"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "2");
+}

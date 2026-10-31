@@ -5,7 +5,7 @@ implementation; the Ruby v1 tree at the repository root is frozen at tag
 `v1-ruby` and only serves as the behavioural oracle for the differential tests.
 
 Status: the shell runs commands, scripts and an interactive session, with job
-control (`&`, `jobs`, `fg`, `bg`, Ctrl-Z).
+control (`&`, `jobs`, `fg`, `bg`, Ctrl-Z), `[[ ]]` conditionals and heredocs.
 
 ## Build
 

@@ -55,6 +55,7 @@ pub enum Command {
         name: String,
         body: List,
     },
+    Test(Vec<Word>),
     Redirected {
         command: Box<Command>,
         redirects: Vec<Redirect>,
@@ -81,12 +82,13 @@ pub struct Redirect {
     pub target: Option<Word>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum RedirectOp {
     Out,
     Append,
     In,
     Dup(i32),
+    Here { body: String, expand: bool },
 }
 
 pub fn literal(word: &Word) -> Option<String> {

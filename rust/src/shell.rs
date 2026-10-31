@@ -15,6 +15,7 @@ use crate::ast::{
 };
 use crate::arith;
 use crate::exec;
+use crate::test_expr;
 use crate::lexer::{self, ParamOp, Parameter, Part, TokenKind, Word};
 use crate::parser;
 
@@ -64,6 +65,7 @@ enum Action {
     Append(i32, PathBuf),
     Read(i32, PathBuf),
     Dup { from: i32, to: i32 },
+    Here { fd: i32, file: std::fs::File },
 }
 
 impl Shell {
@@ -434,6 +436,19 @@ impl Shell {
                 command,
                 redirects,
             } => self.run_redirected(command, redirects),
+            Command::Test(words) => Flow::Status(self.run_test(words)),
+        }
+    }
+
+    fn run_test(&mut self, words: &[Word]) -> i32 {
+        let mut expand = |word: &Word| self.expand_text_word(word);
+        match test_expr::evaluate(words, &mut expand) {
+            Ok(true) => 0,
+            Ok(false) => 1,
+            Err(message) => {
+                eprintln!("sharky: [[: {message}");
+                2
+            }
         }
     }
 
@@ -738,11 +753,23 @@ impl Shell {
         let mut actions = Vec::new();
 
         for redirect in redirects {
-            match redirect.op {
+            match &redirect.op {
                 RedirectOp::Dup(from) => actions.push(Action::Dup {
-                    from,
+                    from: *from,
                     to: redirect.fd,
                 }),
+                RedirectOp::Here { body, expand } => {
+                    let text = if *expand {
+                        let word = lexer::heredoc_word(body);
+                        self.expand_text_word(&word)
+                    } else {
+                        body.clone()
+                    };
+                    actions.push(Action::Here {
+                        fd: redirect.fd,
+                        file: temp_file(&text)?,
+                    });
+                }
                 op => {
                     let Some(word) = &redirect.target else {
                         return Err("redirect without a target".to_string());
@@ -756,7 +783,7 @@ impl Shell {
                         RedirectOp::Out => Action::Write(redirect.fd, path),
                         RedirectOp::Append => Action::Append(redirect.fd, path),
                         RedirectOp::In => Action::Read(redirect.fd, path),
-                        RedirectOp::Dup(_) => unreachable!(),
+                        RedirectOp::Dup(_) | RedirectOp::Here { .. } => unreachable!(),
                     });
                 }
             }
@@ -1326,6 +1353,7 @@ fn describe_command(command: &Command) -> String {
         }
         Command::Case { .. } => "case ...".to_string(),
         Command::Function { name, .. } => format!("{name}()"),
+        Command::Test(_) => "[[ ... ]]".to_string(),
     }
 }
 
@@ -1356,6 +1384,36 @@ fn flow_status(flow: Flow) -> i32 {
         Flow::Status(code) | Flow::Exit(code) | Flow::Return(code) => code,
         Flow::Break | Flow::Continue => 0,
     }
+}
+
+// shortcut: heredoc bodies go through an unlinked temp file instead of a pipe,
+// so a large body cannot deadlock before the child starts reading.
+fn temp_file(text: &str) -> Result<std::fs::File, String> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let name = format!(
+        "sharky-here-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let path = std::env::temp_dir().join(name);
+
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .map_err(|err| format!("heredoc: {err}"))?;
+    file.write_all(text.as_bytes())
+        .map_err(|err| format!("heredoc: {err}"))?;
+    let _ = std::fs::remove_file(&path);
+    use std::io::Seek;
+    file.seek(std::io::SeekFrom::Start(0))
+        .map_err(|err| format!("heredoc: {err}"))?;
+    Ok(file)
 }
 
 fn move_fd(from: RawFd, to: RawFd) -> Result<(), String> {
@@ -1389,6 +1447,9 @@ fn apply_actions(actions: &[Action]) -> Result<(), String> {
             }
             Action::Dup { from, to } => {
                 move_fd(*from, *to)?;
+            }
+            Action::Here { fd, file } => {
+                move_fd(file.as_raw_fd(), *fd)?;
             }
         }
     }
@@ -1528,7 +1589,7 @@ fn trim_suffix(value: &str, pattern: &str, longest: bool) -> String {
     value.to_string()
 }
 
-fn glob_match(pattern: &str, text: &str) -> bool {
+pub(crate) fn glob_match(pattern: &str, text: &str) -> bool {
     let pattern: Vec<char> = pattern.chars().collect();
     let text: Vec<char> = text.chars().collect();
     glob_chars(&pattern, &text)

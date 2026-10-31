@@ -174,6 +174,8 @@ impl Parser {
             self.parse_case()?
         } else if self.at_word("function") {
             self.parse_function_keyword()?
+        } else if matches!(self.kind(), TokenKind::TestStart) {
+            self.parse_test()?
         } else if matches!(self.kind(), TokenKind::LBrace) {
             Command::Group(self.parse_group()?)
         } else if matches!(self.kind(), TokenKind::LParen) {
@@ -196,6 +198,26 @@ impl Parser {
                 command: Box::new(command),
                 redirects,
             })
+        }
+    }
+
+    fn parse_test(&mut self) -> Result<Command, ParseError> {
+        self.advance();
+        let mut words = Vec::new();
+
+        loop {
+            match self.kind() {
+                TokenKind::Word(word) => {
+                    words.push(word);
+                    self.advance();
+                }
+                TokenKind::TestEnd => {
+                    self.advance();
+                    return Ok(Command::Test(words));
+                }
+                TokenKind::Eof => return Err(ParseError::new("unclosed [[", true)),
+                _ => return Err(self.unexpected()),
+            }
         }
     }
 
@@ -499,6 +521,22 @@ impl Parser {
                 return Ok(Some(Redirect {
                     fd: to,
                     op: RedirectOp::Dup(from),
+                    target: None,
+                }));
+            }
+            TokenKind::RedirHere {
+                fd,
+                body,
+                quoted,
+                ..
+            } => {
+                self.advance();
+                return Ok(Some(Redirect {
+                    fd: fd.unwrap_or(0),
+                    op: RedirectOp::Here {
+                        body,
+                        expand: !quoted,
+                    },
                     target: None,
                 }));
             }

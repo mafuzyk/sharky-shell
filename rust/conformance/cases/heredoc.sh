@@ -1,0 +1,3 @@
+cat <<X
+hello
+X
