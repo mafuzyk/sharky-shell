@@ -14,7 +14,10 @@ fn sharky(args: &[&str]) -> Output {
 fn version_prints_name_and_version() {
     let out = sharky(&["--version"]);
     assert!(out.status.success());
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "sharky 2.0.0");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        format!("sharky {}", env!("CARGO_PKG_VERSION"))
+    );
 }
 
 #[test]

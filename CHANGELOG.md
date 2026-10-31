@@ -4,6 +4,41 @@ All notable changes to sharky are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project uses semantic
 versioning.
 
+## [2.1.0] - 2026-10-31
+
+### Added
+
+- Starship prompt integration (`tide starship on`), including status, command
+  duration and running jobs.
+- Shell options: `set -e`, `set -u`, `set -x`, `set -o pipefail`, `set --` and
+  bare `set`; `trap` EXIT with listing and removal; `read` and `shift`.
+- `[[ =~ ]]`, `-a`, `-L`/`-h` and Ruby-style integer coercion.
+- Indexed arrays, here-strings, `&>`/`&>>`, brace expansion and
+  `${x/pat/repl}`/`${x//pat/repl}`.
+- Builtins `type`, `alias`, `unalias`, `history`, `pwd`, `wait`, `kill`,
+  `z`, `zi` and `reload`.
+- Startup commands (`wake "fastfetch"`) and automatic `PATH` discovery from
+  shell profiles (`tide profile_paths`).
+- First run seeds `~/.config/sharky/config.sharky` and `theme.sharky`.
+
+### Fixed
+
+- Malformed input no longer panics or hangs the parser (`;;&`, `for ;`,
+  `for ((...))`, unclosed `$(`, `$((` and `${`).
+- `&` separates list items on the same line, and background jobs work outside
+  the REPL with process groups.
+- Multi-line prompts such as Starship are drawn once per input line instead of
+  being reprinted on every keystroke.
+- `cd` handles no argument and `-`, updates `PWD`/`OLDPWD`, and records visits
+  for `z`; `$!` reports the last background pid.
+
+## [2.0.0] - 2026-10-28
+
+### Added
+
+- Rust implementation of sharky, replacing the Ruby shell, with static musl
+  releases and AUR packages.
+
 ## [1.0.1] - 2026-10-28
 
 ### Fixed

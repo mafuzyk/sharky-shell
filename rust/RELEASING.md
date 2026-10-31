@@ -1,7 +1,7 @@
-# Releasing sharky 2.0
+# Releasing sharky
 
-The Rust port lives in `rust/` on the `rust` branch. `main` is an ancestor of
-it, so the merge is a fast-forward. Everything below up to the push is local.
+Version numbers live in `rust/Cargo.toml`, `rust/man/sharky.1` and the AUR
+recipes. Bump them and write the `CHANGELOG.md` entry before tagging.
 
 ## 1. Final checks
 
@@ -21,14 +21,14 @@ The differential suite needs a local Ruby v1 checkout; it is skipped when
 ```sh
 cd ..                       # repository root
 git checkout main
-git merge --ff-only rust
-git tag -a v2.0.0 -m "sharky 2.0.0: Rust implementation"
+git merge --ff-only v2.1
+git tag -a v2.1.0 -m "sharky 2.1.0"
 git push origin main
-git push origin v2.0.0
+git push origin v2.1.0
 ```
 
-Pushing is the first irreversible step: it changes the default branch to the
-Rust implementation.
+Pushing is the first irreversible step: it publishes the tag, and the release
+workflow builds the static musl tarball used by `sharky-shell-bin`.
 
 ## 3. Build the packages
 
