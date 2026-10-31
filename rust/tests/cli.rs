@@ -752,3 +752,81 @@ fn c_style_for_is_rejected_cleanly() {
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("syntax error"));
 }
+
+#[test]
+fn cd_without_arguments_uses_home() {
+    let dir = temp_dir();
+    let home = dir.join("home");
+    std::fs::create_dir(&home).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args(["--no-config", "-c", "cd; printf '%s' \"$PWD\""])
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .env("HOME", &home)
+        .current_dir(&dir)
+        .output()
+        .expect("failed to run sharky");
+    let expected = home.canonicalize().unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), expected.display().to_string());
+}
+
+#[test]
+fn startup_sets_pwd_to_the_working_directory() {
+    let dir = temp_dir();
+    let out = sharky_in(&dir, &["-c", "printf '%s' \"$PWD\""]);
+    let expected = dir.canonicalize().unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), expected.display().to_string());
+}
+
+#[test]
+fn cd_updates_pwd_and_oldpwd() {
+    let dir = temp_dir();
+    let sub = dir.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let out = sharky_in(&dir, &["-c", "cd sub; printf '%s|%s' \"$PWD\" \"$OLDPWD\""]);
+    let sub = sub.canonicalize().unwrap();
+    let parent = dir.canonicalize().unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("{}|{}", sub.display(), parent.display())
+    );
+}
+
+#[test]
+fn cd_dash_returns_to_the_previous_directory() {
+    let dir = temp_dir();
+    let sub = dir.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let out = sharky_in(&dir, &["-c", "cd sub; cd -; printf '%s' \"$PWD\""]);
+    let parent = dir.canonicalize().unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), parent.display().to_string());
+}
+
+#[test]
+fn last_background_pid_is_available() {
+    let out = sharky(&["-c", "sleep 0.05 & printf '%s' \"$!\""]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    let pid = text.lines().last().unwrap_or_default();
+    assert!(
+        !pid.is_empty() && pid.chars().all(|char| char.is_ascii_digit()),
+        "unexpected pid in {text:?}"
+    );
+}
+
+#[test]
+fn background_jobs_are_tracked_in_scripts() {
+    let dir = temp_dir();
+    let script = dir.join("jobs.sh");
+    std::fs::write(&script, "sleep 0.05 &\njobs\n").unwrap();
+    let out = sharky_in(&dir, &["--no-config", script.to_str().unwrap()]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(text.contains("[1]"), "unexpected jobs output {text:?}");
+    assert!(text.contains("sleep 0.05"), "unexpected jobs output {text:?}");
+}

@@ -34,6 +34,7 @@ pub struct Shell {
     jobs: Vec<Job>,
     next_job: usize,
     job_pgid: Option<Pid>,
+    last_bg_pid: Option<Pid>,
     colors: HashMap<String, String>,
     styles: HashMap<String, String>,
 }
@@ -79,9 +80,10 @@ impl Shell {
             })
             .collect();
 
-        Shell {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        let mut shell = Shell {
             env,
-            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+            cwd: cwd.clone(),
             last_status: 0,
             funcs: HashMap::new(),
             positional: Vec::new(),
@@ -94,9 +96,12 @@ impl Shell {
             jobs: Vec::new(),
             next_job: 1,
             job_pgid: None,
+            last_bg_pid: None,
             colors: HashMap::new(),
             styles: HashMap::new(),
-        }
+        };
+        shell.set_var("PWD", cwd.display().to_string());
+        shell
     }
 
     pub fn load_config(&mut self, no_config: bool) {
@@ -288,23 +293,21 @@ impl Shell {
         // SAFETY: the child runs shell code and exits without unwinding.
         match unsafe { fork() } {
             Ok(ForkResult::Parent { child }) => {
-                if self.interactive {
-                    let id = self.next_job;
-                    self.next_job += 1;
-                    println!("[{id}] {child}");
-                    self.jobs.push(Job {
-                        id,
-                        pgid: child,
-                        pids: vec![child],
-                        command: describe_and_or(and_or),
-                        stopped: false,
-                    });
-                }
+                let _ = setpgid(child, child);
+                let id = self.next_job;
+                self.next_job += 1;
+                self.last_bg_pid = Some(child);
+                println!("[{id}] {child}");
+                self.jobs.push(Job {
+                    id,
+                    pgid: child,
+                    pids: vec![child],
+                    command: describe_and_or(and_or),
+                    stopped: false,
+                });
             }
             Ok(ForkResult::Child) => {
-                if self.interactive {
-                    let _ = setpgid(Pid::from_raw(0), Pid::from_raw(0));
-                }
+                let _ = setpgid(Pid::from_raw(0), Pid::from_raw(0));
                 reset_child_signals();
                 self.job_pgid = Some(getpid());
                 let code = flow_status(self.run_and_or(and_or));
@@ -912,6 +915,12 @@ impl Shell {
         match name {
             "?" => return self.last_status.to_string(),
             "#" => return self.positional.len().to_string(),
+            "!" => {
+                return self
+                    .last_bg_pid
+                    .map(|pid| pid.to_string())
+                    .unwrap_or_default();
+            }
             "@" | "*" => return self.positional.join(" "),
             _ => {}
         }
@@ -1112,14 +1121,32 @@ impl Shell {
     }
 
     fn cd(&mut self, target: Option<&str>) -> i32 {
-        let Some(target) = target else {
-            eprintln!("sharky: cd: missing operand");
-            return 1;
+        let target = match target {
+            None | Some("") => {
+                let home = self.var("HOME");
+                if home.is_empty() {
+                    eprintln!("sharky: cd: HOME not set");
+                    return 1;
+                }
+                home
+            }
+            Some("-") => {
+                let old = self.var("OLDPWD");
+                if old.is_empty() {
+                    eprintln!("sharky: cd: OLDPWD not set");
+                    return 1;
+                }
+                old
+            }
+            Some(path) => path.to_string(),
         };
 
-        match std::env::set_current_dir(target) {
+        let previous = self.cwd.clone();
+        match std::env::set_current_dir(&target) {
             Ok(()) => {
                 self.cwd = std::env::current_dir().unwrap_or_else(|_| self.cwd.clone());
+                self.set_var("OLDPWD", previous.display().to_string());
+                self.set_var("PWD", self.cwd.display().to_string());
                 0
             }
             Err(err) => {
