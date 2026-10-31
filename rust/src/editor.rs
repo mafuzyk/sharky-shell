@@ -30,8 +30,11 @@ impl Editor {
         self.index = shell.history_entries().len();
         self.draft.clear();
 
+        let prompt_width = last_line_width(prompt);
+        term::write_stdout(prompt)?;
+
         loop {
-            self.render(prompt, &buffer, cursor)?;
+            self.render_input(&buffer, cursor, prompt_width)?;
 
             match term::read_key()? {
                 Key::Enter => {
@@ -53,6 +56,7 @@ impl Editor {
                 }
                 Key::Ctrl('l') => {
                     term::write_stdout("\x1b[2J\x1b[H")?;
+                    term::write_stdout(prompt)?;
                 }
                 Key::Ctrl('a') | Key::Home => cursor = 0,
                 Key::Ctrl('e') | Key::End => cursor = buffer.len(),
@@ -126,19 +130,71 @@ impl Editor {
         *cursor = buffer.len();
     }
 
-    fn render(&self, prompt: &str, buffer: &[char], cursor: usize) -> std::io::Result<()> {
-        let mut out = String::from("\r");
-        out.push_str(prompt);
-        out.extend(buffer.iter());
-        out.push_str("\x1b[K");
+    fn render_input(&self, buffer: &[char], cursor: usize, prompt_width: usize) -> std::io::Result<()> {
+        let columns = term::width().max(1);
+        let prompt_row = prompt_width / columns;
+        let cursor_row = (prompt_width + cursor) / columns;
 
-        let back = buffer.len().saturating_sub(cursor);
-        if back > 0 {
-            out.push_str(&format!("\x1b[{back}D"));
+        let mut out = String::new();
+        if cursor_row > prompt_row {
+            out.push_str(&format!("\x1b[{}A", cursor_row - prompt_row));
+        }
+        out.push('\r');
+        let column = prompt_width % columns;
+        if column > 0 {
+            out.push_str(&format!("\x1b[{column}C"));
+        }
+        out.push_str("\x1b[J");
+        out.extend(buffer.iter());
+
+        let end_row = (prompt_width + buffer.len()) / columns;
+        let end_column = (prompt_width + cursor) % columns;
+        if end_row > cursor_row {
+            out.push_str(&format!("\x1b[{}A", end_row - cursor_row));
+        }
+        out.push('\r');
+        if end_column > 0 {
+            out.push_str(&format!("\x1b[{end_column}C"));
         }
 
         term::write_stdout(&out)
     }
+}
+
+fn last_line_width(prompt: &str) -> usize {
+    let line = prompt.rsplit('\n').next().unwrap_or("");
+    let mut width = 0;
+    let mut chars = line.chars().peekable();
+
+    while let Some(char) = chars.next() {
+        if char != '\x1b' {
+            width += 1;
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
+                for char in chars.by_ref() {
+                    if ('@'..='~').contains(&char) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                while let Some(char) = chars.next() {
+                    if char == '\x07' {
+                        break;
+                    }
+                    if char == '\x1b' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            Some(_) | None => {}
+        }
+    }
+
+    width
 }
 
 fn fallback_line() -> std::io::Result<Line> {

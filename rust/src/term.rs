@@ -58,6 +58,18 @@ pub fn is_tty(fd: i32) -> bool {
     unsafe { libc::isatty(fd) == 1 }
 }
 
+pub fn width() -> usize {
+    // SAFETY: winsize is a plain C struct filled by TIOCGWINSZ on a valid fd.
+    unsafe {
+        let mut size: libc::winsize = std::mem::zeroed();
+        if libc::ioctl(1, libc::TIOCGWINSZ, &mut size) == 0 && size.ws_col > 0 {
+            size.ws_col as usize
+        } else {
+            80
+        }
+    }
+}
+
 pub fn read_key() -> io::Result<Key> {
     let mut byte = [0u8; 1];
     let count = unsafe { libc::read(0, byte.as_mut_ptr() as *mut _, 1) };
