@@ -5,6 +5,8 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub fn run() -> i32 {
     let mut args = std::env::args().skip(1);
     let mut command = None;
+    let mut script: Option<String> = None;
+    let mut script_args = Vec::new();
     let mut no_config = false;
 
     while let Some(arg) = args.next() {
@@ -25,9 +27,16 @@ pub fn run() -> i32 {
                     return 2;
                 }
             },
-            other => {
+            other if other.starts_with('-') => {
                 eprintln!("sharky: unsupported argument: {other}");
                 return 2;
+            }
+            other => {
+                if script.is_some() {
+                    script_args.push(other.to_string());
+                } else {
+                    script = Some(other.to_string());
+                }
             }
         }
     }
@@ -35,9 +44,10 @@ pub fn run() -> i32 {
     let mut shell = Shell::new();
     shell.load_config(no_config);
 
-    match command {
-        Some(source) => shell.run(&source),
-        None => {
+    match (command, script) {
+        (Some(source), _) => shell.run(&source),
+        (None, Some(path)) => shell.run_script(&path, &script_args),
+        (None, None) => {
             eprintln!("sharky: interactive mode is not implemented yet");
             2
         }

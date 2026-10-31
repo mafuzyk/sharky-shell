@@ -25,6 +25,7 @@ pub struct Shell {
     aliases: HashMap<String, String>,
     keybinds: HashMap<String, String>,
     settings: HashMap<String, String>,
+    script: Option<String>,
     colors: HashMap<String, String>,
     styles: HashMap<String, String>,
 }
@@ -70,6 +71,7 @@ impl Shell {
             aliases: HashMap::new(),
             keybinds: HashMap::new(),
             settings: HashMap::new(),
+            script: None,
             colors: HashMap::new(),
             styles: HashMap::new(),
         }
@@ -127,6 +129,20 @@ impl Shell {
             format!("{expanded}:{current}")
         };
         self.set_var("PATH", value);
+    }
+
+    pub fn run_script(&mut self, path: &str, args: &[String]) -> i32 {
+        let source = match std::fs::read_to_string(path) {
+            Ok(source) => source,
+            Err(err) => {
+                eprintln!("sharky: {path}: {err}");
+                return 127;
+            }
+        };
+
+        self.script = Some(path.to_string());
+        self.positional = args.to_vec();
+        self.run(&source)
     }
 
     pub fn run(&mut self, source: &str) -> i32 {
@@ -666,6 +682,7 @@ impl Shell {
             "export" => Some(Flow::Status(self.export(&words[1..]))),
             "unset" => Some(Flow::Status(self.unset(&words[1..]))),
             "set" => Some(Flow::Status(self.set(&words[1..]))),
+            "source" | "." => Some(self.source(&words[1..])),
             _ => None,
         }
     }
@@ -673,7 +690,10 @@ impl Shell {
     pub fn var(&self, name: &str) -> String {
         if !name.is_empty() && name.chars().all(|char| char.is_ascii_digit()) {
             if name == "0" {
-                return "sharky".to_string();
+                return self
+                    .script
+                    .clone()
+                    .unwrap_or_else(|| "sharky".to_string());
             }
             return name
                 .parse::<usize>()
@@ -719,6 +739,34 @@ impl Shell {
             self.env.retain(|(key, _)| key != name);
         }
         0
+    }
+
+    fn source(&mut self, args: &[String]) -> Flow {
+        let Some(path) = args.first() else {
+            eprintln!("sharky: source: filename argument required");
+            return Flow::Status(2);
+        };
+
+        let source = match std::fs::read_to_string(path) {
+            Ok(source) => source,
+            Err(err) => {
+                eprintln!("sharky: {path}: {err}");
+                return Flow::Status(1);
+            }
+        };
+
+        let program = match parser::parse(&source) {
+            Ok(program) => program,
+            Err(err) => {
+                eprintln!("sharky: {}: {}", path, err.message);
+                return Flow::Status(2);
+            }
+        };
+
+        let saved = std::mem::replace(&mut self.positional, args[1..].to_vec());
+        let flow = self.run_program(&program);
+        self.positional = saved;
+        flow
     }
 
     fn set(&mut self, args: &[String]) -> i32 {

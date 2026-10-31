@@ -42,9 +42,9 @@ assert an exit status instead of waiting forever.
 - [x] Parser and AST: `if`, `for`, `while`, `until`, `case`, functions,
       groups, subshells, `!`
 - [ ] `[[ ]]`, `((...))` as commands, heredocs, `&` background lists
-- [ ] `source`, scripts, shebang, positional parameters in scripts
+- [x] `source`, script files, positional parameters in scripts
+- [ ] Interactive shell: REPL, line editor, prompt, history, completion
 - [ ] Job control, signals, `trap`
-- [ ] Interactive: line editor, history, completion, prompt
 - [x] Configuration parser: `config.sharky` and `theme.sharky`
 - [ ] Configuration applied by the interactive shell (prompt, keybinds)
 - [ ] AUR packaging

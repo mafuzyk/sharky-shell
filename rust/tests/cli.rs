@@ -560,3 +560,52 @@ fn quoted_glob_is_not_expanded() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "*.txt");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn runs_a_script_file_with_positional_arguments() {
+    let dir = temp_dir();
+    let script = dir.join("hello.sh");
+    std::fs::write(&script, "printf '%s|%s' \"$1\" \"$#\"\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .arg(&script)
+        .arg("hi")
+        .arg("there")
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .output()
+        .expect("failed to run sharky");
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi|2");
+}
+
+#[test]
+fn script_exit_status_propagates() {
+    let dir = temp_dir();
+    let script = dir.join("fail.sh");
+    std::fs::write(&script, "printf a\nexit 4\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .arg(&script)
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .output()
+        .expect("failed to run sharky");
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(out.status.code(), Some(4));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "a");
+}
+
+#[test]
+fn source_runs_in_the_current_shell() {
+    let dir = temp_dir();
+    std::fs::write(dir.join("lib.sh"), "X=fromlib\n").unwrap();
+    let out = sharky_in(&dir, &["-c", r#". ./lib.sh; printf '%s' "$X""#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "fromlib");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn source_passes_positional_arguments() {
+    let dir = temp_dir();
+    std::fs::write(dir.join("lib.sh"), "printf '%s' \"$1\"\n").unwrap();
+    let out = sharky_in(&dir, &["-c", r#"source ./lib.sh hi"#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi");
+    std::fs::remove_dir_all(&dir).ok();
+}
