@@ -1,0 +1,24 @@
+// Sharky ~ under the sea
+
+// Palette
+coral abyss #071923
+coral foam #E4F5F4
+coral sea #35B8C5
+coral kelp #8CCFA8
+coral danger #FF8F80
+
+// Prompt
+wave prompt "{cwd} ❯ "
+wave prompt.cwd @kelp
+wave prompt.symbol @sea
+
+// Syntax highlighting
+wave command @foam
+wave builtin @sea
+wave string @kelp
+wave variable @sea
+wave error @danger
+
+// Suggestions
+wave suggestion @kelp
+wave selection @sea

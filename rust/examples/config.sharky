@@ -1,0 +1,25 @@
+// Sharky ~ settings
+// One statement per line: instruction property value
+
+// Shell behaviour
+tide greeting off
+tide autosuggest on
+tide highlight on
+tide history 10000
+
+// Environment
+pearl EDITOR "nvim"
+pearl BROWSER "firefox"
+
+// Extra PATH entries, prepended in order
+current "~/.cargo/bin"
+current "~/.local/bin"
+
+// Aliases
+reef ll "ls -lah"
+reef gs "git status"
+reef cls "clear"
+
+// Key bindings
+anchor ctrl+r history_search
+anchor tab complete

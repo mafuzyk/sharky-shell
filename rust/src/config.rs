@@ -59,7 +59,12 @@ pub fn load(dir: &Path) -> Result<Config, ConfigError> {
         let Ok(source) = std::fs::read_to_string(&path) else {
             continue;
         };
-        let parsed = parse(&source, &path.display().to_string())?;
+        let file = path.display().to_string();
+        let parsed = if name == "theme.sharky" {
+            parse_theme(&source, &file)?
+        } else {
+            parse(&source, &file)?
+        };
         merge(&mut config, parsed);
     }
 
@@ -120,14 +125,12 @@ fn validate(config: &Config, file: &str) -> Result<(), ConfigError> {
                     });
                 }
             }
-            "history" => {
-                if value.parse::<usize>().is_err() {
-                    return Err(ConfigError {
-                        file: file.to_string(),
-                        line: 0,
-                        message: format!("tide history expects a number, found '{value}'"),
-                    });
-                }
+            "history" if value.parse::<usize>().is_err() => {
+                return Err(ConfigError {
+                    file: file.to_string(),
+                    line: 0,
+                    message: format!("tide history expects a number, found '{value}'"),
+                });
             }
             _ => {}
         }
@@ -367,6 +370,15 @@ wave command @sea
     fn rejects_a_boolean_that_is_not_on_or_off() {
         let error = parse("tide greeting yes", "config.sharky").unwrap_err();
         assert!(error.message.contains("expects on or off"));
+    }
+
+    #[test]
+    fn shipped_examples_are_valid() {
+        for name in ["examples/config.sharky", "examples/theme.sharky"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(name);
+            let source = std::fs::read_to_string(&path).expect("example must exist");
+            parse(&source, name).unwrap_or_else(|error| panic!("{error}"));
+        }
     }
 
     #[test]
