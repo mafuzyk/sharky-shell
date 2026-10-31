@@ -24,6 +24,10 @@ pub enum TokenKind {
     RedirAppend(Option<i32>),
     RedirIn(Option<i32>),
     RedirDup(i32, i32),
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
     Newline,
     Eof,
 }
@@ -108,6 +112,22 @@ impl Lexer {
                     }
                 }
                 ' ' | '\t' => self.pos += 1,
+                '(' => {
+                    self.push(TokenKind::LParen);
+                    self.pos += 1;
+                }
+                ')' => {
+                    self.push(TokenKind::RParen);
+                    self.pos += 1;
+                }
+                '{' if delimiter_after(self.peek()) => {
+                    self.push(TokenKind::LBrace);
+                    self.pos += 1;
+                }
+                '}' if delimiter_after(self.peek()) => {
+                    self.push(TokenKind::RBrace);
+                    self.pos += 1;
+                }
                 '>' => self.scan_output_redirect(None)?,
                 '<' => self.scan_input_redirect(None)?,
                 char if char.is_ascii_digit() => self.scan_number_redirect()?,
@@ -355,6 +375,17 @@ impl Lexer {
                 self.pos += 1;
                 Part::Variable(char.to_string())
             }
+            Some(char) if char.is_ascii_digit() => {
+                let mut name = String::new();
+                while let Some(char) = self.current() {
+                    if !char.is_ascii_digit() {
+                        break;
+                    }
+                    name.push(char);
+                    self.pos += 1;
+                }
+                Part::Variable(name)
+            }
             Some(char) if is_name_start(char) => {
                 let mut name = String::new();
                 while let Some(char) = self.current() {
@@ -376,6 +407,13 @@ fn push_literal(parts: &mut Vec<Part>, char: char) {
         text.push(char);
     } else {
         parts.push(Part::Literal(char.to_string()));
+    }
+}
+
+fn delimiter_after(char: Option<char>) -> bool {
+    match char {
+        None => true,
+        Some(char) => is_word_break(char),
     }
 }
 

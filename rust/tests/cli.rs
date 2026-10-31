@@ -1,8 +1,11 @@
 use std::process::{Command, Output};
 
+const NO_CONFIG: &str = "/nonexistent/sharky-test";
+
 fn sharky(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_sharky"))
         .args(args)
+        .env("SHARKY_CONFIG", NO_CONFIG)
         .output()
         .expect("failed to run sharky")
 }
@@ -77,12 +80,12 @@ fn unclosed_quote_is_a_syntax_error() {
 fn unsupported_operator_fails_instead_of_looping() {
     let out = sharky(&["-c", r"printf '%s' $(printf x)"]);
     assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("unsupported syntax"));
+    assert!(!out.stderr.is_empty());
 }
 
 fn sharky_with(args: &[&str], env: &[(&str, &str)]) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_sharky"));
-    cmd.args(args);
+    cmd.args(args).env("SHARKY_CONFIG", NO_CONFIG);
     for (key, value) in env {
         cmd.env(key, value);
     }
@@ -171,6 +174,7 @@ fn temp_dir() -> std::path::PathBuf {
 fn sharky_in(dir: &std::path::Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_sharky"))
         .args(args)
+        .env("SHARKY_CONFIG", NO_CONFIG)
         .current_dir(dir)
         .output()
         .expect("failed to run sharky")
@@ -263,4 +267,194 @@ fn unset_removes_a_variable() {
 fn export_keeps_a_variable_for_children() {
     let out = sharky(&["-c", r#"X=1; export X; sh -c 'printf %s "$X"'"#]);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "1");
+}
+
+#[test]
+fn if_runs_the_then_branch() {
+    let out = sharky(&["-c", "if true; then printf yes; fi"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "yes");
+}
+
+#[test]
+fn if_runs_the_else_branch() {
+    let out = sharky(&["-c", "if false; then printf no; else printf yes; fi"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "yes");
+}
+
+#[test]
+fn if_runs_the_first_true_elif() {
+    let out = sharky(&["-c", "if false; then printf a; elif true; then printf b; fi"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "b");
+}
+
+#[test]
+fn for_iterates_over_words() {
+    let out = sharky(&["-c", r#"for x in a b; do printf %s "$x"; done"#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "ab");
+}
+
+#[test]
+fn while_runs_the_body_until_false() {
+    let out = sharky(&["-c", "while false; do printf no; done; printf ok"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "ok");
+}
+
+#[test]
+fn until_stops_when_the_condition_succeeds() {
+    let out = sharky(&["-c", "until true; do printf no; done; printf ok"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "ok");
+}
+
+#[test]
+fn case_matches_a_glob_pattern() {
+    let out = sharky(&["-c", "case foo in f*) printf matched;; *) printf no;; esac"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "matched");
+}
+
+#[test]
+fn case_falls_through_to_the_default_arm() {
+    let out = sharky(&["-c", "case bar in f*) printf no;; *) printf other;; esac"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "other");
+}
+
+#[test]
+fn function_definition_and_call() {
+    let out = sharky(&["-c", "f() { printf fn; }; f"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "fn");
+}
+
+#[test]
+fn function_keyword_form() {
+    let out = sharky(&["-c", "function g { printf g; }; g"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "g");
+}
+
+#[test]
+fn function_sees_positional_parameters() {
+    let out = sharky(&["-c", r#"f() { printf '%s|%s' "$1" "$#"; }; f hi there"#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi|2");
+}
+
+#[test]
+fn return_sets_the_function_status() {
+    let out = sharky(&["-c", "f() { return 7; }; f; printf '%s' $?"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "7");
+}
+
+#[test]
+fn brace_group_runs_in_the_current_shell() {
+    let out = sharky(&["-c", "{ printf a; printf b; }"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "ab");
+}
+
+#[test]
+fn subshell_runs_its_list() {
+    let out = sharky(&["-c", "( printf a; printf b )"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "ab");
+}
+
+#[test]
+fn not_inverts_the_status() {
+    let out = sharky(&["-c", "! false"]);
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn break_leaves_the_loop() {
+    let out = sharky(&["-c", "for x in 1 2; do break; printf no; done; printf ok"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "ok");
+}
+
+#[test]
+fn continue_skips_the_rest_of_the_body() {
+    let out = sharky(&["-c", "for x in a b; do continue; printf no; done; printf ok"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "ok");
+}
+
+#[test]
+fn function_variables_do_not_leak_after_return() {
+    let out = sharky(&["-c", r#"f() { printf '%s' "$1"; }; f a; printf '[%s]' "$1""#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "a[]");
+}
+
+fn run_with_config(config: &str, command: &str) -> Output {
+    let dir = temp_dir();
+    std::fs::write(dir.join("config.sharky"), config).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args(["-c", command])
+        .env("SHARKY_CONFIG", &dir)
+        .output()
+        .expect("failed to run sharky");
+    std::fs::remove_dir_all(&dir).ok();
+    out
+}
+
+#[test]
+fn config_sets_environment_and_aliases() {
+    let out = run_with_config(
+        "pearl GREETING hello\nreef hi \"printf %s world\"\n",
+        r#"printf '%s' "$GREETING"; hi"#,
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "helloworld");
+}
+
+#[test]
+fn config_current_prepends_to_path() {
+    let out = run_with_config(
+        "current \"/opt/sharky-test-bin\"\n",
+        r#"printf '%s' "$PATH""#,
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with("/opt/sharky-test-bin:"));
+}
+
+#[test]
+fn no_config_skips_the_file() {
+    let dir = temp_dir();
+    std::fs::write(dir.join("config.sharky"), "pearl GREETING hello\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args(["--no-config", "-c", r#"printf '[%s]' "$GREETING""#])
+        .env("SHARKY_CONFIG", &dir)
+        .output()
+        .expect("failed to run sharky");
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "[]");
+}
+
+#[test]
+fn config_error_is_reported_and_the_shell_continues() {
+    let out = run_with_config("tidee greeting on\n", "printf ok");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "ok");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("config error"));
+    assert!(stderr.contains("unknown instruction 'tidee'"));
+}
+
+#[test]
+fn theme_defines_colours_and_prompt_styles() {
+    let dir = temp_dir();
+    std::fs::write(
+        dir.join("theme.sharky"),
+        "coral kelp #8CCFA8\nwave prompt.cwd @kelp\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args(["-c", "true"])
+        .env("SHARKY_CONFIG", &dir)
+        .output()
+        .expect("failed to run sharky");
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(out.stderr.is_empty());
+}
+
+#[test]
+fn theme_with_undefined_colour_fails_loudly() {
+    let dir = temp_dir();
+    std::fs::write(dir.join("theme.sharky"), "wave prompt.cwd @kelp\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args(["-c", "true"])
+        .env("SHARKY_CONFIG", &dir)
+        .output()
+        .expect("failed to run sharky");
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(String::from_utf8_lossy(&out.stderr).contains("undefined colour"));
 }

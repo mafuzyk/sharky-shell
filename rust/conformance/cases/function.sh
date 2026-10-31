@@ -1,0 +1,1 @@
+f() { printf fn; }; f

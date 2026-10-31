@@ -43,16 +43,31 @@ assert an exit status instead of waiting forever.
 - [ ] `source`, scripts, shebang, positional parameters
 - [ ] Job control, signals, `trap`
 - [ ] Interactive: line editor, history, completion, prompt
-- [ ] Configuration (see below)
+- [x] Configuration parser: `config.sharky` and `theme.sharky`
+- [ ] Configuration applied by the interactive shell (prompt, keybinds)
 - [ ] AUR packaging
 
 ## Decisions
 
-- **Configuration is the shell's own language, fish-style.** `config.sh` is
-  executed by the shell at startup; there is no embedded interpreter and no
-  separate config DSL. Builtins such as `set`, `alias`, `abbr`, `bind` and
-  `complete` configure the session, and the prompt is a function
-  (`function prompt; ...; end`). This keeps one grammar and one parser.
+- **Configuration is a small declarative language, not command syntax.**
+  `src/config.rs` owns a parser that never sees shell commands, so a config
+  typo can never execute anything. One statement per line:
+  `instruction property value`, `//` comments, `"quoted values"`, and
+  `@colour` references validated against `coral` definitions.
+
+  | Instruction | Purpose |
+  | --- | --- |
+  | `tide` | shell preferences (`greeting`, `autosuggest`, `highlight`, `history`) |
+  | `pearl` | environment variables |
+  | `current` | prepend a directory to `PATH` |
+  | `reef` | aliases |
+  | `anchor` | key bindings, validated against a fixed action list |
+  | `coral` | named colours |
+  | `wave` | prompt template and highlight styles |
+
+  Unknown instructions, wrong arity, bad colours, unknown keybind actions and
+  dangling `@colour` references are errors with file and line, reported without
+  stopping the shell.
 - **No async runtime.** A shell is fork/exec plus poll; tokio would fight the
   fork model.
 - **Single-threaded at fork time.** Between `fork` and `exec` only

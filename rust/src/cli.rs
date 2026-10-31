@@ -5,6 +5,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub fn run() -> i32 {
     let mut args = std::env::args().skip(1);
     let mut command = None;
+    let mut no_config = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -16,7 +17,7 @@ pub fn run() -> i32 {
                 print_help();
                 return 0;
             }
-            "--no-config" => {}
+            "--no-config" => no_config = true,
             "-c" => match args.next() {
                 Some(source) => command = Some(source),
                 None => {
@@ -31,8 +32,11 @@ pub fn run() -> i32 {
         }
     }
 
+    let mut shell = Shell::new();
+    shell.load_config(no_config);
+
     match command {
-        Some(source) => Shell::new().run(&source),
+        Some(source) => shell.run(&source),
         None => {
             eprintln!("sharky: interactive mode is not implemented yet");
             2

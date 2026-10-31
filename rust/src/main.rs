@@ -1,6 +1,9 @@
+mod ast;
 mod cli;
+mod config;
 mod exec;
 mod lexer;
+mod parser;
 mod shell;
 
 fn main() {
