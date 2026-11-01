@@ -583,12 +583,25 @@ struct HistorySession {
 }
 
 fn history_session() -> HistorySession {
+    history_session_with(None)
+}
+
+fn history_session_with(config_text: Option<&str>) -> HistorySession {
     let data = std::env::temp_dir().join(format!(
         "sharky-histexpand-{}-{:?}",
         std::process::id(),
         std::thread::current().id()
     ));
     std::fs::create_dir_all(&data).unwrap();
+    let config_dir = data.join("config");
+    let config_env = match config_text {
+        Some(text) => {
+            std::fs::create_dir_all(&config_dir).unwrap();
+            std::fs::write(config_dir.join("config.sharky"), text).unwrap();
+            config_dir.as_os_str().to_owned()
+        }
+        None => std::ffi::OsString::from(NO_CONFIG),
+    };
 
     let pty = openpty(None, None).expect("pty");
     let stdin = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
@@ -599,7 +612,7 @@ fn history_session() -> HistorySession {
         .stdin(stdin)
         .stdout(stdout)
         .stderr(stderr)
-        .env("SHARKY_CONFIG", NO_CONFIG)
+        .env("SHARKY_CONFIG", config_env)
         .env("TERM", "xterm-256color")
         .env("HOME", "/tmp")
         .env("XDG_DATA_HOME", &data)
@@ -688,16 +701,25 @@ fn history_expansion_respects_quotes_and_reports_missing_events() {
     session.run("echo quoted");
 
     let out = session.run("echo '!!'");
-    assert!(!out.contains("echo quoted"), "single quotes expanded: {out:?}");
+    assert!(
+        out.contains("cmdline_url=echo%20%27%21%21%27"),
+        "single quotes expanded: {out:?}"
+    );
     assert!(out.contains("!!"), "single-quoted text missing: {out:?}");
 
     let out = session.run("echo \\!\\!");
-    assert!(!out.contains("echo quoted"), "backslash expanded: {out:?}");
+    assert!(
+        out.contains("cmdline_url=echo%20%5C%21%5C%21"),
+        "backslash expanded: {out:?}"
+    );
     assert!(out.contains("!!"), "escaped text missing: {out:?}");
 
     session.run("echo dqtarget");
     let out = session.run("echo \"!!\"");
-    assert!(out.contains("echo dqtarget"), "double quotes must expand: {out:?}");
+    assert!(
+        out.contains("cmdline_url=echo%20%22echo%20dqtarget%22"),
+        "double quotes must expand: {out:?}"
+    );
 
     let out = session.run("!doesnotexist");
     assert!(out.contains("event not found"), "missing error: {out:?}");
@@ -706,13 +728,19 @@ fn history_expansion_respects_quotes_and_reports_missing_events() {
 
     session.run("set +H");
     let out = session.run("echo !!");
-    assert!(!out.contains("echo quoted"), "set +H did not disable: {out:?}");
+    assert!(
+        out.contains("cmdline_url=echo%20%21%21"),
+        "set +H did not disable: {out:?}"
+    );
 
     session.run("set -H");
     let out = session.run("echo reenabled");
     assert!(out.contains("reenabled"), "echo reenabled output: {out:?}");
     let out = session.run("!!");
-    assert!(out.contains("echo reenabled"), "set -H did not re-enable: {out:?}");
+    assert!(
+        out.contains("cmdline_url=echo%20reenabled"),
+        "set -H did not re-enable: {out:?}"
+    );
 
     session.finish();
 }
@@ -837,4 +865,107 @@ fn bracketed_paste_is_disabled_around_prompts() {
     assert!(seen.contains("\u{1b}[?2004h"), "paste never enabled: {seen:?}");
     assert!(seen.contains("\u{1b}[?2004l"), "paste never disabled: {seen:?}");
     session.finish();
+}
+
+
+#[test]
+fn autosuggest_shows_a_ghost_and_right_accepts_it() {
+    let mut session = history_session();
+    session.run("echo suggested");
+
+    let _ = session.writer.write_all(b"echo sug");
+    let seen = read_until(
+        session.master.as_raw_fd(),
+        "gested",
+        Duration::from_secs(5),
+    );
+    assert!(seen.contains("gested"), "no ghost text: {seen:?}");
+    assert!(!seen.contains("133;C"), "ghost ran a command: {seen:?}");
+
+    let _ = session.writer.write_all(b"\x1b[C");
+    std::thread::sleep(Duration::from_millis(50));
+    let _ = session.writer.write_all(b"\x03");
+    let out = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    assert!(!out.contains("133;C"), "accepting ran the command: {out:?}");
+
+    let _ = session.writer.write_all(b"echo sug");
+    read_until(session.master.as_raw_fd(), "gested", Duration::from_secs(5));
+    let _ = session.writer.write_all(b"\x1b[F");
+    let out = read_until(
+        session.master.as_raw_fd(),
+        "echo suggested",
+        Duration::from_secs(5),
+    );
+    assert!(out.contains("echo suggested"), "End did not accept: {out:?}");
+    let _ = session.writer.write_all(b"\x03");
+    let _ = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    session.finish();
+}
+
+#[test]
+fn autosuggest_off_shows_no_ghost() {
+    let mut session = history_session_with(Some("tide autosuggest off\n"));
+    session.run("echo suggested");
+    let _ = session.writer.write_all(b"echo sug");
+    let seen = read_until(
+        session.master.as_raw_fd(),
+        "echo sug",
+        Duration::from_secs(5),
+    );
+    std::thread::sleep(Duration::from_millis(100));
+    let extra = read_until(
+        session.master.as_raw_fd(),
+        "gested",
+        Duration::from_millis(200),
+    );
+    let _ = session.writer.write_all(b"\x03");
+    let _ = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    session.finish();
+    assert!(!seen.contains("gested"), "ghost with autosuggest off: {seen:?}");
+    assert!(extra.is_empty(), "ghost with autosuggest off: {extra:?}");
+}
+
+#[test]
+fn autosuggest_is_silent_mid_line() {
+    let mut session = history_session();
+    session.run("echo suggested");
+    let _ = session.writer.write_all(b"echo sug");
+    read_until(
+        session.master.as_raw_fd(),
+        "gested",
+        Duration::from_secs(5),
+    );
+    // Drain the ghost redraws already queued, then move the cursor and look
+    // at the fresh redraw only.
+    read_until(
+        session.master.as_raw_fd(),
+        "\u{0}",
+        Duration::from_millis(100),
+    );
+    let _ = session.writer.write_all(b"\x1b[D");
+    let extra = read_until(
+        session.master.as_raw_fd(),
+        "\u{0}",
+        Duration::from_millis(300),
+    );
+    let _ = session.writer.write_all(b"\x03");
+    let _ = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    session.finish();
+    assert!(!extra.contains("gested"), "ghost mid-line: {extra:?}");
 }

@@ -104,7 +104,7 @@ pub fn display_cwd(shell: &Shell) -> String {
     cwd
 }
 
-fn painted(shell: &Shell, key: &str, text: &str) -> String {
+pub(crate) fn painted(shell: &Shell, key: &str, text: &str) -> String {
     if !shell.colour_enabled() || text.is_empty() {
         return text.to_string();
     }

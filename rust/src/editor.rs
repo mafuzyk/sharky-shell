@@ -1,3 +1,4 @@
+use crate::prompt;
 use crate::shell::Shell;
 use crate::term::{self, Key};
 
@@ -36,7 +37,12 @@ impl Editor {
         term::write_stdout(prompt)?;
 
         loop {
-            self.render_input(&buffer, cursor, prompt_width)?;
+            let suggestion = autosuggest(shell, &buffer, cursor, prompt_width);
+            let ghost = suggestion
+                .as_deref()
+                .map(|text| prompt::painted(shell, "suggestion", text))
+                .unwrap_or_default();
+            self.render_input(&buffer, cursor, prompt_width, &ghost)?;
 
             let key = term::read_key()?;
 
@@ -103,7 +109,17 @@ impl Editor {
                     }
                 }
                 Key::Ctrl('a') | Key::Home => cursor = line_start(&buffer, cursor),
-                Key::Ctrl('e') | Key::End => cursor = line_end(&buffer, cursor),
+                Key::Ctrl('e') | Key::End => {
+                    let end = line_end(&buffer, cursor);
+                    if end == cursor && cursor == buffer.len() {
+                        if let Some(suffix) = &suggestion {
+                            buffer.extend(suffix.chars());
+                            cursor = buffer.len();
+                        }
+                    } else {
+                        cursor = end;
+                    }
+                }
                 Key::Ctrl('u') => {
                     buffer.drain(..cursor);
                     cursor = 0;
@@ -121,7 +137,16 @@ impl Editor {
                     cursor = start;
                 }
                 Key::Left => cursor = cursor.saturating_sub(1),
-                Key::Right => cursor = (cursor + 1).min(buffer.len()),
+                Key::Right => {
+                    if cursor == buffer.len() {
+                        if let Some(suffix) = &suggestion {
+                            buffer.extend(suffix.chars());
+                            cursor = buffer.len();
+                        }
+                    } else {
+                        cursor += 1;
+                    }
+                }
                 Key::Backspace => {
                     if cursor > 0 {
                         buffer.remove(cursor - 1);
@@ -192,7 +217,13 @@ impl Editor {
         *cursor = buffer.len();
     }
 
-    fn render_input(&self, buffer: &[char], cursor: usize, prompt_width: usize) -> std::io::Result<()> {
+    fn render_input(
+        &self,
+        buffer: &[char],
+        cursor: usize,
+        prompt_width: usize,
+        ghost: &str,
+    ) -> std::io::Result<()> {
         let columns = term::width().max(1);
         let (cursor_row, cursor_column) = position(buffer, cursor, columns, prompt_width);
         let (end_row, _) = position(buffer, buffer.len(), columns, prompt_width);
@@ -214,6 +245,7 @@ impl Editor {
                 out.push(*char);
             }
         }
+        out.push_str(ghost);
 
         if end_row > cursor_row {
             out.push_str(&format!("\x1b[{}A", end_row - cursor_row));
@@ -339,6 +371,34 @@ fn redraw_input(
         out.push_str(&format!("\x1b[{cursor_column}C"));
     }
     term::write_stdout(&out)
+}
+
+fn find_suggestion(entries: &[String], buffer: &[char], cursor: usize) -> Option<String> {
+    if buffer.is_empty() || cursor != buffer.len() {
+        return None;
+    }
+    let prefix: String = buffer.iter().collect();
+    entries
+        .iter()
+        .rev()
+        .find(|entry| entry.len() > prefix.len() && entry.starts_with(&prefix))
+        .map(|entry| entry[prefix.len()..].to_string())
+}
+
+fn autosuggest(shell: &Shell, buffer: &[char], cursor: usize, prompt_width: usize) -> Option<String> {
+    if shell.setting("autosuggest") == Some("off") {
+        return None;
+    }
+    let suffix = find_suggestion(shell.history_entries(), buffer, cursor)?;
+    if suffix.contains('\n') || suffix.contains('\t') {
+        return None;
+    }
+    let columns = term::width().max(1);
+    let (_, column) = position(buffer, cursor, columns, prompt_width);
+    if column + suffix.chars().count() >= columns {
+        return None;
+    }
+    Some(suffix)
 }
 
 fn position(buffer: &[char], index: usize, columns: usize, prompt_width: usize) -> (usize, usize) {
@@ -628,5 +688,35 @@ mod tests {
         assert_eq!(move_line(&text, 3, false), 7);
         assert_eq!(move_line(&text, 1, true), 1);
         assert_eq!(move_line(&text, text.len(), false), text.len());
+    }
+}
+
+#[cfg(test)]
+mod suggestion_tests {
+    use super::find_suggestion;
+
+    fn entries() -> Vec<String> {
+        vec![
+            "echo alpha".to_string(),
+            "ls".to_string(),
+            "echo beta".to_string(),
+        ]
+    }
+
+    #[test]
+    fn finds_the_newest_longer_prefix_match() {
+        let buffer: Vec<char> = "echo".chars().collect();
+        assert_eq!(find_suggestion(&entries(), &buffer, 4), Some(" beta".to_string()));
+
+        let buffer: Vec<char> = "echo beta".chars().collect();
+        assert_eq!(find_suggestion(&entries(), &buffer, 9), None);
+    }
+
+    #[test]
+    fn ignores_mid_line_and_empty_buffers() {
+        let buffer: Vec<char> = "echo".chars().collect();
+        assert_eq!(find_suggestion(&entries(), &buffer, 2), None);
+        assert_eq!(find_suggestion(&entries(), &[], 0), None);
+        assert_eq!(find_suggestion(&entries(), &"zzz".chars().collect::<Vec<_>>(), 3), None);
     }
 }
