@@ -1302,10 +1302,13 @@ fn completion_inserts_a_single_candidate() {
 #[test]
 fn completion_expands_variables() {
     let mut session = history_session();
-    let _ = session.writer.write_all(b"echo $HOM");
+    session.run("SHARKY_COMPLETION_TEST_TARGET=value");
+    let _ = session
+        .writer
+        .write_all(b"echo $SHARKY_COMPLETION_TEST_TAR");
     read_until(
         session.master.as_raw_fd(),
-        "$HOM",
+        "$SHARKY_COMPLETION_TEST_TAR",
         Duration::from_secs(5),
     );
     let _ = session.writer.write_all(b"\t\r");
@@ -1315,7 +1318,7 @@ fn completion_expands_variables() {
         Duration::from_secs(5),
     );
     assert!(
-        out.contains("cmdline_url=echo%20%24HOME"),
+        out.contains("cmdline_url=echo%20%24SHARKY_COMPLETION_TEST_TARGET"),
         "variable not completed: {out:?}"
     );
     session.finish();
