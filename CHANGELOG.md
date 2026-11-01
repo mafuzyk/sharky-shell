@@ -4,6 +4,13 @@ All notable changes to sharky are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project uses semantic
 versioning.
 
+## [3.5.2] - 2026-11-01
+
+### Fixed
+
+- The editor no longer clears the prompt on every redraw. `ESC[J` now starts
+  at the end of the prompt, so prompt icons and text stay visible while typing.
+
 ## [3.5.1] - 2026-11-01
 
 ### Fixed
