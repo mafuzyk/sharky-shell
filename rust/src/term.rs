@@ -97,6 +97,42 @@ pub fn width() -> usize {
     }
 }
 
+pub fn read_paste() -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    loop {
+        let mut byte = [0u8; 1];
+        let count = unsafe { libc::read(0, byte.as_mut_ptr() as *mut _, 1) };
+        if count <= 0 {
+            break;
+        }
+        if byte[0] != 0x1b {
+            bytes.push(byte[0]);
+            continue;
+        }
+        let mut sequence = vec![0x1b];
+        let mut matched = true;
+        for expected in b"[201~" {
+            match read_byte_with_timeout(20)? {
+                Some(next) if next == *expected => sequence.push(next),
+                Some(next) => {
+                    matched = false;
+                    sequence.push(next);
+                    break;
+                }
+                None => {
+                    matched = false;
+                    break;
+                }
+            }
+        }
+        if matched && sequence == b"\x1b[201~" {
+            break;
+        }
+        bytes.extend(sequence);
+    }
+    Ok(bytes)
+}
+
 pub fn read_key() -> io::Result<Key> {
     let mut byte = [0u8; 1];
     let count = unsafe { libc::read(0, byte.as_mut_ptr() as *mut _, 1) };

@@ -33,7 +33,6 @@ impl Editor {
 
         let mut buffer: Vec<char> = Vec::new();
         let mut cursor = 0;
-        let mut pasting = false;
         self.index = shell.history_entries().len();
         self.draft.clear();
 
@@ -78,73 +77,9 @@ impl Editor {
 
             let key = term::read_key()?;
 
-            if pasting {
-                match key {
-                    Key::PasteEnd => pasting = false,
-                    Key::Enter => {
-                        push_undo(&mut undo, &buffer, cursor);
-                        buffer.insert(cursor, '\n');
-                        cursor += 1;
-                    }
-                    Key::Tab => {
-                        push_undo(&mut undo, &buffer, cursor);
-                        buffer.insert(cursor, '\t');
-                        cursor += 1;
-                    }
-                    Key::Backspace => {
-                        if cursor > 0 {
-                            push_undo(&mut undo, &buffer, cursor);
-                            buffer.remove(cursor - 1);
-                            cursor -= 1;
-                        }
-                    }
-                    Key::Delete => {
-                        if cursor < buffer.len() {
-                            push_undo(&mut undo, &buffer, cursor);
-                            buffer.remove(cursor);
-                        }
-                    }
-                    Key::Char(char) => {
-                        push_undo(&mut undo, &buffer, cursor);
-                        buffer.insert(cursor, char);
-                        cursor += 1;
-                    }
-                    Key::Ctrl(char) => {
-                        let code = (char as u32).wrapping_sub('a' as u32).wrapping_add(1);
-                        if let Some(char) = char::from_u32(code) {
-                            push_undo(&mut undo, &buffer, cursor);
-                            buffer.insert(cursor, char);
-                            cursor += 1;
-                        }
-                    }
-                    Key::Alt(char) => {
-                        push_undo(&mut undo, &buffer, cursor);
-                        buffer.insert(cursor, '\x1b');
-                        buffer.insert(cursor + 1, char);
-                        cursor += 2;
-                    }
-                    Key::Up
-                    | Key::Down
-                    | Key::Left
-                    | Key::Right
-                    | Key::Home
-                    | Key::End
-                    | Key::ShiftTab => {
-                        let sequence = match key {
-                            Key::Up => "\x1b[A",
-                            Key::Down => "\x1b[B",
-                            Key::Right => "\x1b[C",
-                            Key::Left => "\x1b[D",
-                            Key::Home => "\x1b[H",
-                            Key::End => "\x1b[F",
-                            Key::ShiftTab => "\x1b[Z",
-                            _ => unreachable!(),
-                        };
-                        push_undo(&mut undo, &buffer, cursor);
-                        insert_text(&mut buffer, &mut cursor, sequence);
-                    }
-                    _ => {}
-                }
+            if key == Key::PasteStart {
+                let bytes = term::read_paste()?;
+                insert_paste(&mut buffer, &mut cursor, &bytes, &mut undo);
                 continue;
             }
 
@@ -302,7 +237,6 @@ impl Editor {
             }
 
             match key {
-                Key::PasteStart => pasting = true,
                 Key::Ctrl('d') => {
                     if buffer.is_empty() {
                         term::write_stdout("\r\n")?;
@@ -1762,6 +1696,30 @@ fn escape_completion(text: &str) -> String {
         out.push(char);
     }
     out
+}
+
+fn insert_paste(
+    buffer: &mut Vec<char>,
+    cursor: &mut usize,
+    bytes: &[u8],
+    undo: &mut Vec<(Vec<char>, usize)>,
+) {
+    push_undo(undo, buffer, *cursor);
+    let text = String::from_utf8_lossy(bytes).replace("\r\n", "\n").replace('\r', "\n");
+    for char in text.chars() {
+        match char {
+            '\u{7f}' | '\u{8}' => {
+                if *cursor > 0 {
+                    buffer.remove(*cursor - 1);
+                    *cursor -= 1;
+                }
+            }
+            char => {
+                buffer.insert(*cursor, char);
+                *cursor += 1;
+            }
+        }
+    }
 }
 
 fn insert_text(buffer: &mut Vec<char>, cursor: &mut usize, text: &str) {
