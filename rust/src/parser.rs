@@ -576,6 +576,20 @@ impl Parser {
                                 AssignmentValue::Array(self.parse_array_elements()?);
                         }
                         simple.assignments.push(assignment);
+                    } else if simple
+                        .words
+                        .first()
+                        .and_then(literal)
+                        .is_some_and(|word| word == "declare")
+                        && let Some(mut assignment) = as_assignment(&word)
+                        && matches!(self.kind(), TokenKind::LParen)
+                    {
+                        assignment.value =
+                            AssignmentValue::Array(self.parse_array_elements()?);
+                        simple.words.push(Word {
+                            parts: vec![Part::Literal(assignment.name.clone())],
+                        });
+                        simple.assignments.push(assignment);
                     } else {
                         simple.words.push(word);
                     }

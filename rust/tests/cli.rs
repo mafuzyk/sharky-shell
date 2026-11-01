@@ -1309,6 +1309,36 @@ fn associative_array_literals_fill_declared_arrays() {
 }
 
 #[test]
+fn declare_accepts_inline_array_literals() {
+    let out = sharky(&[
+        "-c",
+        r#"declare -A a=([x]=1 [y]=2); printf '%s|%s' "${a[x]}" "${a[y]}""#,
+    ]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "1|2");
+
+    let out = sharky(&[
+        "-c",
+        r#"declare -a a=(one two); printf '%s|%s' "${a[0]}" "${a[1]}""#,
+    ]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "one|two");
+}
+
+#[test]
+fn quoted_star_joins_elements_into_one_field() {
+    let out = sharky(&["-c", r#"a=(one two); printf '<%s>' "${a[*]}""#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "<one two>");
+
+    let out = sharky(&["-c", r#"a=(one two three); printf '<%s>' "${a[*]:1}""#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "<two three>");
+
+    let out = sharky(&[
+        "-c",
+        r#"declare -A a; a[b]=2; a[a]=1; printf '<%s>' "${a[*]}""#,
+    ]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "<1 2>");
+}
+
+#[test]
 fn quoted_array_expansion_keeps_one_field_per_element() {
     let out = sharky(&["-c", r#"a=(one two three); printf '<%s>' "${a[@]}""#]);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "<one><two><three>");

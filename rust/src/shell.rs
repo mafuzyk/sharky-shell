@@ -1467,8 +1467,13 @@ impl Shell {
 
         for name in names {
             if assoc {
-                self.arrays.remove(&name);
-                self.assoc.entry(name).or_default();
+                let values = self.arrays.remove(&name).unwrap_or_default();
+                let map = self.assoc.entry(name).or_default();
+                for value in values {
+                    if let Some((key, value)) = assoc_literal(&value) {
+                        map.insert(key, value);
+                    }
+                }
             } else {
                 self.assoc.remove(&name);
                 self.arrays.entry(name).or_default();
@@ -2303,8 +2308,12 @@ impl Shell {
                     if let [Part::Parameter(parameter)] = inner.as_slice()
                         && let Some(values) = self.parameter_elements(parameter)
                     {
-                        for value in values {
-                            fields.field_quoted(&value);
+                        if parameter.index.as_deref() == Some("*") {
+                            fields.field_quoted(&values.join(" "));
+                        } else {
+                            for value in values {
+                                fields.field_quoted(&value);
+                            }
                         }
                     } else {
                         let mut text = String::new();
@@ -2327,8 +2336,12 @@ impl Shell {
                 }
                 Part::Parameter(parameter) => {
                     if let Some(values) = self.parameter_elements(parameter) {
-                        for value in values {
-                            fields.field(&value);
+                        if parameter.index.as_deref() == Some("*") {
+                            fields.push(&values.join(" "), false);
+                        } else {
+                            for value in values {
+                                fields.field(&value);
+                            }
                         }
                     } else {
                         let value = self.parameter_value(parameter);
