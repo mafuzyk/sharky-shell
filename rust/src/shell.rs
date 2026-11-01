@@ -6,8 +6,10 @@ use std::path::{Path, PathBuf};
 use nix::fcntl::OFlag;
 use nix::libc::_exit;
 use nix::sys::signal::{SigHandler, Signal, killpg, signal};
-use nix::sys::wait::WaitStatus;
-use nix::unistd::{ForkResult, Pid, fork, getpid, getpgrp, pipe2, setpgid, tcsetpgrp};
+use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
+use nix::unistd::{
+    ForkResult, Pid, close, fork, getpid, getpgrp, pipe2, setpgid, tcsetpgrp,
+};
 
 use sharky_config::{self as config, Config};
 use crate::ast::{
@@ -49,6 +51,8 @@ pub struct Shell {
     history: Option<History>,
     z: Option<Z>,
     config_dir: Option<PathBuf>,
+    substitution_fds: Vec<i32>,
+    substitution_pids: Vec<Pid>,
     pub exit_requested: Option<i32>,
     jobs: Vec<Job>,
     next_job: usize,
@@ -133,6 +137,8 @@ impl Shell {
             history: None,
             z: None,
             config_dir: None,
+            substitution_fds: Vec::new(),
+            substitution_pids: Vec::new(),
             exit_requested: None,
             jobs: Vec::new(),
             next_job: 1,
@@ -495,10 +501,13 @@ impl Shell {
                 self.errexit_suppressed = true;
                 let flow = self.run_command(&pipeline.commands[0]);
                 self.errexit_suppressed = previous;
+                self.cleanup_substitutions();
                 return flow;
             }
             let flow = self.run_command(&pipeline.commands[0]);
-            return self.errexit_check(flow);
+            let flow = self.errexit_check(flow);
+            self.cleanup_substitutions();
+            return flow;
         }
 
         let links = pipeline.commands.len() - 1;
@@ -569,6 +578,7 @@ impl Shell {
         let command = describe_pipeline(pipeline);
         let pgid = leader.unwrap_or_else(getpgrp);
         let status = self.wait_pipeline(&pids, pgid, command);
+        self.cleanup_substitutions();
         self.errexit_check(Flow::Status(status))
     }
 
@@ -1653,6 +1663,9 @@ impl Shell {
                     let _ = exec::wait(*pid);
                 }
             }
+            for pid in std::mem::take(&mut self.substitution_pids) {
+                let _ = exec::wait(pid);
+            }
             return 0;
         }
 
@@ -2175,6 +2188,10 @@ impl Shell {
                     let value = self.expansion_var(name);
                     fields.push(&value, false);
                 }
+                Part::ProcessSub(source, input) => {
+                    let path = self.process_substitution(source, *input);
+                    fields.push(&path, true);
+                }
                 Part::Parameter(parameter) => {
                     if let Some(values) = self.parameter_elements(parameter) {
                         for value in values {
@@ -2222,6 +2239,9 @@ impl Shell {
                     out.push_str(&value);
                 }
                 Part::Parameter(parameter) => out.push_str(&self.parameter_value(parameter)),
+                Part::ProcessSub(source, input) => {
+                    out.push_str(&self.process_substitution(source, *input))
+                }
                 Part::CmdSub(source) => out.push_str(&self.command_substitution(source)),
                 Part::Arithmetic(source) => match arith::evaluate(source, self) {
                     Ok(value) => out.push_str(&value.to_string()),
@@ -2410,6 +2430,66 @@ impl Shell {
             values = values[start..end].to_vec();
         }
         Some(values)
+    }
+
+    fn process_substitution(&mut self, source: &str, input: bool) -> String {
+        use std::os::fd::{AsRawFd, IntoRawFd};
+
+        let Ok((read, write)) = pipe2(OFlag::empty()) else {
+            return String::new();
+        };
+
+        // SAFETY: the child only dup2s pipe ends, runs shell code and exits.
+        match unsafe { fork() } {
+            Ok(ForkResult::Child) => {
+                let keep = if input {
+                    write.as_raw_fd()
+                } else {
+                    read.as_raw_fd()
+                };
+                let target = if input { 1 } else { 0 };
+                // SAFETY: dup2 and close operate on the pipe fds owned here.
+                unsafe {
+                    let _ = nix::libc::dup2(keep, target);
+                    let _ = nix::libc::close(read.as_raw_fd());
+                    let _ = nix::libc::close(write.as_raw_fd());
+                    // The child only needs stdio; inherited pipeline ends would
+                    // otherwise keep the parent's pipes open and deadlock.
+                    for fd in 3..1024 {
+                        let _ = nix::libc::close(fd);
+                    }
+                }
+                let status = match self.eval(source) {
+                    Ok(code) => code,
+                    Err(err) => {
+                        eprintln!("sharky: {}", err.message);
+                        2
+                    }
+                };
+                unsafe { _exit(status) }
+            }
+            Ok(ForkResult::Parent { child }) => {
+                self.substitution_pids.push(child);
+                let fd = if input {
+                    drop(write);
+                    read.into_raw_fd()
+                } else {
+                    drop(read);
+                    write.into_raw_fd()
+                };
+                self.substitution_fds.push(fd);
+                format!("/dev/fd/{fd}")
+            }
+            Err(_) => String::new(),
+        }
+    }
+
+    fn cleanup_substitutions(&mut self) {
+        for fd in self.substitution_fds.drain(..) {
+            let _ = close(fd);
+        }
+        self.substitution_pids
+            .retain(|pid| matches!(waitpid(*pid, Some(WaitPidFlag::WNOHANG)), Ok(WaitStatus::StillAlive)));
     }
 
     fn command_substitution(&mut self, source: &str) -> String {

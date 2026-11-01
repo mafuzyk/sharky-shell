@@ -1403,3 +1403,29 @@ fn arithmetic_assigns_and_increments_variables() {
         assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{script}");
     }
 }
+
+#[test]
+fn process_substitution_feeds_and_reads_pipes() {
+    let out = sharky(&["-c", "cat <(printf hi)"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi");
+
+    let out = sharky(&["-c", "diff <(printf a) <(printf a)"]);
+    assert_eq!(out.status.code(), Some(0));
+
+    let out = sharky(&["-c", "diff <(printf a) <(printf b)"]);
+    assert_eq!(out.status.code(), Some(1));
+
+    let dir = temp_dir();
+    let script = "printf hi | tee >(cat > out) >/dev/null; wait; cat out";
+    let out = sharky_in(&dir, &["-c", script]);
+    let text = std::fs::read_to_string(dir.join("out")).unwrap_or_default();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(text, "hi");
+    assert_eq!(out.status.code(), Some(0));
+
+    let out = sharky(&["-c", "cat <(cat <(printf nested))"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "nested");
+
+    let out = sharky(&["-c", "cat <(false); printf '|%s' \"$?\""]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "|0");
+}

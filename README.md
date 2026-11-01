@@ -81,6 +81,7 @@ The prompt, `-c` and script files share one grammar:
 | globbing and tilde | `src/*.rs`, `~/bin`, `@(a|b).txt`, `!(tmp)` |
 | pipelines and redirects | `a \| b > out 2>&1`, `cmd &> out`, `cmd &>> out` |
 | heredocs and here-strings | `cat <<EOF` ... `EOF`, `<<-EOF`, `<<'EOF'`, `cat <<< "text"` |
+| process substitution | `diff <(a) <(b)`, `tee >(cat > out)` |
 | lists | `a; b`, `a && b`, `a \|\| b` |
 | options | `set -e`, `set -u`, `set -x`, `set -o pipefail`, `set -- a b` |
 | traps | `trap 'cleanup' EXIT`, `trap -l` |

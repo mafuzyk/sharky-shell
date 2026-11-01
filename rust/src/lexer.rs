@@ -7,6 +7,7 @@ pub enum Part {
     Variable(String),
     Parameter(Box<Parameter>),
     CmdSub(String),
+    ProcessSub(String, bool),
     Arithmetic(String),
     Tilde,
 }
@@ -219,6 +220,8 @@ impl Lexer {
                     self.push(TokenKind::RBrace);
                     self.pos += 1;
                 }
+                '>' if self.peek() == Some('(') => self.scan_process_word()?,
+                '<' if self.peek() == Some('(') => self.scan_process_word()?,
                 '>' => self.scan_output_redirect(None)?,
                 '<' => self.scan_input_redirect(None)?,
                 char if char.is_ascii_digit() => self.scan_number_redirect()?,
@@ -350,7 +353,18 @@ impl Lexer {
     }
 
     fn scan_word(&mut self) -> Result<Word, LexError> {
-        let mut parts = Vec::new();
+        self.scan_word_with_parts(Vec::new())
+    }
+
+    fn scan_process_word(&mut self) -> Result<(), LexError> {
+        let start = self.pos;
+        let part = self.scan_process_substitution(start)?;
+        let word = self.scan_word_with_parts(vec![part])?;
+        self.push_at(TokenKind::Word(word), start);
+        Ok(())
+    }
+
+    fn scan_word_with_parts(&mut self, mut parts: Vec<Part>) -> Result<Word, LexError> {
         let start = self.pos;
 
         while !self.at_word_end() {
@@ -377,7 +391,10 @@ impl Lexer {
             }
         }
 
-        debug_assert!(self.pos > start, "scan_word must consume input");
+        debug_assert!(
+            self.pos > start || !parts.is_empty(),
+            "scan_word must consume input"
+        );
         Ok(Word { parts })
     }
 
@@ -465,6 +482,62 @@ impl Lexer {
         }
         let value = u32::from_str_radix(&digits, 8).unwrap_or(0);
         char::from_u32(value).map(String::from).unwrap_or_default()
+    }
+
+    fn scan_process_substitution(&mut self, start: usize) -> Result<Part, LexError> {
+        let input = self.current() == Some('<');
+        self.pos += 2;
+        let content_start = self.pos;
+        let mut index = self.pos;
+        let mut depth = 1;
+        let mut state = Quote::Normal;
+
+        while index < self.chars.len() {
+            let char = self.chars[index];
+            match state {
+                Quote::Single => {
+                    if char == '\'' {
+                        state = Quote::Normal;
+                    }
+                    index += 1;
+                }
+                Quote::Double => match char {
+                    '\\' => index += 2,
+                    '"' => {
+                        state = Quote::Normal;
+                        index += 1;
+                    }
+                    _ => index += 1,
+                },
+                Quote::Normal => match char {
+                    '\\' => index += 2,
+                    '\'' => {
+                        state = Quote::Single;
+                        index += 1;
+                    }
+                    '"' => {
+                        state = Quote::Double;
+                        index += 1;
+                    }
+                    '(' => {
+                        depth += 1;
+                        index += 1;
+                    }
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            let source: String = self.chars[content_start..index].iter().collect();
+                            self.pos = index + 1;
+                            return Ok(Part::ProcessSub(source, input));
+                        }
+                        index += 1;
+                    }
+                    _ => index += 1,
+                },
+            }
+        }
+
+        Err(LexError::new("unclosed process substitution", start, true))
     }
 
     fn scan_extglob(&mut self, start: usize) -> Result<String, LexError> {
