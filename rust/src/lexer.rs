@@ -32,6 +32,14 @@ pub enum ParamOp {
     TrimSuffixLong,
     Substitute,
     SubstituteAll,
+    Substring,
+    UpperFirst,
+    UpperAll,
+    LowerFirst,
+    LowerAll,
+    Indirect,
+    Names,
+    Keys,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -363,6 +371,92 @@ impl Lexer {
         Ok(Word { parts })
     }
 
+    fn scan_ansi_c(&mut self, start: usize) -> Result<Part, LexError> {
+        self.pos += 1;
+        let mut text = String::new();
+
+        loop {
+            match self.current() {
+                None => return Err(LexError::new("unclosed $' string", start, true)),
+                Some('\'') => {
+                    self.pos += 1;
+                    return Ok(Part::Single(text));
+                }
+                Some('\\') => {
+                    self.pos += 1;
+                    let escaped = self.scan_ansi_escape();
+                    text.push_str(&escaped);
+                }
+                Some(char) => {
+                    text.push(char);
+                    self.pos += 1;
+                }
+            }
+        }
+    }
+
+    fn scan_ansi_escape(&mut self) -> String {
+        let Some(char) = self.current() else {
+            return "\\".to_string();
+        };
+        self.pos += 1;
+
+        match char {
+            'n' => "\n".to_string(),
+            't' => "\t".to_string(),
+            'r' => "\r".to_string(),
+            'a' => "\u{7}".to_string(),
+            'b' => "\u{8}".to_string(),
+            'f' => "\u{c}".to_string(),
+            'v' => "\u{b}".to_string(),
+            'e' | 'E' => "\u{1b}".to_string(),
+            '\\' => "\\".to_string(),
+            '\'' => "'".to_string(),
+            '"' => "\"".to_string(),
+            '?' => "?".to_string(),
+            'x' => self.hex_escape(2, "\\x"),
+            'u' => self.hex_escape(4, "\\u"),
+            'U' => self.hex_escape(8, "\\U"),
+            '0'..='7' => self.octal_escape(char),
+            other => format!("\\{other}"),
+        }
+    }
+
+    fn hex_escape(&mut self, max: usize, fallback: &str) -> String {
+        let mut digits = String::new();
+        while digits.len() < max {
+            match self.current() {
+                Some(char) if char.is_ascii_hexdigit() => {
+                    digits.push(char);
+                    self.pos += 1;
+                }
+                _ => break,
+            }
+        }
+        if digits.is_empty() {
+            return fallback.to_string();
+        }
+        let value = u32::from_str_radix(&digits, 16).unwrap_or(0);
+        char::from_u32(value)
+            .map(String::from)
+            .unwrap_or_else(|| fallback.to_string())
+    }
+
+    fn octal_escape(&mut self, first: char) -> String {
+        let mut digits = String::from(first);
+        while digits.len() < 3 {
+            match self.current() {
+                Some(char @ '0'..='7') => {
+                    digits.push(char);
+                    self.pos += 1;
+                }
+                _ => break,
+            }
+        }
+        let value = u32::from_str_radix(&digits, 8).unwrap_or(0);
+        char::from_u32(value).map(String::from).unwrap_or_default()
+    }
+
     fn scan_single(&mut self) -> Result<String, LexError> {
         let start = self.pos;
         self.pos += 1;
@@ -413,6 +507,10 @@ impl Lexer {
                         self.pos += 1;
                     }
                 },
+                Some('$') if self.peek() == Some('\'') => {
+                    push_literal(&mut parts, '$');
+                    self.pos += 1;
+                }
                 Some('$') => parts.push(self.scan_dollar()?),
                 Some(char) => {
                     push_literal(&mut parts, char);
@@ -596,6 +694,7 @@ impl Lexer {
                 Some(parameter) => Ok(Part::Parameter(Box::new(parameter))),
                 None => Err(LexError::new("unclosed parameter expansion", start, true)),
             },
+            Some('\'') => self.scan_ansi_c(start),
             Some(char @ ('?' | '$' | '!' | '#' | '@' | '*')) => {
                 self.pos += 1;
                 Ok(Part::Variable(char.to_string()))
@@ -745,58 +844,90 @@ enum Quote {
 }
 
 fn parse_parameter(content: &str) -> Parameter {
-    if let Some(rest) = content.strip_prefix('#')
-        && let Some((name, index)) = array_reference(rest)
-    {
-        return Parameter {
-            name,
-            operator: Some(ParamOp::Length),
-            argument: None,
-            index: Some(index),
-        };
+    if let Some(rest) = content.strip_prefix('#') {
+        let (name, index, after) = split_name_index(rest);
+        if after.is_empty() && !name.is_empty() && (index.is_some() || is_parameter_name(&name)) {
+            return Parameter {
+                name,
+                operator: Some(ParamOp::Length),
+                argument: None,
+                index,
+            };
+        }
     }
 
-    if let Some((name, index)) = array_reference(content) {
+    if let Some(rest) = content.strip_prefix('!') {
+        if let Some(prefix) = rest.strip_suffix('*') {
+            return Parameter {
+                name: prefix.to_string(),
+                operator: Some(ParamOp::Names),
+                argument: Some("*".to_string()),
+                index: None,
+            };
+        }
+        if let Some(prefix) = rest.strip_suffix('@') {
+            return Parameter {
+                name: prefix.to_string(),
+                operator: Some(ParamOp::Names),
+                argument: Some("@".to_string()),
+                index: None,
+            };
+        }
+
+        let (name, index, after) = split_name_index(rest);
+        if after.is_empty() && !name.is_empty() {
+            if index.is_some() {
+                return Parameter {
+                    name,
+                    operator: Some(ParamOp::Keys),
+                    argument: None,
+                    index,
+                };
+            }
+            return Parameter {
+                name,
+                operator: Some(ParamOp::Indirect),
+                argument: None,
+                index: None,
+            };
+        }
+    }
+
+    let (name, index, rest) = split_name_index(content);
+    if rest.is_empty() {
         return Parameter {
             name,
             operator: None,
             argument: None,
-            index: Some(index),
-        };
-    }
-
-    if let Some(rest) = content.strip_prefix('#')
-        && !rest.is_empty()
-        && rest.chars().all(|char| char.is_ascii_alphanumeric() || char == '_')
-    {
-        return Parameter {
-            name: rest.to_string(),
-            operator: Some(ParamOp::Length),
-            argument: None,
-            index: None,
+            index,
         };
     }
 
     const OPERATORS: &[(&str, ParamOp)] = &[
+        ("##", ParamOp::TrimPrefixLong),
+        ("%%", ParamOp::TrimSuffixLong),
+        ("^^", ParamOp::UpperAll),
+        (",,", ParamOp::LowerAll),
         (":-", ParamOp::Default),
         (":=", ParamOp::Assign),
         (":?", ParamOp::Error),
         (":+", ParamOp::Alternate),
-        ("##", ParamOp::TrimPrefixLong),
-        ("%%", ParamOp::TrimSuffixLong),
         ("//", ParamOp::SubstituteAll),
-        ("/", ParamOp::Substitute),
+        ("^", ParamOp::UpperFirst),
+        (",", ParamOp::LowerFirst),
         ("#", ParamOp::TrimPrefixShort),
         ("%", ParamOp::TrimSuffixShort),
+        ("/", ParamOp::Substitute),
+        (":", ParamOp::Substring),
     ];
 
     for (operator, kind) in OPERATORS {
-        if let Some(index) = content.find(operator) {
+        if let Some(argument) = rest.strip_prefix(operator) {
             return Parameter {
-                name: content[..index].to_string(),
+                name,
                 operator: Some(*kind),
-                argument: Some(content[index + operator.len()..].to_string()),
-                index: None,
+                argument: Some(argument.to_string()),
+                index,
             };
         }
     }
@@ -809,19 +940,60 @@ fn parse_parameter(content: &str) -> Parameter {
     }
 }
 
-fn array_reference(text: &str) -> Option<(String, String)> {
-    let open = text.find('[')?;
-    if !text.ends_with(']') {
-        return None;
-    }
-    let name = &text[..open];
-    let index = &text[open + 1..text.len() - 1];
+fn is_parameter_name(name: &str) -> bool {
     let mut chars = name.chars();
-    let first = chars.next()?;
-    if !is_name_start(first) || !chars.all(is_name_char) || index.is_empty() {
-        return None;
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if matches!(first, '?' | '$' | '!' | '#' | '@' | '*' | '-') {
+        return chars.next().is_none();
     }
-    Some((name.to_string(), index.to_string()))
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|char| char.is_ascii_alphanumeric() || char == '_')
+}
+
+fn split_name_index(text: &str) -> (String, Option<String>, &str) {
+    let mut end = 0;
+    let mut chars = text.char_indices().peekable();
+
+    if let Some((_, first)) = chars.peek().copied() {
+        if first.is_ascii_digit() {
+            while let Some((index, char)) = chars.peek().copied() {
+                if !char.is_ascii_digit() {
+                    break;
+                }
+                end = index + char.len_utf8();
+                chars.next();
+            }
+        } else if is_name_start(first) {
+            while let Some((index, char)) = chars.peek().copied() {
+                if !is_name_char(char) {
+                    break;
+                }
+                end = index + char.len_utf8();
+                chars.next();
+            }
+        } else if matches!(first, '?' | '$' | '!' | '#' | '@' | '*' | '-') {
+            end = first.len_utf8();
+        }
+    }
+
+    let name = text[..end].to_string();
+    if name.is_empty() {
+        return (name, None, text);
+    }
+
+    let rest = &text[end..];
+    if let Some(inner) = rest.strip_prefix('[')
+        && let Some(close) = inner.find(']')
+    {
+        let index = &inner[..close];
+        if !index.is_empty() {
+            return (name, Some(index.to_string()), &inner[close + 1..]);
+        }
+    }
+
+    (name, None, rest)
 }
 
 pub fn heredoc_word(text: &str) -> Result<Word, LexError> {
@@ -830,6 +1002,10 @@ pub fn heredoc_word(text: &str) -> Result<Word, LexError> {
 
     while let Some(char) = lexer.current() {
         match char {
+            '$' if lexer.peek() == Some('\'') => {
+                push_literal(&mut parts, '$');
+                lexer.pos += 1;
+            }
             '$' => parts.push(lexer.scan_dollar()?),
             '\\' => match lexer.peek() {
                 Some(next @ ('$' | '`' | '\\')) => {

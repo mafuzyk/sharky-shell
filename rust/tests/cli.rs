@@ -1241,3 +1241,62 @@ fn non_interactive_runs_emit_no_terminal_marks() {
     assert!(!String::from_utf8_lossy(&out.stdout).contains("\x1b]"));
     assert!(!String::from_utf8_lossy(&out.stderr).contains("\x1b]"));
 }
+
+#[test]
+fn parameter_substrings_use_offsets_and_lengths() {
+    let cases = [
+        ("x=abcdef; printf '%s' \"${x:2}\"", "cdef"),
+        ("x=abcdef; printf '%s' \"${x:1:3}\"", "bcd"),
+        ("x=abcdef; printf '%s' \"${x: -2}\"", "ef"),
+        ("x=abcdef; printf '%s' \"${x:1:-1}\"", "bcde"),
+        ("set -- a b c; printf '%s' \"${@:2}\"", "b c"),
+    ];
+    for (script, expected) in cases {
+        let out = sharky(&["-c", script]);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{script}");
+    }
+}
+
+#[test]
+fn parameter_case_operators_change_the_value() {
+    let cases = [
+        ("x=hello; printf '%s' \"${x^}\"", "Hello"),
+        ("x=hello; printf '%s' \"${x^^}\"", "HELLO"),
+        ("x=Hello; printf '%s' \"${x,}\"", "hello"),
+        ("x=HeLLo; printf '%s' \"${x,,}\"", "hello"),
+        ("x=1abc; printf '%s' \"${x^}\"", "1abc"),
+    ];
+    for (script, expected) in cases {
+        let out = sharky(&["-c", script]);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{script}");
+    }
+}
+
+#[test]
+fn parameter_indirection_and_name_prefixes() {
+    let out = sharky(&["-c", "name=x; x=value; printf '%s' \"${!name}\""]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "value");
+
+    let out = sharky(&["-c", "prefix_b=2; prefix_a=1; printf '%s' \"${!prefix_@}\""]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "prefix_a prefix_b");
+
+    let out = sharky(&["-c", "a=(x y z); printf '%s' \"${!a[@]}\""]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "0 1 2");
+}
+
+#[test]
+fn ansi_c_quoting_decodes_escapes() {
+    let cases = [
+        ("printf '%s' $'a\\tb'", "a\tb"),
+        ("printf '<%s>' $'a b'", "<a b>"),
+        ("printf '%s' $'it\\'s'", "it's"),
+        ("printf '%s' $'\\x41\\u00e9'", "Aé"),
+        ("printf '%s' $'\\101'", "A"),
+        ("printf '<%s>' \"$'a b'\"", "<$'a b'>"),
+        ("cat <<EOF\n$'x'\nEOF\n", "$'x'\n"),
+    ];
+    for (script, expected) in cases {
+        let out = sharky(&["-c", script]);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{script}");
+    }
+}

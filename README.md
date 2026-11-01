@@ -71,7 +71,8 @@ The prompt, `-c` and script files share one grammar:
 | --- | --- |
 | quotes, escapes, comments | `printf '%s\n' "a b" # comment` |
 | variables | `name=value`, `"$name"`, `${name}` |
-| parameter operators | `${NAME:-default}`, `${#NAME}`, `${NAME#pre}`, `${NAME/pat/repl}`, `${NAME//pat/repl}` |
+| parameter operators | `${NAME:-default}`, `${#NAME}`, `${NAME#pre}`, `${NAME/pat/repl}`, `${NAME//pat/repl}`, `${NAME:1:2}`, `${NAME^^}`, `${!NAME}` |
+| ANSI-C quoting | `$'a\tb'`, `$'\x41\u00e9'` |
 | brace expansion | `file{1..3}.txt`, `a{b,c}d` |
 | indexed arrays | `a=(one two)`, `"${a[1]}"`, `"${a[@]}"`, `"${#a[@]}"` |
 | command substitution | `files=$(ls \| wc -l)` |

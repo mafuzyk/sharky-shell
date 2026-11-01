@@ -2076,6 +2076,19 @@ impl Shell {
             return array.len().to_string();
         }
 
+        if parameter.operator == Some(ParamOp::Keys) && parameter.index.is_some() {
+            return self
+                .arrays
+                .get(&parameter.name)
+                .map(|array| {
+                    (0..array.len())
+                        .map(|index| index.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_default();
+        }
+
         let no_nounset = matches!(
             parameter.operator,
             Some(ParamOp::Default | ParamOp::Assign | ParamOp::Alternate | ParamOp::Error)
@@ -2129,6 +2142,36 @@ impl Shell {
             Some(ParamOp::TrimPrefixLong) => trim_prefix(&value, &argument, true),
             Some(ParamOp::TrimSuffixShort) => trim_suffix(&value, &argument, false),
             Some(ParamOp::TrimSuffixLong) => trim_suffix(&value, &argument, true),
+            Some(ParamOp::Substring) => substring_value(&value, &argument),
+            Some(ParamOp::UpperFirst) => upper_first(&value),
+            Some(ParamOp::UpperAll) => value.to_uppercase(),
+            Some(ParamOp::LowerFirst) => lower_first(&value),
+            Some(ParamOp::LowerAll) => value.to_lowercase(),
+            Some(ParamOp::Indirect) => {
+                if value.is_empty() {
+                    String::new()
+                } else {
+                    self.var(&value)
+                }
+            }
+            Some(ParamOp::Names) => {
+                let mut names: Vec<String> = self
+                    .env
+                    .iter()
+                    .filter(|(key, _)| key.starts_with(&parameter.name))
+                    .map(|(key, _)| key.clone())
+                    .collect();
+                names.extend(
+                    self.arrays
+                        .keys()
+                        .filter(|key| key.starts_with(&parameter.name))
+                        .cloned(),
+                );
+                names.sort();
+                names.dedup();
+                names.join(" ")
+            }
+            Some(ParamOp::Keys) => String::new(),
             Some(op @ (ParamOp::Substitute | ParamOp::SubstituteAll)) => {
                 let (pattern, replacement) = argument
                     .split_once('/')
@@ -2201,6 +2244,63 @@ impl Shell {
 
         out
     }
+}
+
+fn substring_value(value: &str, argument: &str) -> String {
+    let (offset, length) = match argument.split_once(':') {
+        Some((offset, length)) => (offset, Some(length)),
+        None => (argument, None),
+    };
+    let offset: i64 = offset.trim().parse().unwrap_or(0);
+    let chars: Vec<char> = value.chars().collect();
+    let len = chars.len() as i64;
+    let start = if offset < 0 {
+        (len + offset).max(0)
+    } else {
+        offset.min(len)
+    };
+    let end = match length {
+        Some(length) => {
+            let length: i64 = length.trim().parse().unwrap_or(0);
+            if length < 0 {
+                (len + length).max(start)
+            } else {
+                (start + length).min(len)
+            }
+        }
+        None => len,
+    };
+    chars[start as usize..end as usize].iter().collect()
+}
+
+fn upper_first(value: &str) -> String {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    let mut out = String::new();
+    if first.is_alphabetic() {
+        out.extend(first.to_uppercase());
+    } else {
+        out.push(first);
+    }
+    out.push_str(chars.as_str());
+    out
+}
+
+fn lower_first(value: &str) -> String {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    let mut out = String::new();
+    if first.is_alphabetic() {
+        out.extend(first.to_lowercase());
+    } else {
+        out.push(first);
+    }
+    out.push_str(chars.as_str());
+    out
 }
 
 fn describe_and_or(and_or: &AndOr) -> String {
