@@ -15,7 +15,9 @@ pub enum Key {
     Up,
     Down,
     Tab,
+    ShiftTab,
     Ctrl(char),
+    Alt(char),
     Escape,
     PasteStart,
     PasteEnd,
@@ -96,6 +98,7 @@ pub fn read_key() -> io::Result<Key> {
         b'\r' | b'\n' => Key::Enter,
         b'\t' => Key::Tab,
         0x1b => read_escape()?,
+        byte @ 0x01..=0x1a => Key::Ctrl((b'a' + byte - 1) as char),
         byte if byte < 0x20 => Key::Unknown,
         byte if byte < 0x80 => Key::Char(byte as char),
         byte => match read_utf8(byte)? {
@@ -133,7 +136,7 @@ fn read_escape() -> io::Result<Key> {
         return Ok(Key::Escape);
     };
     if next != b'[' && next != b'O' {
-        return Ok(Key::Escape);
+        return Ok(Key::Alt(next as char));
     }
 
     let Some(code) = read_byte_with_timeout(20)? else {
@@ -147,6 +150,7 @@ fn read_escape() -> io::Result<Key> {
         b'D' => Key::Left,
         b'H' => Key::Home,
         b'F' => Key::End,
+        b'Z' => Key::ShiftTab,
         digit => {
             let mut number = String::from(digit as char);
             while let Some(byte) = read_byte_with_timeout(20)? {

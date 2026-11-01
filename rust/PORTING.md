@@ -50,6 +50,7 @@ assert an exit status instead of waiting forever.
 - [x] Bracketed paste and multiline editing with per-line motion
 - [x] History autosuggest with ghost text and Right/End accept
 - [x] `wave`-driven syntax highlighting in the editor
+- [x] `anchor` keybindings with the full editor action set
 - [x] Indexed arrays: literals, `[@]`, index, `#`, `+=` and `a[i]=`
 - [x] `set -e/-u/-x`, `pipefail`, `set --`, `trap` EXIT, `read` and `shift`
 - [x] `[[ =~ ]]`, `-a`, `-L/-h`, integer coercion

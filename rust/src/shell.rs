@@ -315,6 +315,10 @@ impl Shell {
         self.settings.get(key).map(String::as_str)
     }
 
+    pub fn keybinds(&self) -> &HashMap<String, String> {
+        &self.keybinds
+    }
+
     pub fn abbreviation(&self, name: &str) -> Option<&str> {
         self.abbreviations.get(name).map(String::as_str)
     }

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::highlight;
 use crate::prompt;
 use crate::shell::Shell;
@@ -12,6 +14,7 @@ pub enum Line {
 pub struct Editor {
     index: usize,
     draft: String,
+    kill: String,
 }
 
 impl Editor {
@@ -19,6 +22,7 @@ impl Editor {
         Editor {
             index: 0,
             draft: String::new(),
+            kill: String::new(),
         }
     }
 
@@ -37,6 +41,9 @@ impl Editor {
         let prompt_last = prompt.rsplit('\n').next().unwrap_or("").to_string();
         term::write_stdout(prompt)?;
 
+        let bindings = build_bindings(shell);
+        let mut undo: Vec<(Vec<char>, usize)> = Vec::new();
+
         loop {
             let suggestion = autosuggest(shell, &buffer, cursor, prompt_width);
             let ghost = suggestion
@@ -52,25 +59,30 @@ impl Editor {
                 match key {
                     Key::PasteEnd => pasting = false,
                     Key::Enter => {
+                        push_undo(&mut undo, &buffer, cursor);
                         buffer.insert(cursor, '\n');
                         cursor += 1;
                     }
                     Key::Tab => {
+                        push_undo(&mut undo, &buffer, cursor);
                         buffer.insert(cursor, '\t');
                         cursor += 1;
                     }
                     Key::Backspace => {
                         if cursor > 0 {
+                            push_undo(&mut undo, &buffer, cursor);
                             buffer.remove(cursor - 1);
                             cursor -= 1;
                         }
                     }
                     Key::Delete => {
                         if cursor < buffer.len() {
+                            push_undo(&mut undo, &buffer, cursor);
                             buffer.remove(cursor);
                         }
                     }
                     Key::Char(char) => {
+                        push_undo(&mut undo, &buffer, cursor);
                         buffer.insert(cursor, char);
                         cursor += 1;
                     }
@@ -79,55 +91,64 @@ impl Editor {
                 continue;
             }
 
+            if let Some(bound) = bound_key(key)
+                && let Some(action) = bindings.get(&bound).copied()
+            {
+                match self.apply_action(
+                    action,
+                    &mut buffer,
+                    &mut cursor,
+                    suggestion.as_deref(),
+                    prompt,
+                    shell,
+                    &mut undo,
+                )? {
+                    Outcome::Continue => continue,
+                    Outcome::Submit => {
+                        expand_abbreviation(&mut buffer, &mut cursor, shell, "");
+                        term::write_stdout("\r\n")?;
+                        return Ok(Line::Content(buffer.iter().collect()));
+                    }
+                    Outcome::Abort => {
+                        term::write_stdout("^C\r\n")?;
+                        return Ok(Line::Interrupted);
+                    }
+                    Outcome::HistorySearch => {
+                        if history_search(prompt_width, &prompt_last, shell, &mut buffer, &mut cursor)?
+                        {
+                            term::write_stdout("\r\n")?;
+                            return Ok(Line::Content(buffer.iter().collect()));
+                        }
+                        continue;
+                    }
+                    Outcome::Complete => {
+                        complete(&mut buffer, &mut cursor, shell);
+                        continue;
+                    }
+                }
+            }
+
             match key {
                 Key::PasteStart => pasting = true,
-                Key::PasteEnd => {}
-                Key::Enter => {
-                    expand_abbreviation(&mut buffer, &mut cursor, shell, "");
-                    term::write_stdout("\r\n")?;
-                    return Ok(Line::Content(buffer.iter().collect()));
-                }
-                Key::Ctrl('c') => {
-                    term::write_stdout("^C\r\n")?;
-                    return Ok(Line::Interrupted);
-                }
                 Key::Ctrl('d') => {
                     if buffer.is_empty() {
                         term::write_stdout("\r\n")?;
                         return Ok(Line::Eof);
                     }
                     if cursor < buffer.len() {
+                        push_undo(&mut undo, &buffer, cursor);
                         buffer.remove(cursor);
                     }
                 }
-                Key::Ctrl('l') => {
-                    term::write_stdout("\x1b[2J\x1b[H")?;
-                    term::write_stdout(prompt)?;
-                }
-                Key::Ctrl('r') => {
-                    if history_search(prompt_width, &prompt_last, shell, &mut buffer, &mut cursor)? {
-                        term::write_stdout("\r\n")?;
-                        return Ok(Line::Content(buffer.iter().collect()));
-                    }
-                }
-                Key::Ctrl('a') | Key::Home => cursor = line_start(&buffer, cursor),
-                Key::Ctrl('e') | Key::End => {
-                    let end = line_end(&buffer, cursor);
-                    if end == cursor && cursor == buffer.len() {
-                        if let Some(suffix) = &suggestion {
-                            buffer.extend(suffix.chars());
-                            cursor = buffer.len();
-                        }
-                    } else {
-                        cursor = end;
-                    }
-                }
                 Key::Ctrl('u') => {
-                    buffer.drain(..cursor);
-                    cursor = 0;
+                    if cursor > 0 {
+                        push_undo(&mut undo, &buffer, cursor);
+                        buffer.drain(..cursor);
+                        cursor = 0;
+                    }
                 }
-                Key::Ctrl('k') => buffer.truncate(cursor),
                 Key::Ctrl('w') => {
+                    push_undo(&mut undo, &buffer, cursor);
                     let mut start = cursor;
                     while start > 0 && buffer[start - 1].is_whitespace() {
                         start -= 1;
@@ -138,55 +159,156 @@ impl Editor {
                     buffer.drain(start..cursor);
                     cursor = start;
                 }
-                Key::Left => cursor = cursor.saturating_sub(1),
-                Key::Right => {
-                    if cursor == buffer.len() {
-                        if let Some(suffix) = &suggestion {
-                            buffer.extend(suffix.chars());
-                            cursor = buffer.len();
-                        }
-                    } else {
-                        cursor += 1;
-                    }
-                }
-                Key::Backspace => {
-                    if cursor > 0 {
-                        buffer.remove(cursor - 1);
-                        cursor -= 1;
-                    }
-                }
-                Key::Delete => {
-                    if cursor < buffer.len() {
-                        buffer.remove(cursor);
-                    }
-                }
-                Key::Up => {
-                    if buffer.contains(&'\n') {
-                        cursor = move_line(&buffer, cursor, true);
-                    } else {
-                        self.recall_newer(&mut buffer, &mut cursor, shell);
-                    }
-                }
-                Key::Down => {
-                    if buffer.contains(&'\n') {
-                        cursor = move_line(&buffer, cursor, false);
-                    } else {
-                        self.recall_older(&mut buffer, &mut cursor, shell);
-                    }
-                }
-                Key::Tab => complete(&mut buffer, &mut cursor, shell),
                 Key::Char(' ') => {
                     if !expand_abbreviation(&mut buffer, &mut cursor, shell, " ") {
+                        push_undo(&mut undo, &buffer, cursor);
                         buffer.insert(cursor, ' ');
                         cursor += 1;
                     }
                 }
                 Key::Char(char) => {
+                    push_undo(&mut undo, &buffer, cursor);
                     buffer.insert(cursor, char);
                     cursor += 1;
                 }
-                Key::Unknown | Key::Escape | Key::Ctrl(_) => {}
+                _ => {}
             }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_action(
+        &mut self,
+        action: Action,
+        buffer: &mut Vec<char>,
+        cursor: &mut usize,
+        suggestion: Option<&str>,
+        prompt: &str,
+        shell: &Shell,
+        undo: &mut Vec<(Vec<char>, usize)>,
+    ) -> std::io::Result<Outcome> {
+        match action {
+            Action::AcceptLine => return Ok(Outcome::Submit),
+            Action::Abort => return Ok(Outcome::Abort),
+            Action::HistorySearch => return Ok(Outcome::HistorySearch),
+            Action::Complete => return Ok(Outcome::Complete),
+            Action::ClearScreen => {
+                term::write_stdout("\x1b[2J\x1b[H")?;
+                term::write_stdout(prompt)?;
+            }
+            Action::BackwardChar => *cursor = cursor.saturating_sub(1),
+            Action::ForwardChar => {
+                if *cursor == buffer.len() {
+                    self.insert_suggestion(buffer, cursor, suggestion, undo);
+                } else {
+                    *cursor += 1;
+                }
+            }
+            Action::AcceptSuggestion => {
+                self.insert_suggestion(buffer, cursor, suggestion, undo);
+            }
+            Action::BackwardWord => *cursor = backward_word(buffer, *cursor),
+            Action::ForwardWord => *cursor = forward_word(buffer, *cursor),
+            Action::BeginningOfLine => *cursor = line_start(buffer, *cursor),
+            Action::EndOfLine => {
+                let end = line_end(buffer, *cursor);
+                if end == *cursor && *cursor == buffer.len() {
+                    self.insert_suggestion(buffer, cursor, suggestion, undo);
+                } else {
+                    *cursor = end;
+                }
+            }
+            Action::DeleteChar => {
+                if *cursor < buffer.len() {
+                    push_undo(undo, buffer, *cursor);
+                    buffer.remove(*cursor);
+                }
+            }
+            Action::BackwardDeleteChar => {
+                if *cursor > 0 {
+                    push_undo(undo, buffer, *cursor);
+                    buffer.remove(*cursor - 1);
+                    *cursor -= 1;
+                }
+            }
+            Action::KillLine => {
+                let end = line_end(buffer, *cursor);
+                if *cursor < end {
+                    push_undo(undo, buffer, *cursor);
+                    self.kill = buffer[*cursor..end].iter().collect();
+                    buffer.drain(*cursor..end);
+                }
+            }
+            Action::Yank => {
+                if !self.kill.is_empty() {
+                    push_undo(undo, buffer, *cursor);
+                    let text: Vec<char> = self.kill.chars().collect();
+                    buffer.splice(*cursor..*cursor, text.iter().copied());
+                    *cursor += text.len();
+                }
+            }
+            Action::TransposeChars => {
+                if buffer.len() >= 2 && *cursor >= 2 {
+                    push_undo(undo, buffer, *cursor);
+                    buffer.swap(*cursor - 2, *cursor - 1);
+                    if *cursor < buffer.len() {
+                        *cursor += 1;
+                    }
+                }
+            }
+            Action::UpcaseWord | Action::DowncaseWord | Action::CapitalizeWord => {
+                let (start, end) = current_word(buffer, *cursor);
+                if start < end {
+                    push_undo(undo, buffer, *cursor);
+                    for (offset, char) in buffer[start..end].iter_mut().enumerate() {
+                        *char = match action {
+                            Action::UpcaseWord => char.to_ascii_uppercase(),
+                            Action::DowncaseWord => char.to_ascii_lowercase(),
+                            Action::CapitalizeWord if offset == 0 => char.to_ascii_uppercase(),
+                            Action::CapitalizeWord => char.to_ascii_lowercase(),
+                            _ => *char,
+                        };
+                    }
+                    *cursor = end;
+                }
+            }
+            Action::Undo => {
+                if let Some((previous, position)) = undo.pop() {
+                    *buffer = previous;
+                    *cursor = position.min(buffer.len());
+                }
+            }
+            Action::HistoryPrev => {
+                if buffer.contains(&'\n') {
+                    *cursor = move_line(buffer, *cursor, true);
+                } else {
+                    self.recall_newer(buffer, cursor, shell);
+                }
+            }
+            Action::HistoryNext => {
+                if buffer.contains(&'\n') {
+                    *cursor = move_line(buffer, *cursor, false);
+                } else {
+                    self.recall_older(buffer, cursor, shell);
+                }
+            }
+        }
+        Ok(Outcome::Continue)
+    }
+
+    fn insert_suggestion(
+        &mut self,
+        buffer: &mut Vec<char>,
+        cursor: &mut usize,
+        suggestion: Option<&str>,
+        undo: &mut Vec<(Vec<char>, usize)>,
+    ) {
+        if *cursor == buffer.len()
+            && let Some(suffix) = suggestion
+        {
+            push_undo(undo, buffer, *cursor);
+            buffer.extend(suffix.chars());
+            *cursor = buffer.len();
         }
     }
 
@@ -260,6 +382,245 @@ impl Editor {
 
         term::write_stdout(&out)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Action {
+    AcceptLine,
+    Abort,
+    ClearScreen,
+    BackwardChar,
+    ForwardChar,
+    BackwardWord,
+    ForwardWord,
+    BeginningOfLine,
+    EndOfLine,
+    DeleteChar,
+    BackwardDeleteChar,
+    KillLine,
+    Yank,
+    TransposeChars,
+    UpcaseWord,
+    DowncaseWord,
+    CapitalizeWord,
+    Undo,
+    HistorySearch,
+    Complete,
+    AcceptSuggestion,
+    HistoryPrev,
+    HistoryNext,
+}
+
+enum Outcome {
+    Continue,
+    Submit,
+    Abort,
+    HistorySearch,
+    Complete,
+}
+
+const DEFAULT_BINDINGS: &[(&str, &str)] = &[
+    ("enter", "accept_line"),
+    ("ctrl-c", "abort"),
+    ("ctrl-l", "clear_screen"),
+    ("ctrl-a", "beginning_of_line"),
+    ("home", "beginning_of_line"),
+    ("ctrl-e", "end_of_line"),
+    ("end", "end_of_line"),
+    ("left", "backward_char"),
+    ("right", "forward_char"),
+    ("up", "history_prev"),
+    ("down", "history_next"),
+    ("backspace", "backward_delete_char"),
+    ("delete", "delete_char"),
+    ("tab", "complete"),
+    ("ctrl-r", "history_search"),
+    ("ctrl-k", "kill_line"),
+    ("ctrl-y", "yank"),
+    ("ctrl-_", "undo"),
+];
+
+fn build_bindings(shell: &Shell) -> HashMap<BoundKey, Action> {
+    let mut bindings = HashMap::new();
+    for (key, action) in DEFAULT_BINDINGS {
+        if let (Some(key), Some(action)) = (parse_bound(key), parse_action(action)) {
+            bindings.insert(key, action);
+        }
+    }
+    for (key, action) in shell.keybinds() {
+        if let (Some(key), Some(action)) = (parse_bound(key), parse_action(action)) {
+            bindings.insert(key, action);
+        }
+    }
+    bindings
+}
+
+fn parse_action(name: &str) -> Option<Action> {
+    Some(match name {
+        "accept_line" => Action::AcceptLine,
+        "abort" => Action::Abort,
+        "clear_screen" => Action::ClearScreen,
+        "backward_char" => Action::BackwardChar,
+        "forward_char" => Action::ForwardChar,
+        "backward_word" => Action::BackwardWord,
+        "forward_word" => Action::ForwardWord,
+        "beginning_of_line" => Action::BeginningOfLine,
+        "end_of_line" => Action::EndOfLine,
+        "delete_char" => Action::DeleteChar,
+        "backward_delete_char" => Action::BackwardDeleteChar,
+        "kill_line" => Action::KillLine,
+        "yank" => Action::Yank,
+        "transpose_chars" => Action::TransposeChars,
+        "upcase_word" => Action::UpcaseWord,
+        "downcase_word" => Action::DowncaseWord,
+        "capitalize_word" => Action::CapitalizeWord,
+        "undo" => Action::Undo,
+        "history_search" => Action::HistorySearch,
+        "complete" => Action::Complete,
+        "accept_suggestion" => Action::AcceptSuggestion,
+        "history_prev" => Action::HistoryPrev,
+        "history_next" => Action::HistoryNext,
+        _ => return None,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum BoundKey {
+    Char(char),
+    Ctrl(char),
+    Alt(char),
+    Tab,
+    ShiftTab,
+    Enter,
+    Escape,
+    Up,
+    Down,
+    Left,
+    Right,
+    Home,
+    End,
+    Delete,
+    Backspace,
+}
+
+fn bound_key(key: Key) -> Option<BoundKey> {
+    Some(match key {
+        Key::Char(char) => BoundKey::Char(char),
+        Key::Ctrl(char) => BoundKey::Ctrl(char.to_ascii_lowercase()),
+        Key::Alt(char) => BoundKey::Alt(char.to_ascii_lowercase()),
+        Key::Tab => BoundKey::Tab,
+        Key::ShiftTab => BoundKey::ShiftTab,
+        Key::Enter => BoundKey::Enter,
+        Key::Escape => BoundKey::Escape,
+        Key::Up => BoundKey::Up,
+        Key::Down => BoundKey::Down,
+        Key::Left => BoundKey::Left,
+        Key::Right => BoundKey::Right,
+        Key::Home => BoundKey::Home,
+        Key::End => BoundKey::End,
+        Key::Delete => BoundKey::Delete,
+        Key::Backspace => BoundKey::Backspace,
+        Key::Unknown | Key::PasteStart | Key::PasteEnd => return None,
+    })
+}
+
+fn parse_bound(name: &str) -> Option<BoundKey> {
+    let lower = name.to_ascii_lowercase();
+    match lower.as_str() {
+        "tab" => return Some(BoundKey::Tab),
+        "shift-tab" => return Some(BoundKey::ShiftTab),
+        "enter" => return Some(BoundKey::Enter),
+        "escape" => return Some(BoundKey::Escape),
+        "up" => return Some(BoundKey::Up),
+        "down" => return Some(BoundKey::Down),
+        "left" => return Some(BoundKey::Left),
+        "right" => return Some(BoundKey::Right),
+        "home" => return Some(BoundKey::Home),
+        "end" => return Some(BoundKey::End),
+        "delete" => return Some(BoundKey::Delete),
+        "backspace" => return Some(BoundKey::Backspace),
+        _ => {}
+    }
+
+    if let Some(rest) = strip_prefix_any(name, &["ctrl-", "ctrl+", "c-", "c+"]) {
+        let mut chars = rest.chars();
+        let char = chars.next()?;
+        if chars.next().is_some() {
+            return None;
+        }
+        return Some(BoundKey::Ctrl(char.to_ascii_lowercase()));
+    }
+    if let Some(rest) = strip_prefix_any(name, &["alt-", "alt+", "m-", "m+"]) {
+        let mut chars = rest.chars();
+        let char = chars.next()?;
+        if chars.next().is_some() {
+            return None;
+        }
+        return Some(BoundKey::Alt(char.to_ascii_lowercase()));
+    }
+
+    let mut chars = name.chars();
+    let char = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    Some(BoundKey::Char(char))
+}
+
+fn strip_prefix_any<'a>(name: &'a str, prefixes: &[&str]) -> Option<&'a str> {
+    for prefix in prefixes {
+        if name.len() > prefix.len()
+            && name[..prefix.len()].eq_ignore_ascii_case(prefix)
+        {
+            return Some(&name[prefix.len()..]);
+        }
+    }
+    None
+}
+
+fn push_undo(undo: &mut Vec<(Vec<char>, usize)>, buffer: &[char], cursor: usize) {
+    if undo.len() >= 100 {
+        undo.remove(0);
+    }
+    undo.push((buffer.to_vec(), cursor));
+}
+
+fn is_word_char(char: char) -> bool {
+    char.is_ascii_alphanumeric() || char == '_'
+}
+
+fn backward_word(buffer: &[char], cursor: usize) -> usize {
+    let mut index = cursor.min(buffer.len());
+    while index > 0 && !is_word_char(buffer[index - 1]) {
+        index -= 1;
+    }
+    while index > 0 && is_word_char(buffer[index - 1]) {
+        index -= 1;
+    }
+    index
+}
+
+fn forward_word(buffer: &[char], cursor: usize) -> usize {
+    let mut index = cursor.min(buffer.len());
+    while index < buffer.len() && !is_word_char(buffer[index]) {
+        index += 1;
+    }
+    while index < buffer.len() && is_word_char(buffer[index]) {
+        index += 1;
+    }
+    index
+}
+
+fn current_word(buffer: &[char], cursor: usize) -> (usize, usize) {
+    let mut start = cursor.min(buffer.len());
+    while start < buffer.len() && !is_word_char(buffer[start]) {
+        start += 1;
+    }
+    let mut end = start;
+    while end < buffer.len() && is_word_char(buffer[end]) {
+        end += 1;
+    }
+    (start, end)
 }
 
 fn history_search(
@@ -721,5 +1082,148 @@ mod suggestion_tests {
         assert_eq!(find_suggestion(&entries(), &buffer, 2), None);
         assert_eq!(find_suggestion(&entries(), &[], 0), None);
         assert_eq!(find_suggestion(&entries(), &"zzz".chars().collect::<Vec<_>>(), 3), None);
+    }
+}
+
+
+#[cfg(test)]
+mod action_tests {
+    use super::{Action, Editor, Outcome, Shell};
+
+    fn apply(action: Action, text: &str, cursor: usize) -> (String, usize, Outcome) {
+        apply_with_suggestion(action, text, cursor, None)
+    }
+
+    fn apply_with_suggestion(
+        action: Action,
+        text: &str,
+        cursor: usize,
+        suggestion: Option<&str>,
+    ) -> (String, usize, Outcome) {
+        let mut editor = Editor::new();
+        let shell = Shell::new();
+        let mut buffer: Vec<char> = text.chars().collect();
+        let mut cursor = cursor;
+        let mut undo = Vec::new();
+        let outcome = editor
+            .apply_action(
+                action,
+                &mut buffer,
+                &mut cursor,
+                suggestion,
+                "",
+                &shell,
+                &mut undo,
+            )
+            .unwrap();
+        (buffer.iter().collect(), cursor, outcome)
+    }
+
+    #[test]
+    fn character_and_word_motions() {
+        assert_eq!(apply(Action::BackwardChar, "abc", 2).1, 1);
+        assert_eq!(apply(Action::ForwardChar, "abc", 1).1, 2);
+        assert_eq!(apply(Action::BackwardWord, "echo one two", 12).1, 9);
+        assert_eq!(apply(Action::ForwardWord, "echo one two", 0).1, 4);
+        assert_eq!(apply(Action::BeginningOfLine, "one\ntwo", 6).1, 4);
+        assert_eq!(apply(Action::EndOfLine, "one\ntwo", 4).1, 7);
+    }
+
+    #[test]
+    fn deletion_kill_and_yank() {
+        assert_eq!(apply(Action::DeleteChar, "abc", 1).0, "ac");
+        assert_eq!(apply(Action::BackwardDeleteChar, "abc", 1).0, "bc");
+
+        let mut editor = Editor::new();
+        let shell = Shell::new();
+        let mut buffer: Vec<char> = "one two".chars().collect();
+        let mut cursor = 3;
+        let mut undo = Vec::new();
+        editor
+            .apply_action(
+                Action::KillLine,
+                &mut buffer,
+                &mut cursor,
+                None,
+                "",
+                &shell,
+                &mut undo,
+            )
+            .unwrap();
+        assert_eq!(buffer.iter().collect::<String>(), "one");
+        cursor = buffer.len();
+        editor
+            .apply_action(
+                Action::Yank,
+                &mut buffer,
+                &mut cursor,
+                None,
+                "",
+                &shell,
+                &mut undo,
+            )
+            .unwrap();
+        assert_eq!(buffer.iter().collect::<String>(), "one two");
+    }
+
+    #[test]
+    fn transpose_and_case_conversion() {
+        assert_eq!(apply(Action::TransposeChars, "abc", 2).0, "bac");
+        assert_eq!(apply(Action::TransposeChars, "abc", 3).0, "acb");
+        assert_eq!(apply(Action::UpcaseWord, "one two", 0).0, "ONE two");
+        assert_eq!(apply(Action::DowncaseWord, "ONE TWO", 0).0, "one TWO");
+        assert_eq!(apply(Action::CapitalizeWord, "oNE two", 0).0, "One two");
+    }
+
+    #[test]
+    fn undo_restores_the_last_edit() {
+        let mut editor = Editor::new();
+        let shell = Shell::new();
+        let mut buffer: Vec<char> = "abc".chars().collect();
+        let mut cursor = 1;
+        let mut undo = Vec::new();
+        editor
+            .apply_action(
+                Action::DeleteChar,
+                &mut buffer,
+                &mut cursor,
+                None,
+                "",
+                &shell,
+                &mut undo,
+            )
+            .unwrap();
+        assert_eq!(buffer.iter().collect::<String>(), "ac");
+        editor
+            .apply_action(
+                Action::Undo,
+                &mut buffer,
+                &mut cursor,
+                None,
+                "",
+                &shell,
+                &mut undo,
+            )
+            .unwrap();
+        assert_eq!(buffer.iter().collect::<String>(), "abc");
+    }
+
+    #[test]
+    fn suggestion_actions_only_insert_when_at_the_end() {
+        assert_eq!(
+            apply_with_suggestion(Action::AcceptSuggestion, "echo", 4, Some(" ok")).0,
+            "echo ok"
+        );
+        assert_eq!(
+            apply_with_suggestion(Action::ForwardChar, "echo", 4, Some(" ok")).0,
+            "echo ok"
+        );
+        assert_eq!(apply_with_suggestion(Action::AcceptSuggestion, "echo", 2, Some(" ok")).0, "echo");
+    }
+
+    #[test]
+    fn submit_and_abort_outcomes() {
+        assert!(matches!(apply(Action::AcceptLine, "", 0).2, Outcome::Submit));
+        assert!(matches!(apply(Action::Abort, "", 0).2, Outcome::Abort));
     }
 }

@@ -155,7 +155,9 @@ more complex, and `tide profile_paths off` to disable the scan.
 `abort`, `backward_char`, `forward_char`, `backward_word`, `forward_word`,
 `beginning_of_line`, `end_of_line`, `delete_char`, `backward_delete_char`,
 `kill_line`, `yank`, `transpose_chars`, `upcase_word`, `downcase_word`,
-`capitalize_word`, `undo`.
+`capitalize_word`, `undo`, `accept_suggestion`. Keys are named `ctrl+x`,
+`c+x`, `alt+x`, `m+x`, `tab`, `shift-tab`, `enter`, `escape`, `up`, `down`,
+`left`, `right`, `home`, `end`, `delete`, `backspace` or a single character.
 
 ```text
 // Sharky ~ settings

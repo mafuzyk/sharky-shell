@@ -1032,3 +1032,47 @@ fn highlight_off_renders_plain_text() {
         "highlight off emitted colour: {seen:?}"
     );
 }
+
+#[test]
+fn anchor_rebinds_keys_to_actions() {
+    let mut session = history_session_with(Some(
+        "tide greeting off\nanchor ctrl+t kill_line\nanchor alt+l clear_screen\n",
+    ));
+    let _ = session.writer.write_all(b"echo killed");
+    read_until(
+        session.master.as_raw_fd(),
+        "killed",
+        Duration::from_secs(5),
+    );
+    let _ = session.writer.write_all(b"\x01");
+    let _ = session.writer.write_all(b"\x14");
+    let _ = session.writer.write_all(b"printf AFTERKILL\r");
+    let out = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    assert!(
+        out.contains("cmdline_url=printf%20AFTERKILL\u{1b}\\"),
+        "kill_line binding failed: {out:?}"
+    );
+    assert!(
+        !out.contains("cmdline_url=printf%20AFTERKILLecho"),
+        "killed line executed: {out:?}"
+    );
+
+    let _ = session.writer.write_all(b"\x1bl");
+    let seen = read_until(
+        session.master.as_raw_fd(),
+        "\u{1b}[2J",
+        Duration::from_secs(5),
+    );
+    assert!(seen.contains("\u{1b}[2J"), "alt-l did not clear: {seen:?}");
+    let _ = session.writer.write_all(b"\x03");
+    let _ = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    session.finish();
+}

@@ -27,7 +27,25 @@ pub const ACTIONS: &[&str] = &[
     "downcase_word",
     "capitalize_word",
     "undo",
+    "accept_suggestion",
 ];
+
+pub fn valid_key(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    match lower.as_str() {
+        "tab" | "shift-tab" | "enter" | "escape" | "up" | "down" | "left" | "right" | "home"
+        | "end" | "delete" | "backspace" => return true,
+        _ => {}
+    }
+
+    for prefix in ["ctrl-", "ctrl+", "c-", "c+", "alt-", "alt+", "m-", "m+"] {
+        if let Some(rest) = lower.strip_prefix(prefix) {
+            return rest.chars().count() == 1 && !rest.chars().any(char::is_whitespace);
+        }
+    }
+
+    name.chars().count() == 1
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct Config {
@@ -195,6 +213,9 @@ fn apply(config: &mut Config, tokens: &[String]) -> Result<(), String> {
             let (key, value) = pair(rest, "anchor")?;
             if !ACTIONS.contains(&value.as_str()) {
                 return Err(format!("unknown action '{value}'"));
+            }
+            if !valid_key(&key) {
+                return Err(format!("unknown key '{key}'"));
             }
             config.keybinds.insert(key, value);
         }
@@ -374,6 +395,42 @@ wave command @sea
     fn rejects_an_unknown_instruction() {
         let error = parse("tidee greeting on", "config.sharky").unwrap_err();
         assert!(error.message.contains("unknown instruction 'tidee'"));
+        assert_eq!(error.line, 1);
+    }
+
+    #[test]
+    fn accepts_bindable_key_names() {
+        for key in [
+            "ctrl-x",
+            "c-x",
+            "alt-x",
+            "m-x",
+            "tab",
+            "shift-tab",
+            "enter",
+            "escape",
+            "up",
+            "down",
+            "left",
+            "right",
+            "home",
+            "end",
+            "delete",
+            "backspace",
+            "x",
+        ] {
+            let source = format!("anchor {key} kill_line\n");
+            assert!(parse(&source, "config.sharky").is_ok(), "{key} rejected");
+        }
+
+        let source = "anchor ctrl+t accept_suggestion\n";
+        assert!(parse(source, "config.sharky").is_ok());
+    }
+
+    #[test]
+    fn rejects_an_unknown_key_name_with_its_line() {
+        let error = parse("anchor ctrl+nope kill_line\n", "config.sharky").unwrap_err();
+        assert!(error.message.contains("unknown key 'ctrl+nope'"), "{error}");
         assert_eq!(error.line, 1);
     }
 
