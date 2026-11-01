@@ -592,19 +592,40 @@ impl Lexer {
         text.push('(');
         self.pos += 1;
         let mut depth = 1usize;
+        let mut quote = None;
 
         while let Some(char) = self.current() {
-            text.push(char);
-            self.pos += 1;
+            if let Some(delimiter) = quote {
+                text.push(char);
+                self.pos += 1;
+                if char == delimiter {
+                    quote = None;
+                }
+                continue;
+            }
             match char {
-                '(' => depth += 1,
+                '\'' | '"' => {
+                    quote = Some(char);
+                    text.push(char);
+                    self.pos += 1;
+                }
+                '(' => {
+                    text.push(char);
+                    depth += 1;
+                    self.pos += 1;
+                }
                 ')' => {
+                    text.push(char);
                     depth -= 1;
+                    self.pos += 1;
                     if depth == 0 {
                         return Ok(text);
                     }
                 }
-                _ => {}
+                _ => {
+                    text.push(char);
+                    self.pos += 1;
+                }
             }
         }
 

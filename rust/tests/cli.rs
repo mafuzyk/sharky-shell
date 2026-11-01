@@ -1541,6 +1541,27 @@ fn indexed_arrays_accept_arithmetic_indexes_and_unset_keys() {
 
 
 #[test]
+fn extglob_handles_nested_nullable_and_path_components() {
+    let out = sharky(&["-c", r#"case '' in +(?(a))) printf yes;; esac"#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "yes");
+
+    let out = sharky(&["-c", r#"case ')' in @(')'|x)) printf yes;; esac"#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "yes");
+
+    let dir = temp_dir();
+    std::fs::create_dir_all(dir.join("a")).unwrap();
+    std::fs::create_dir_all(dir.join("b")).unwrap();
+    std::fs::write(dir.join("a/x.txt"), "").unwrap();
+    std::fs::write(dir.join("b/x.txt"), "").unwrap();
+    let out = sharky_in(&dir, &["-c", r#"printf '<%s>' @(a|b)/*.txt"#]);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "<a/x.txt><b/x.txt>"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn c_style_for_runs_init_condition_and_step() {
     let out = sharky(&[
         "-c",

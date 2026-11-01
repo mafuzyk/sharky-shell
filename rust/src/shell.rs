@@ -3079,8 +3079,16 @@ fn split_extglob(pattern: &[char]) -> Option<ExtGlob<'_>> {
 
     let mut depth = 0usize;
     let mut end = None;
+    let mut quote = None;
     for (index, char) in pattern.iter().enumerate().skip(1) {
+        if let Some(delimiter) = quote {
+            if *char == delimiter {
+                quote = None;
+            }
+            continue;
+        }
         match char {
+            '\'' | '"' => quote = Some(*char),
             '(' => depth += 1,
             ')' => {
                 depth = depth.saturating_sub(1);
@@ -3097,8 +3105,20 @@ fn split_extglob(pattern: &[char]) -> Option<ExtGlob<'_>> {
     let mut alternatives = Vec::new();
     let mut current = Vec::new();
     let mut depth = 0usize;
+    let mut quote = None;
     for char in &pattern[2..end] {
+        if let Some(delimiter) = quote {
+            current.push(*char);
+            if *char == delimiter {
+                quote = None;
+            }
+            continue;
+        }
         match char {
+            '\'' | '"' => {
+                quote = Some(*char);
+                current.push(*char);
+            }
             '(' => {
                 depth += 1;
                 current.push(*char);
@@ -3117,15 +3137,35 @@ fn split_extglob(pattern: &[char]) -> Option<ExtGlob<'_>> {
 }
 
 fn ext_matches(operator: char, alternatives: &[Vec<char>], text: &[char]) -> bool {
-    let exact = |text: &[char]| alternatives.iter().any(|alt| glob_chars(alt, text));
+    let exact = |text: &[char]| {
+        alternatives.iter().any(|alt| {
+            let alt = strip_pattern_quotes(alt);
+            glob_chars(&alt, text)
+        })
+    };
     match operator {
         '?' => text.is_empty() || exact(text),
         '@' => exact(text),
         '*' => text.is_empty() || ext_repeat(alternatives, text),
-        '+' => !text.is_empty() && ext_repeat(alternatives, text),
+        '+' => {
+            ext_repeat(alternatives, text)
+                && (!text.is_empty()
+                    || alternatives.iter().any(|alt| {
+                        let alt = strip_pattern_quotes(alt);
+                        glob_chars(&alt, &[])
+                    }))
+        }
         '!' => !exact(text),
         _ => false,
     }
+}
+
+fn strip_pattern_quotes(pattern: &[char]) -> Vec<char> {
+    pattern
+        .iter()
+        .copied()
+        .filter(|char| *char != '\'' && *char != '"')
+        .collect()
 }
 
 fn ext_repeat(alternatives: &[Vec<char>], text: &[char]) -> bool {
@@ -3136,7 +3176,10 @@ fn ext_repeat(alternatives: &[Vec<char>], text: &[char]) -> bool {
             if reachable[start]
                 && alternatives
                     .iter()
-                    .any(|alt| glob_chars(alt, &text[start..end]))
+                    .any(|alt| {
+                        let alt = strip_pattern_quotes(alt);
+                        glob_chars(&alt, &text[start..end])
+                    })
             {
                 reachable[end] = true;
                 break;
@@ -3614,26 +3657,31 @@ fn glob(pattern: &str) -> Vec<String> {
     }
 
     let directory = if dir.is_empty() { "/" } else { dir };
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return Vec::new();
+    let directories = if has_glob(directory) {
+        glob(directory)
+    } else {
+        vec![directory.to_string()]
     };
 
-    let mut matches: Vec<String> = entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
+    let mut matches = Vec::new();
+    for directory in directories {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
             let name = entry.file_name().to_string_lossy().into_owned();
             if name.starts_with('.') && !base.starts_with('.') {
-                return None;
+                continue;
             }
             if !glob_match(base, &name) {
-                return None;
+                continue;
             }
-            Some(match pattern.rfind('/') {
+            matches.push(match pattern.rfind('/') {
                 Some(_) => format!("{}/{name}", directory.trim_end_matches('/')),
                 None => name,
-            })
-        })
-        .collect();
+            });
+        }
+    }
 
     matches.sort();
     matches
