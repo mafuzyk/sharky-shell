@@ -25,6 +25,7 @@ pub struct AndOr {
 #[derive(Debug, Clone)]
 pub struct Pipeline {
     pub commands: Vec<Command>,
+    pub timed: Option<bool>,
 }
 
 #[derive(Debug, Clone)]

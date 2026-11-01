@@ -34,7 +34,7 @@ pub fn resolve(name: &str, shell: &Shell) -> Option<PathBuf> {
         .find(|candidate| is_executable(candidate))
 }
 
-pub fn exec_replace(path: &Path, argv: &[String], env: &[(String, String)]) -> ! {
+pub fn exec_now(path: &Path, argv: &[String], env: &[(String, String)]) -> Result<(), String> {
     let argv: Vec<CString> = argv
         .iter()
         .map(|arg| CString::new(arg.as_bytes()).unwrap_or_default())
@@ -44,13 +44,19 @@ pub fn exec_replace(path: &Path, argv: &[String], env: &[(String, String)]) -> !
         .filter_map(|(key, value)| CString::new(format!("{key}={value}")).ok())
         .collect();
 
-    let Ok(path_c) = CString::new(path.as_os_str().as_encoded_bytes()) else {
-        eprintln!("sharky: {}: invalid path", path.display());
-        unsafe { _exit(126) }
-    };
+    let path_c = CString::new(path.as_os_str().as_encoded_bytes())
+        .map_err(|_| "invalid path".to_string())?;
 
-    let Err(err) = execve(&path_c, &argv, &envp);
-    eprintln!("sharky: {}: {err}", path.display());
+    match execve(&path_c, &argv, &envp) {
+        Ok(_) => Ok(()),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+pub fn exec_replace(path: &Path, argv: &[String], env: &[(String, String)]) -> ! {
+    if let Err(err) = exec_now(path, argv, env) {
+        eprintln!("sharky: {}: {err}", path.display());
+    }
     unsafe { _exit(126) }
 }
 

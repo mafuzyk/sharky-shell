@@ -140,11 +140,40 @@ impl Parser {
     }
 
     fn parse_pipeline(&mut self) -> Result<Pipeline, ParseError> {
+        let mut timed = None;
+        if self.at_word("time") {
+            self.advance();
+            let posix = if self.at_word("-p") {
+                self.advance();
+                true
+            } else {
+                false
+            };
+            timed = Some(posix);
+
+            if matches!(
+                self.kind(),
+                TokenKind::Eof
+                    | TokenKind::Newline
+                    | TokenKind::Semi
+                    | TokenKind::Amp
+                    | TokenKind::Pipe
+                    | TokenKind::AndIf
+                    | TokenKind::OrIf
+            ) {
+                return Ok(Pipeline {
+                    commands: vec![Command::Simple(Simple::default())],
+                    timed,
+                });
+            }
+        }
+
         if self.at_word("!") {
             self.advance();
             let command = self.parse_pipeline_command()?;
             return Ok(Pipeline {
                 commands: vec![Command::Not(Box::new(command))],
+                timed,
             });
         }
 
@@ -155,7 +184,7 @@ impl Parser {
             commands.push(self.parse_pipeline_command()?);
         }
 
-        Ok(Pipeline { commands })
+        Ok(Pipeline { commands, timed })
     }
 
     fn parse_pipeline_command(&mut self) -> Result<Command, ParseError> {

@@ -716,3 +716,15 @@ fn history_expansion_respects_quotes_and_reports_missing_events() {
 
     session.finish();
 }
+
+#[test]
+fn interactive_exec_failure_keeps_the_shell_alive() {
+    let mut session = history_session();
+    let out = session.run("exec /nonexistent/sharky");
+    assert!(out.contains("exec"), "no exec error in {out:?}");
+    let out = session.run("echo after");
+    assert!(out.contains("after"), "shell died after failed exec: {out:?}");
+    let out = session.run("echo $?");
+    assert!(out.contains('1'), "unexpected failure status: {out:?}");
+    session.finish();
+}

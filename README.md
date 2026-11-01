@@ -91,7 +91,7 @@ The prompt, `-c` and script files share one grammar:
 | case | `case $x in f*) ...;; *) ...;; esac`, `;;&`, `;&` |
 | functions | `greet() { printf 'hi %s\n' "$1"; }` |
 | groups and subshells | `{ a; b; }`, `( a; b )` |
-| builtins | `type`, `alias`, `unalias`, `abbr`, `unabbr`, `history`, `pwd`, `read`, `shift` |
+| builtins | `type`, `alias`, `unalias`, `abbr`, `unabbr`, `history`, `pwd`, `read`, `shift`, `exec`, `time` |
 | history search | Ctrl-R, type to filter, Enter runs the match, Ctrl-G cancels |
 | history expansion | `!!`, `!n`, `!-n`, `!prefix`, `!?text?`, `!$`, `!*`, `!^`, `^old^new^`; `set +H` disables |
 | job control | `cmd &`, `jobs`, `fg`, `bg`, Ctrl-Z |

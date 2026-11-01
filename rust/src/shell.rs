@@ -501,6 +501,24 @@ impl Shell {
     }
 
     fn run_pipeline(&mut self, pipeline: &Pipeline) -> Flow {
+        let Some(posix) = pipeline.timed else {
+            return self.run_pipeline_inner(pipeline);
+        };
+
+        let started = std::time::Instant::now();
+        let (self_user, self_sys) = cpu_usage(nix::libc::RUSAGE_SELF);
+        let (child_user, child_sys) = cpu_usage(nix::libc::RUSAGE_CHILDREN);
+        let flow = self.run_pipeline_inner(pipeline);
+        let real = started.elapsed().as_secs_f64();
+        let (self_user_after, self_sys_after) = cpu_usage(nix::libc::RUSAGE_SELF);
+        let (child_user_after, child_sys_after) = cpu_usage(nix::libc::RUSAGE_CHILDREN);
+        let user = (self_user_after - self_user).max(0.0) + (child_user_after - child_user).max(0.0);
+        let sys = (self_sys_after - self_sys).max(0.0) + (child_sys_after - child_sys).max(0.0);
+        report_time(real, user, sys, posix);
+        flow
+    }
+
+    fn run_pipeline_inner(&mut self, pipeline: &Pipeline) -> Flow {
         if pipeline.commands.len() == 1 {
             if matches!(pipeline.commands[0], Command::Not(_)) {
                 let previous = self.errexit_suppressed;
@@ -680,6 +698,16 @@ impl Shell {
             prepared.argv = argv;
         }
 
+        if prepared.argv.first().map(String::as_str) == Some("exec") {
+            if !prepared.actions.is_empty()
+                && let Err(message) = apply_actions(&prepared.actions)
+            {
+                eprintln!("sharky: {message}");
+                return Flow::Status(1);
+            }
+            return self.exec_builtin(&prepared.argv[1..], &prepared.env);
+        }
+
         if prepared.actions.is_empty() {
             if prepared.argv.is_empty() {
                 return Flow::Status(0);
@@ -755,6 +783,10 @@ impl Shell {
             return 0;
         }
 
+        if prepared.argv[0] == "exec" {
+            return flow_status(self.exec_builtin(&prepared.argv[1..], &prepared.env));
+        }
+
         if let Some(body) = self.funcs.get(&prepared.argv[0]).cloned() {
             let saved = std::mem::replace(&mut self.positional, prepared.argv[1..].to_vec());
             let flow = self.run_list(&body);
@@ -775,6 +807,58 @@ impl Shell {
                 eprintln!("sharky: command not found: {}", prepared.argv[0]);
                 127
             }
+        }
+    }
+
+    fn exec_builtin(&mut self, args: &[String], env: &[(String, String)]) -> Flow {
+        let mut index = 0;
+        let mut name = None;
+
+        if args.first().map(String::as_str) == Some("-a") {
+            match args.get(1) {
+                Some(value) => {
+                    name = Some(value.clone());
+                    index = 2;
+                }
+                None => {
+                    eprintln!("sharky: exec: -a: option requires an argument");
+                    return Flow::Status(1);
+                }
+            }
+        }
+
+        let Some(program) = args.get(index) else {
+            return Flow::Status(0);
+        };
+        let rest = &args[index + 1..];
+
+        let Some(path) = exec::resolve(program, self) else {
+            eprintln!("sharky: exec: {program}: not found");
+            return self.exec_failure(127);
+        };
+        if !path.exists() {
+            eprintln!("sharky: exec: {program}: not found");
+            return self.exec_failure(127);
+        }
+
+        let mut argv = Vec::with_capacity(rest.len() + 1);
+        argv.push(name.unwrap_or_else(|| program.clone()));
+        argv.extend_from_slice(rest);
+
+        match exec::exec_now(&path, &argv, env) {
+            Ok(()) => Flow::Status(0),
+            Err(err) => {
+                eprintln!("sharky: exec: {program}: {err}");
+                self.exec_failure(126)
+            }
+        }
+    }
+
+    fn exec_failure(&self, code: i32) -> Flow {
+        if self.interactive {
+            Flow::Status(code)
+        } else {
+            Flow::Exit(code)
         }
     }
 
@@ -806,6 +890,23 @@ impl Shell {
                 return Flow::Status(1);
             }
         };
+
+        if let Command::Simple(simple) = command
+            && simple.words.first().and_then(literal).as_deref() == Some("exec")
+        {
+            if let Err(message) = apply_actions(&actions) {
+                eprintln!("sharky: {message}");
+                return Flow::Status(1);
+            }
+            let prepared = match self.prepare(simple) {
+                Ok(prepared) => prepared,
+                Err(message) => {
+                    eprintln!("sharky: {message}");
+                    return Flow::Status(1);
+                }
+            };
+            return self.exec_builtin(&prepared.argv[1..], &prepared.env);
+        }
 
         // SAFETY: the child runs shell code and exits without unwinding.
         match unsafe { fork() } {
@@ -2728,6 +2829,35 @@ fn ext_repeat(alternatives: &[Vec<char>], text: &[char]) -> bool {
         }
     }
     reachable[text.len()]
+}
+
+fn cpu_usage(who: i32) -> (f64, f64) {
+    // SAFETY: getrusage writes into a zeroed struct of the correct type.
+    let mut usage: nix::libc::rusage = unsafe { std::mem::zeroed() };
+    if unsafe { nix::libc::getrusage(who, &mut usage) } != 0 {
+        return (0.0, 0.0);
+    }
+    let user = usage.ru_utime.tv_sec as f64 + usage.ru_utime.tv_usec as f64 / 1_000_000.0;
+    let sys = usage.ru_stime.tv_sec as f64 + usage.ru_stime.tv_usec as f64 / 1_000_000.0;
+    (user, sys)
+}
+
+fn report_time(real: f64, user: f64, sys: f64, posix: bool) {
+    if posix {
+        eprintln!("real {real:.2}\nuser {user:.2}\nsys {sys:.2}");
+        return;
+    }
+
+    eprintln!(
+        "\nreal\t{}\nuser\t{}\nsys\t{}",
+        format_seconds(real),
+        format_seconds(user),
+        format_seconds(sys)
+    );
+}
+
+fn format_seconds(seconds: f64) -> String {
+    format!("{}m{:.3}s", (seconds / 60.0).floor() as u64, seconds % 60.0)
 }
 
 fn describe_and_or(and_or: &AndOr) -> String {

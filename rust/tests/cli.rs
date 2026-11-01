@@ -1436,3 +1436,55 @@ fn history_expansion_never_runs_in_c() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\n");
     assert_eq!(out.status.code(), Some(127));
 }
+
+#[test]
+fn exec_replaces_the_shell() {
+    let out = sharky(&["-c", "exec /bin/echo hi"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\n");
+    assert_eq!(out.status.code(), Some(0));
+
+    let out = sharky(&["-c", "exec -a custom /bin/sh -c 'printf \"%s\" \"$0\"'"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "custom");
+
+    let out = sharky(&["-c", "exec"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn exec_failure_stops_a_script() {
+    let out = sharky(&["-c", "exec /nonexistent/sharky; echo after"]);
+    assert_eq!(out.status.code(), Some(127));
+    assert!(out.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("exec"));
+}
+
+#[test]
+fn exec_redirections_persist_in_the_shell() {
+    let dir = temp_dir();
+    let out = sharky_in(&dir, &["-c", "exec > out 2>&1; echo hi; echo err >&2"]);
+    let text = std::fs::read_to_string(dir.join("out")).unwrap_or_default();
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(out.stdout.is_empty());
+    assert_eq!(text, "hi\nerr\n");
+}
+
+#[test]
+fn time_reports_real_user_and_system_time() {
+    let out = sharky(&["-c", "time printf hi"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for label in ["real", "user", "sys"] {
+        assert!(stderr.contains(label), "missing {label} in {stderr:?}");
+    }
+    assert_eq!(out.status.code(), Some(0));
+
+    let out = sharky(&["-c", "time -p false"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("real 0."), "posix format missing in {stderr:?}");
+
+    let out = sharky(&["-c", "time printf hi | cat"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("real"));
+}
