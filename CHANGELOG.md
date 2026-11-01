@@ -4,6 +4,14 @@ All notable changes to sharky are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project uses semantic
 versioning.
 
+## [3.5.1] - 2026-11-01
+
+### Fixed
+
+- The editor no longer moves the cursor one row too far when the prompt plus
+  the input exactly fills the terminal width. Long commands stopped erasing the
+  line above and Koral's command mark stayed intact.
+
 ## [3.5.0] - 2026-10-31
 
 ### Added
