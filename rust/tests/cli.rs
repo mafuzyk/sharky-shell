@@ -920,12 +920,12 @@ fn array_append_and_element_assignment() {
 }
 
 #[test]
-fn sparse_array_assignment_pads_with_empty_elements() {
+fn sparse_array_assignment_counts_only_defined_elements() {
     let out = sharky(&[
         "-c",
         r#"a=(one); a[3]=x; printf '%s|%s' "${#a[@]}" "${a[2]}""#,
     ]);
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "4|");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "2|");
 }
 
 #[test]
@@ -1237,7 +1237,9 @@ fn parameter_substrings_use_offsets_and_lengths() {
         ("x=abcdef; printf '%s' \"${x:1:3}\"", "bcd"),
         ("x=abcdef; printf '%s' \"${x: -2}\"", "ef"),
         ("x=abcdef; printf '%s' \"${x:1:-1}\"", "bcde"),
-        ("set -- a b c; printf '%s' \"${@:2}\"", "b c"),
+        ("set -- a b c; printf '<%s>' \"${@:2}\"", "<b><c>"),
+        ("set -- a b c; printf '<%s>' \"${@:2:1}\"", "<b>"),
+        ("set -- a b c; printf '<%s>' \"${*:2}\"", "<b c>"),
     ];
     for (script, expected) in cases {
         let out = sharky(&["-c", script]);
@@ -1328,11 +1330,14 @@ fn parameter_indirection_and_name_prefixes() {
     let out = sharky(&["-c", "name=x; x=value; printf '%s' \"${!name}\""]);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "value");
 
-    let out = sharky(&["-c", "prefix_b=2; prefix_a=1; printf '%s' \"${!prefix_@}\""]);
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "prefix_a prefix_b");
+    let out = sharky(&[
+        "-c",
+        "prefix_b=2; prefix_a=1; printf '<%s>' \"${!prefix_@}\"",
+    ]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "<prefix_a><prefix_b>");
 
-    let out = sharky(&["-c", "a=(x y z); printf '%s' \"${!a[@]}\""]);
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "0 1 2");
+    let out = sharky(&["-c", "a=(x y z); printf '<%s>' \"${!a[@]}\""]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "<0><1><2>");
 }
 
 #[test]
@@ -1357,9 +1362,9 @@ fn ansi_c_quoting_decodes_escapes() {
 fn associative_arrays_store_and_read_keys() {
     let out = sharky(&[
         "-c",
-        r#"declare -A a; a[one]=1; a[two]=2; printf '%s|%s|%s' "${a[one]}" "${#a[@]}" "${!a[@]}""#,
+        r#"declare -A a; a[one]=1; a[two]=2; printf '%s|%s' "${a[one]}" "${#a[@]}"; printf '<%s>' "${!a[@]}""#,
     ]);
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "1|2|one two");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "1|2<one><two>");
 }
 
 #[test]
@@ -1399,6 +1404,100 @@ fn quoted_star_joins_elements_into_one_field() {
         r#"declare -A a; a[b]=2; a[a]=1; printf '<%s>' "${a[*]}""#,
     ]);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "<1 2>");
+}
+
+#[test]
+fn associative_arrays_accept_quoted_and_expanded_keys() {
+    let cases = [
+        (
+            r#"declare -A a; a["two words"]="v"; printf '<%s>' "${a["two words"]}""#,
+            "<v>",
+        ),
+        (
+            r#"k="two words"; declare -A a; a[$k]=1; printf '<%s>' "${a[$k]}""#,
+            "<1>",
+        ),
+        (
+            r#"declare -A a=(["two words"]="value"); printf '<%s>' "${a["two words"]}""#,
+            "<value>",
+        ),
+    ];
+    for (script, expected) in cases {
+        let out = sharky(&["-c", script]);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{script}");
+    }
+}
+
+#[test]
+fn array_fields_keep_prefixes_and_suffixes() {
+    let cases = [
+        (
+            r#"a=(one "two three" ""); printf '<%s>' pre"${a[@]}"post"#,
+            "<preone><two three><post>",
+        ),
+        (
+            r#"a=(one "two three" ""); printf '<%s>' "pre${a[@]}post""#,
+            "<preone><two three><post>",
+        ),
+        (
+            r#"a=(one two); printf '<%s>' "${a[@]^^}""#,
+            "<ONE><TWO>",
+        ),
+        (
+            r#"a=(one two); printf '<%s>' pre"${a[*]}"post"#,
+            "<preone twopost>",
+        ),
+        (
+            r#"set -- a b; printf '<%s>' pre"$@"post"#,
+            "<prea><bpost>",
+        ),
+    ];
+    for (script, expected) in cases {
+        let out = sharky(&["-c", script]);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{script}");
+    }
+}
+
+#[test]
+fn unset_leaves_a_hole_in_indexed_arrays() {
+    let out = sharky(&[
+        "-c",
+        r#"a=(one two three); unset 'a[1]'; printf '<%s>|<%s>' "${a[1]}" "${a[2]}""#,
+    ]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "<>|<three>");
+
+    let out = sharky(&[
+        "-c",
+        r#"a=(one two three); unset 'a[1]'; printf '<%s>' "${a[@]}""#,
+    ]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "<one><three>");
+
+    let out = sharky(&[
+        "-c",
+        r#"a=(one two three); unset 'a[1]'; printf '<%s>' "${!a[@]}""#,
+    ]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "<0><2>");
+}
+
+#[test]
+fn key_and_name_expansions_keep_one_field_per_item() {
+    let out = sharky(&[
+        "-c",
+        r#"declare -A a; a[b]=2; a["two words"]=1; for k in "${!a[@]}"; do printf '<%s>' "$k"; done"#,
+    ]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "<b><two words>");
+
+    let out = sharky(&["-c", r#"prefix_a=1; prefix_b=2; printf '<%s>' "${!prefix_@}""#]);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "<prefix_a><prefix_b>"
+    );
+
+    let out = sharky(&["-c", r#"prefix_a=1; prefix_b=2; printf '<%s>' "${!prefix_*}""#]);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "<prefix_a prefix_b>"
+    );
 }
 
 #[test]

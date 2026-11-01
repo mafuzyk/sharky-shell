@@ -698,42 +698,101 @@ impl Parser {
 }
 
 fn as_assignment(word: &Word) -> Option<Assignment> {
-    let Part::Literal(text) = word.parts.first()? else {
+    let eq_part = word
+        .parts
+        .iter()
+        .position(|part| matches!(part, Part::Literal(text) if text.contains('=')))?;
+    let Part::Literal(eq_text) = &word.parts[eq_part] else {
         return None;
     };
-    let (prefix, rest) = text.split_once('=')?;
+    let eq = eq_text.find('=')?;
 
-    let (name, index, append) = if let Some(open) = prefix.find('[') {
-        if !prefix.ends_with(']') {
-            return None;
-        }
-        let name = &prefix[..open];
-        let index = &prefix[open + 1..prefix.len() - 1];
-        if !is_name(name) || index.is_empty() {
-            return None;
-        }
-        (name.to_string(), Some(index.to_string()), false)
-    } else if let Some(name) = prefix.strip_suffix('+') {
-        (name.to_string(), None, true)
-    } else {
-        (prefix.to_string(), None, false)
-    };
-
-    if !is_name(&name) {
-        return None;
+    let mut prefix_parts: Vec<Part> = word.parts[..eq_part].to_vec();
+    if eq > 0 {
+        prefix_parts.push(Part::Literal(eq_text[..eq].to_string()));
     }
+    let (name, index, append) = split_assignment_prefix(&prefix_parts)?;
 
     let mut parts = Vec::new();
-    if !rest.is_empty() {
-        parts.push(Part::Literal(rest.to_string()));
+    if eq + 1 < eq_text.len() {
+        parts.push(Part::Literal(eq_text[eq + 1..].to_string()));
     }
-    parts.extend(word.parts[1..].iter().cloned());
+    parts.extend(word.parts[eq_part + 1..].iter().cloned());
     Some(Assignment {
         name,
         index,
         append,
         value: AssignmentValue::Word(Word { parts }),
     })
+}
+
+fn split_assignment_prefix(parts: &[Part]) -> Option<(String, Option<Word>, bool)> {
+    let mut name = String::new();
+    let mut index_parts: Vec<Part> = Vec::new();
+    let mut in_index = false;
+    let mut closed = false;
+    let mut append = false;
+
+    for (part_index, part) in parts.iter().enumerate() {
+        let last_part = part_index + 1 == parts.len();
+        match part {
+            Part::Literal(text) => {
+                let mut start = 0;
+                while start < text.len() {
+                    let rest = &text[start..];
+                    if !in_index && !closed {
+                        if let Some(open) = rest.find('[') {
+                            name.push_str(&rest[..open]);
+                            in_index = true;
+                            start += open + 1;
+                        } else if let Some(plus) = rest.find('+') {
+                            if !rest[plus + 1..].is_empty() {
+                                return None;
+                            }
+                            name.push_str(&rest[..plus]);
+                            append = true;
+                            start = text.len();
+                        } else {
+                            name.push_str(rest);
+                            start = text.len();
+                        }
+                    } else if in_index {
+                        if let Some(close) = rest.find(']') {
+                            if close > 0 {
+                                index_parts.push(Part::Literal(rest[..close].to_string()));
+                            }
+                            if !rest[close + 1..].is_empty() {
+                                return None;
+                            }
+                            closed = true;
+                            in_index = false;
+                            start = text.len();
+                        } else {
+                            index_parts.push(Part::Literal(rest.to_string()));
+                            start = text.len();
+                        }
+                    } else if rest == "+" && last_part {
+                        append = true;
+                        start = text.len();
+                    } else {
+                        return None;
+                    }
+                }
+            }
+            other if in_index => index_parts.push(other.clone()),
+            _ => return None,
+        }
+    }
+
+    if name.is_empty() || in_index || !is_name(&name) {
+        return None;
+    }
+    let index = if index_parts.is_empty() {
+        None
+    } else {
+        Some(Word { parts: index_parts })
+    };
+    Some((name, index, append))
 }
 
 fn is_name(text: &str) -> bool {

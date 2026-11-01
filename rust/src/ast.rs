@@ -81,7 +81,7 @@ pub struct Simple {
 #[derive(Debug, Clone)]
 pub struct Assignment {
     pub name: String,
-    pub index: Option<String>,
+    pub index: Option<Word>,
     pub append: bool,
     pub value: AssignmentValue,
 }

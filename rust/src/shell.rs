@@ -30,7 +30,7 @@ pub struct Shell {
     pub last_status: i32,
     pub last_duration_ms: u64,
     funcs: HashMap<String, List>,
-    arrays: HashMap<String, Vec<String>>,
+    arrays: HashMap<String, Vec<Option<String>>>,
     assoc: HashMap<String, BTreeMap<String, String>>,
     positional: Vec<String>,
     aliases: HashMap<String, String>,
@@ -1408,7 +1408,7 @@ impl Shell {
         }
 
         if let Some(values) = self.arrays.get(name) {
-            return values.first().cloned().unwrap_or_default();
+            return values.first().cloned().flatten().unwrap_or_default();
         }
 
         self.env
@@ -1423,7 +1423,15 @@ impl Shell {
             AssignmentValue::Array(elements) => {
                 let mut values = Vec::new();
                 for element in elements {
-                    values.extend(self.expand_word(element));
+                    let expanded = self.expand_word(element);
+                    if expanded.is_empty()
+                        && element.parts.len() == 1
+                        && matches!(&element.parts[0], Part::Double(inner) if inner.is_empty())
+                    {
+                        values.push(String::new());
+                    } else {
+                        values.extend(expanded);
+                    }
                 }
                 if self.assoc.contains_key(&assignment.name) {
                     let mut map = BTreeMap::new();
@@ -1446,15 +1454,19 @@ impl Shell {
             }
             AssignmentValue::Word(word) => {
                 let value = self.expand_assignment(word);
+                let index = assignment
+                    .index
+                    .as_ref()
+                    .map(|index| self.expand_assignment(index));
                 if self.assoc.contains_key(&assignment.name) {
-                    let key = assignment.index.clone().unwrap_or_else(|| "0".to_string());
+                    let key = index.unwrap_or_else(|| "0".to_string());
                     self.assoc
                         .entry(assignment.name.clone())
                         .or_default()
                         .insert(key, value);
                 } else {
-                    match &assignment.index {
-                        Some(index) => self.set_array_element(&assignment.name, index, value),
+                    match index {
+                        Some(index) => self.set_array_element(&assignment.name, &index, value),
                         None => self.set_var(&assignment.name, value),
                     }
                 }
@@ -1490,7 +1502,7 @@ impl Shell {
             if assoc {
                 let values = self.arrays.remove(&name).unwrap_or_default();
                 let map = self.assoc.entry(name).or_default();
-                for value in values {
+                for value in values.into_iter().flatten() {
                     if let Some((key, value)) = assoc_literal(&value) {
                         map.insert(key, value);
                     }
@@ -1505,9 +1517,13 @@ impl Shell {
 
     fn set_array(&mut self, name: &str, values: Vec<String>, append: bool) {
         if append {
-            self.arrays.entry(name.to_string()).or_default().extend(values);
+            self.arrays
+                .entry(name.to_string())
+                .or_default()
+                .extend(values.into_iter().map(Some));
         } else {
-            self.arrays.insert(name.to_string(), values);
+            self.arrays
+                .insert(name.to_string(), values.into_iter().map(Some).collect());
         }
     }
 
@@ -1522,9 +1538,9 @@ impl Shell {
         let index = self.resolve_array_index(index);
         let array = self.arrays.entry(name.to_string()).or_default();
         while array.len() <= index {
-            array.push(String::new());
+            array.push(None);
         }
-        array[index] = value;
+        array[index] = Some(value);
     }
 
     pub(crate) fn set_var(&mut self, name: &str, value: String) {
@@ -1552,8 +1568,8 @@ impl Shell {
                 }
                 if let Some(values) = self.arrays.get_mut(&array) {
                     if let Ok(index) = index.parse::<usize>() {
-                        if index < values.len() {
-                            values.remove(index);
+                        if let Some(slot) = values.get_mut(index) {
+                            *slot = None;
                         }
                     }
                     continue;
@@ -2337,26 +2353,33 @@ impl Shell {
                     fields.push(&home, true);
                 }
                 Part::Double(inner) => {
-                    if let [Part::Parameter(parameter)] = inner.as_slice()
-                        && let Some(values) = self.parameter_elements(parameter)
-                    {
-                        if parameter.index.as_deref() == Some("*") {
-                            fields.field_quoted(&values.join(" "));
-                        } else {
-                            for value in values {
-                                fields.field_quoted(&value);
+                    for part in inner {
+                        match part {
+                            Part::Variable(name) if name == "@" => {
+                                fields.field_quoted_multi(&self.positional, false);
+                            }
+                            Part::Parameter(parameter) => {
+                                if let Some(values) = self.parameter_elements(parameter) {
+                                    fields.field_quoted_multi(&values, joins_elements(parameter));
+                                } else {
+                                    let mut text = String::new();
+                                    self.expand_parts(std::slice::from_ref(part), &mut text);
+                                    fields.push(&text, true);
+                                }
+                            }
+                            _ => {
+                                let mut text = String::new();
+                                self.expand_parts(std::slice::from_ref(part), &mut text);
+                                fields.push(&text, true);
                             }
                         }
-                    } else {
-                        let mut text = String::new();
-                        self.expand_parts(inner, &mut text);
-                        fields.push(&text, true);
                     }
                 }
-                Part::Variable(name) if name == "@" || name == "*" => {
-                    for value in &self.positional {
-                        fields.field(value);
-                    }
+                Part::Variable(name) if name == "@" => {
+                    fields.field_multi(&self.positional, false);
+                }
+                Part::Variable(name) if name == "*" => {
+                    fields.push(&self.positional.join(" "), false);
                 }
                 Part::Variable(name) => {
                     let value = self.expansion_var(name);
@@ -2368,13 +2391,7 @@ impl Shell {
                 }
                 Part::Parameter(parameter) => {
                     if let Some(values) = self.parameter_elements(parameter) {
-                        if parameter.index.as_deref() == Some("*") {
-                            fields.push(&values.join(" "), false);
-                        } else {
-                            for value in values {
-                                fields.field(&value);
-                            }
-                        }
+                        fields.field_multi(&values, joins_elements(parameter));
                     } else {
                         let value = self.parameter_value(parameter);
                         fields.push(&value, false);
@@ -2453,7 +2470,7 @@ impl Shell {
 
         if parameter.operator == Some(ParamOp::Length) && multiple {
             if let Some(array) = self.arrays.get(&parameter.name) {
-                return array.len().to_string();
+                return array.iter().flatten().count().to_string();
             }
             if let Some(assoc) = self.assoc.get(&parameter.name) {
                 return assoc.len().to_string();
@@ -2463,8 +2480,11 @@ impl Shell {
 
         if parameter.operator == Some(ParamOp::Keys) && multiple {
             if let Some(array) = self.arrays.get(&parameter.name) {
-                return (0..array.len())
-                    .map(|index| index.to_string())
+                return array
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, value)| value.is_some())
+                    .map(|(index, _)| index.to_string())
                     .collect::<Vec<_>>()
                     .join(" ");
             }
@@ -2474,10 +2494,16 @@ impl Shell {
             return String::new();
         }
 
+        let expanded = match index {
+            Some(key) if key != "@" && key != "*" => Some(self.expand_string(key)),
+            _ => None,
+        };
+        let lookup = expanded.as_deref().or(index);
+
         let numeric_index = if self.assoc.contains_key(&parameter.name) {
             0
         } else {
-            index
+            lookup
                 .map(|text| self.resolve_array_index(text))
                 .unwrap_or(0)
         };
@@ -2487,16 +2513,25 @@ impl Shell {
             Some(ParamOp::Default | ParamOp::Assign | ParamOp::Alternate | ParamOp::Error)
         );
         let value = if let Some(assoc) = self.assoc.get(&parameter.name) {
-            match index {
+            match lookup {
                 Some("@") | Some("*") => assoc.values().cloned().collect::<Vec<_>>().join(" "),
                 Some(key) => assoc.get(key).cloned().unwrap_or_default(),
                 None => assoc.get("0").cloned().unwrap_or_default(),
             }
         } else if let Some(array) = self.arrays.get(&parameter.name) {
-            match index {
-                Some("@") | Some("*") => array.join(" "),
-                Some(_) => array.get(numeric_index).cloned().unwrap_or_default(),
-                None => array.first().cloned().unwrap_or_default(),
+            match lookup {
+                Some("@") | Some("*") => array
+                    .iter()
+                    .flatten()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                Some(_) => array
+                    .get(numeric_index)
+                    .cloned()
+                    .flatten()
+                    .unwrap_or_default(),
+                None => array.first().cloned().flatten().unwrap_or_default(),
             }
         } else if no_nounset {
             self.var(&parameter.name)
@@ -2595,19 +2630,104 @@ impl Shell {
     }
 
     fn parameter_elements(&mut self, parameter: &Parameter) -> Option<Vec<String>> {
+        match parameter.operator {
+            Some(ParamOp::Keys) => {
+                if let Some(assoc) = self.assoc.get(&parameter.name) {
+                    return Some(assoc.keys().cloned().collect());
+                }
+                if let Some(array) = self.arrays.get(&parameter.name) {
+                    return Some(
+                        array
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, value)| value.is_some())
+                            .map(|(index, _)| index.to_string())
+                            .collect(),
+                    );
+                }
+                return Some(Vec::new());
+            }
+            Some(ParamOp::Names) => {
+                let mut names: Vec<String> = self
+                    .env
+                    .iter()
+                    .filter(|(key, _)| key.starts_with(&parameter.name))
+                    .map(|(key, _)| key.clone())
+                    .collect();
+                names.extend(
+                    self.arrays
+                        .keys()
+                        .filter(|key| key.starts_with(&parameter.name))
+                        .cloned(),
+                );
+                names.extend(
+                    self.assoc
+                        .keys()
+                        .filter(|key| key.starts_with(&parameter.name))
+                        .cloned(),
+                );
+                names.sort();
+                names.dedup();
+                return Some(names);
+            }
+            Some(op @ (ParamOp::UpperFirst | ParamOp::UpperAll | ParamOp::LowerFirst | ParamOp::LowerAll)) => {
+                let index = parameter.index.as_deref()?;
+                if index != "@" && index != "*" {
+                    return None;
+                }
+                let values = if let Some(assoc) = self.assoc.get(&parameter.name) {
+                    assoc.values().cloned().collect::<Vec<_>>()
+                } else {
+                    self.arrays
+                        .get(&parameter.name)
+                        .map(|values| values.iter().flatten().cloned().collect())
+                        .unwrap_or_default()
+                };
+                return Some(
+                    values
+                        .into_iter()
+                        .map(|value| match op {
+                            ParamOp::UpperFirst => upper_first(&value),
+                            ParamOp::UpperAll => value.to_uppercase(),
+                            ParamOp::LowerFirst => lower_first(&value),
+                            ParamOp::LowerAll => value.to_lowercase(),
+                            _ => value,
+                        })
+                        .collect(),
+                );
+            }
+            None | Some(ParamOp::Substring) => {}
+            _ => return None,
+        }
+
+        if (parameter.name == "@" || parameter.name == "*")
+            && parameter.operator == Some(ParamOp::Substring)
+        {
+            let argument = parameter.argument.as_deref().unwrap_or("");
+            let Some((offset, length)) = self.slice_parts(argument) else {
+                return Some(Vec::new());
+            };
+            let mut values = self.positional.clone();
+            let offset = if offset > 0 { offset - 1 } else { offset };
+            let Some((start, end)) = bound_slice(values.len(), offset, length) else {
+                return Some(Vec::new());
+            };
+            values = values[start..end].to_vec();
+            return Some(values);
+        }
+
         let index = parameter.index.as_deref()?;
         if index != "@" && index != "*" {
             return None;
-        }
-        match parameter.operator {
-            None | Some(ParamOp::Substring) => {}
-            _ => return None,
         }
 
         let mut values = if let Some(assoc) = self.assoc.get(&parameter.name) {
             assoc.values().cloned().collect::<Vec<_>>()
         } else {
-            self.arrays.get(&parameter.name).cloned().unwrap_or_default()
+            self.arrays
+                .get(&parameter.name)
+                .map(|values| values.iter().flatten().cloned().collect())
+                .unwrap_or_default()
         };
 
         if parameter.operator == Some(ParamOp::Substring) {
@@ -2857,6 +2977,13 @@ impl Shell {
 
         out
     }
+}
+
+fn joins_elements(parameter: &Parameter) -> bool {
+    parameter.index.as_deref() == Some("*")
+        || (parameter.name == "*" && parameter.operator == Some(ParamOp::Substring))
+        || (parameter.operator == Some(ParamOp::Names)
+            && parameter.argument.as_deref() == Some("*"))
 }
 
 fn bound_slice(len: usize, offset: i64, length: Option<i64>) -> Option<(usize, usize)> {
@@ -3413,21 +3540,40 @@ impl Fields {
         }
     }
 
-    fn field_quoted(&mut self, text: &str) {
-        if self.started {
-            self.flush();
+    fn field_quoted_multi(&mut self, values: &[String], join: bool) {
+        if values.is_empty() {
+            return;
         }
-        self.done.push((text.to_string(), false));
+        if join {
+            self.current.push_str(&values.join(" "));
+            self.started = true;
+            return;
+        }
+        let last = values.len() - 1;
+        for (index, value) in values.iter().enumerate() {
+            self.current.push_str(value);
+            self.started = true;
+            if index < last {
+                self.flush();
+            }
+        }
     }
 
-    fn field(&mut self, text: &str) {
-        if self.started {
-            self.flush();
+    fn field_multi(&mut self, values: &[String], join: bool) {
+        if values.is_empty() {
+            return;
         }
-        self.current.push_str(text);
-        self.started = true;
-        self.glob = true;
-        self.flush();
+        if join {
+            self.push(&values.join(" "), false);
+            return;
+        }
+        let last = values.len() - 1;
+        for (index, value) in values.iter().enumerate() {
+            self.push(value, false);
+            if index < last {
+                self.flush();
+            }
+        }
     }
 
     fn flush(&mut self) {
