@@ -580,6 +580,7 @@ struct HistorySession {
     master: std::os::fd::OwnedFd,
     writer: std::fs::File,
     data: std::path::PathBuf,
+    home: std::path::PathBuf,
 }
 
 fn history_session() -> HistorySession {
@@ -593,6 +594,8 @@ fn history_session_with(config_text: Option<&str>) -> HistorySession {
         std::thread::current().id()
     ));
     std::fs::create_dir_all(&data).unwrap();
+    let home = data.join("home");
+    std::fs::create_dir_all(&home).unwrap();
     let config_dir = data.join("config");
     let config_env = match config_text {
         Some(text) => {
@@ -614,7 +617,7 @@ fn history_session_with(config_text: Option<&str>) -> HistorySession {
         .stderr(stderr)
         .env("SHARKY_CONFIG", config_env)
         .env("TERM", "xterm-256color")
-        .env("HOME", "/tmp")
+        .env("HOME", &home)
         .env("XDG_DATA_HOME", &data)
         .spawn()
         .expect("spawn sharky");
@@ -630,6 +633,7 @@ fn history_session_with(config_text: Option<&str>) -> HistorySession {
         master: pty.master,
         writer,
         data,
+        home,
     }
 }
 
@@ -1086,6 +1090,112 @@ fn completion_dir(name: &str) -> std::path::PathBuf {
     dir
 }
 
+fn set_terminal_width(fd: std::os::fd::RawFd, columns: u16) {
+    let size = libc::winsize {
+        ws_row: 24,
+        ws_col: columns,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    unsafe {
+        libc::ioctl(fd, libc::TIOCSWINSZ, &size);
+    }
+}
+
+#[test]
+fn completion_menu_stays_closed_in_a_narrow_terminal() {
+    let dir = completion_dir("narrow");
+    std::fs::write(dir.join("alpha.txt"), "ALPHA").unwrap();
+    std::fs::write(dir.join("alpine.txt"), "ALPINE").unwrap();
+    let mut session = history_session();
+    set_terminal_width(session.master.as_raw_fd(), 10);
+    session.run(&format!("cd {}", dir.display()));
+    let _ = session.writer.write_all(b"cat al\t");
+    std::thread::sleep(Duration::from_millis(150));
+    let seen = read_until(session.master.as_raw_fd(), "alp", Duration::from_millis(200));
+    assert!(!seen.contains("alpha.txt"), "menu opened in 10 columns: {seen:?}");
+    let _ = session.writer.write_all(b"\x03");
+    let _ = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    session.finish();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn completion_menu_keeps_the_selection_visible() {
+    let dir = completion_dir("window");
+    for index in 0..10 {
+        std::fs::write(dir.join(format!("aa{index}.txt")), "X").unwrap();
+    }
+    let mut session = history_session();
+    session.run(&format!("cd {}", dir.display()));
+    let _ = session.writer.write_all(b"cat aa");
+    let _ = session.writer.write_all(b"\t\t\t\t\t\t\t\t\t");
+    let seen = read_until(
+        session.master.as_raw_fd(),
+        "> aa8.txt",
+        Duration::from_secs(5),
+    );
+    assert!(seen.contains("> aa8.txt"), "selection left the window: {seen:?}");
+    let _ = session.writer.write_all(b"\x1b");
+    let _ = read_until(
+        session.master.as_raw_fd(),
+        "\u{0}",
+        Duration::from_millis(300),
+    );
+    let _ = session.writer.write_all(b"\x03");
+    let _ = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    session.finish();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn completion_escapes_file_names() {
+    let dir = completion_dir("escape");
+    let marker = dir.join("pwned");
+    let name = "zz;touch pwned";
+    std::fs::write(dir.join(name), "SAFE").unwrap();
+
+    let mut session = history_session();
+    session.run(&format!("cd {}", dir.display()));
+    let _ = session.writer.write_all(b"cat zz");
+    let _ = session.writer.write_all(b"\t");
+    let _ = session.writer.write_all(b"\r");
+    let out = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    assert!(out.contains("SAFE"), "file was not read: {out:?}");
+    assert!(!marker.exists(), "completion ran the file name: {out:?}");
+    session.finish();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn fuzzy_files_restores_the_screen_on_escape() {
+    let mut session = history_session();
+    session.run("printf SCREEN_MARKER");
+    let _ = session.writer.write_all(b"\x14");
+    let seen = read_until(session.master.as_raw_fd(), "fuzzy>", Duration::from_secs(5));
+    assert!(seen.contains("fuzzy>"), "pager did not open: {seen:?}");
+    let _ = session.writer.write_all(b"\x1b");
+    let seen = read_until(
+        session.master.as_raw_fd(),
+        "\x1b[?1049l",
+        Duration::from_secs(5),
+    );
+    assert!(seen.contains("\x1b[?1049l"), "screen not restored: {seen:?}");
+    session.finish();
+}
+
 #[test]
 fn completion_menu_navigates_and_inserts() {
     let dir = completion_dir("menu");
@@ -1249,12 +1359,14 @@ fn fuzzy_file_search_cancel_keeps_the_buffer() {
 
 #[test]
 fn completion_expands_tilde_paths() {
-    let dir = std::env::temp_dir().join(format!("sharky-tilde-{}", std::process::id()));
+    let mut session = history_session();
+    let dir = session
+        .home
+        .join(format!("sharky-tilde-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("only.txt"), "TILDE-CONTENT").unwrap();
     let name = dir.file_name().unwrap().to_string_lossy().into_owned();
 
-    let mut session = history_session();
     let _ = session
         .writer
         .write_all(format!("cat ~/{name}/onl\t\r").as_bytes());
@@ -1264,6 +1376,55 @@ fn completion_expands_tilde_paths() {
         Duration::from_secs(5),
     );
     assert!(out.contains("TILDE-CONTENT"), "tilde completion: {out:?}");
+    session.finish();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn completion_includes_builtins_without_a_path() {
+    let mut session = history_session();
+    session.run("PATH=/nonexistent");
+    let _ = session.writer.write_all(b"rel");
+    let _ = session.writer.write_all(b"\t");
+    let seen = read_until(
+        session.master.as_raw_fd(),
+        "reload",
+        Duration::from_secs(5),
+    );
+    assert!(seen.contains("reload"), "builtin not completed: {seen:?}");
+    let _ = session.writer.write_all(b"\x03");
+    let _ = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    session.finish();
+}
+
+#[test]
+fn completion_appends_a_slash_to_directories() {
+    let mut session = history_session();
+    let dir = session
+        .home
+        .join(format!("sharky-dironly-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+    let prefix = &name[.."sharky-dironly".len()];
+    let _ = session
+        .writer
+        .write_all(format!("ls ~/{prefix}\t").as_bytes());
+    let seen = read_until(
+        session.master.as_raw_fd(),
+        &name,
+        Duration::from_secs(5),
+    );
+    assert!(seen.contains(&format!("{name}/")), "missing slash: {seen:?}");
+    let _ = session.writer.write_all(b"\x03");
+    let _ = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
     session.finish();
     std::fs::remove_dir_all(&dir).ok();
 }

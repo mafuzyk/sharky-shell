@@ -62,7 +62,7 @@ impl Editor {
             let display = highlight::render(shell, &buffer);
             let (menu_text, menu_rows) = menu
                 .as_ref()
-                .map(|menu| render_menu(shell, menu))
+                .map(|menu| render_menu(shell, menu, term::width()))
                 .unwrap_or_default();
             self.render_input(
                 &buffer,
@@ -243,12 +243,13 @@ impl Editor {
                         continue;
                     }
                     Outcome::FuzzyFiles => {
-                        if let Some(path) = fuzzy_files(shell)? {
+                        term::write_stdout("\x1b[?1049h")?;
+                        let selected = fuzzy_files(shell);
+                        term::write_stdout("\x1b[?1049l")?;
+                        if let Some(path) = selected? {
                             push_undo(&mut undo, &buffer, cursor);
-                            insert_text(&mut buffer, &mut cursor, &path);
+                            insert_text(&mut buffer, &mut cursor, &escape_completion(&path));
                         }
-                        term::write_stdout("\x1b[2J\x1b[H")?;
-                        term::write_stdout(prompt)?;
                         continue;
                     }
                 }
@@ -1488,34 +1489,45 @@ fn collect_files_in(
     }
 }
 
-fn render_menu(shell: &Shell, menu: &CompletionMenu) -> (String, usize) {
+fn render_menu(shell: &Shell, menu: &CompletionMenu, columns: usize) -> (String, usize) {
     const MAX_ROWS: usize = 8;
-    let shown = menu.candidates.len().min(MAX_ROWS);
-    let mut rows = shown;
+    let total = menu.candidates.len();
+    let shown = total.min(MAX_ROWS);
+    let start = menu
+        .selected
+        .saturating_sub(shown / 2)
+        .min(total.saturating_sub(shown));
+    let end = (start + shown).min(total);
+    let width = columns.saturating_sub(1).max(1);
+    let mut rows = 0;
     let mut out = String::new();
 
-    for (index, candidate) in menu.candidates.iter().take(shown).enumerate() {
-        if index > 0 {
+    let mut push_row = |out: &mut String, line: String| {
+        if rows > 0 {
             out.push_str("\r\n");
         }
-        let line = if index == menu.selected {
-            format!("> {candidate}")
-        } else {
-            format!("  {candidate}")
-        };
+        out.push_str(&line);
+        rows += 1;
+    };
+
+    if start > 0 {
+        push_row(&mut out, format!("  (+{start} above)"));
+    }
+    for (index, candidate) in menu.candidates[start..end].iter().enumerate() {
+        let index = start + index;
+        let marker = if index == menu.selected { "> " } else { "  " };
+        let line: String = format!("{marker}{candidate}")
+            .chars()
+            .take(width)
+            .collect();
         if index == menu.selected {
-            out.push_str(&prompt::painted(shell, "selection", &line));
+            push_row(&mut out, prompt::painted(shell, "selection", &line));
         } else {
-            out.push_str(&line);
+            push_row(&mut out, line);
         }
     }
-
-    if menu.candidates.len() > shown {
-        out.push_str(&format!(
-            "\r\n  (+{} more)",
-            menu.candidates.len() - shown
-        ));
-        rows += 1;
+    if end < total {
+        push_row(&mut out, format!("  (+{} more)", total - end));
     }
 
     (out, rows)
@@ -1525,6 +1537,7 @@ struct CompletionMenu {
     start: usize,
     candidates: Vec<String>,
     selected: usize,
+    escape: bool,
 }
 
 fn complete_menu(buffer: &mut Vec<char>, cursor: &mut usize, shell: &Shell) -> Option<CompletionMenu> {
@@ -1546,12 +1559,14 @@ fn complete_menu(buffer: &mut Vec<char>, cursor: &mut usize, shell: &Shell) -> O
         .map(|char| matches!(char, '|' | ';' | '&' | '(' | '{'))
         .unwrap_or(true);
 
+    let mut escape = false;
     let mut candidates = if word.starts_with('$') {
         variable_candidates(&word, shell)
     } else if let Some(candidates) = git_branch_candidates(&word, &before, &shell.cwd) {
         candidates
     } else if word.contains('/') || !command_position {
-        file_candidates(&word)
+        escape = true;
+        file_candidates(&word, shell)
     } else {
         command_candidates(&word, shell)
     };
@@ -1577,19 +1592,74 @@ fn complete_menu(buffer: &mut Vec<char>, cursor: &mut usize, shell: &Shell) -> O
         } else {
             " "
         };
-        insert_text(buffer, cursor, &format!("{suffix}{trailing}"));
+        let inserted = if escape {
+            escape_completion(suffix)
+        } else {
+            suffix.to_string()
+        };
+        insert_text(buffer, cursor, &format!("{inserted}{trailing}"));
         return None;
     }
 
     if common.len() > word.len() {
-        insert_text(buffer, cursor, &common[word.len()..]);
+        let suffix = &common[word.len()..];
+        let inserted = if escape {
+            escape_completion(suffix)
+        } else {
+            suffix.to_string()
+        };
+        insert_text(buffer, cursor, &inserted);
+    }
+
+    if term::width() < 20 {
+        return None;
     }
 
     Some(CompletionMenu {
         start,
         candidates,
         selected: 0,
+        escape,
     })
+}
+
+fn escape_completion(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for (index, char) in text.chars().enumerate() {
+        if index == 0 && char == '~' {
+            out.push(char);
+            continue;
+        }
+        if char.is_whitespace()
+            || matches!(
+                char,
+                '\\' | '\''
+                    | '"'
+                    | '`'
+                    | '$'
+                    | '&'
+                    | ';'
+                    | '|'
+                    | '<'
+                    | '>'
+                    | '('
+                    | ')'
+                    | '{'
+                    | '}'
+                    | '['
+                    | ']'
+                    | '*'
+                    | '?'
+                    | '!'
+                    | '#'
+                    | '~'
+            )
+        {
+            out.push('\\');
+        }
+        out.push(char);
+    }
+    out
 }
 
 fn insert_text(buffer: &mut Vec<char>, cursor: &mut usize, text: &str) {
@@ -1610,7 +1680,12 @@ fn insert_selection(
     let end = (*cursor).min(buffer.len());
     buffer.drain(menu.start..end);
     *cursor = menu.start;
-    insert_text(buffer, cursor, candidate);
+    let text = if menu.escape {
+        escape_completion(candidate)
+    } else {
+        candidate.clone()
+    };
+    insert_text(buffer, cursor, &text);
 }
 
 fn variable_candidates(word: &str, shell: &Shell) -> Vec<String> {
@@ -1728,8 +1803,8 @@ fn command_candidates(word: &str, shell: &Shell) -> Vec<String> {
     out
 }
 
-fn file_candidates(word: &str) -> Vec<String> {
-    let home = std::env::var("HOME").unwrap_or_default();
+fn file_candidates(word: &str, shell: &Shell) -> Vec<String> {
+    let home = shell.var("HOME");
     let lookup = match word.strip_prefix('~') {
         Some(rest) => format!("{home}{rest}"),
         None => word.to_string(),
@@ -1754,10 +1829,15 @@ fn file_candidates(word: &str) -> Vec<String> {
             if !name.starts_with(base) || (name.starts_with('.') && !base.starts_with('.')) {
                 return None;
             }
-            Some(if display.is_empty() {
-                name
+            let suffix = if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+                "/"
             } else {
-                format!("{display}{name}")
+                ""
+            };
+            Some(if display.is_empty() {
+                format!("{name}{suffix}")
+            } else {
+                format!("{display}{name}{suffix}")
             })
         })
         .collect()

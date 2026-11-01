@@ -367,7 +367,9 @@ impl Shell {
     pub fn command_words(&self) -> Vec<String> {
         let mut words: Vec<String> = [
             ":", "true", "false", "cd", "exit", "export", "unset", "set", "source", ".",
-            "break", "continue", "return", "jobs", "fg", "bg", "declare",
+            "break", "continue", "return", "jobs", "fg", "bg", "declare", "pwd", "type",
+            "alias", "abbr", "unabbr", "unalias", "history", "wait", "kill", "z", "zi",
+            "reload", "trap", "read", "shift",
         ]
         .iter()
         .map(|word| word.to_string())
