@@ -1727,3 +1727,12 @@ fn login_profiles_run_before_a_script() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "yes");
     std::fs::remove_dir_all(&home).ok();
 }
+
+#[test]
+fn set_reports_and_toggles_vi_mode() {
+    let out = sharky(&["-c", "set -o vi; set"]);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("vi"));
+
+    let out = sharky(&["-c", "set -o vi; set +o vi; set"]);
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("vi"));
+}

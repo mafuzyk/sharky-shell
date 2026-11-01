@@ -103,7 +103,7 @@ The prompt, `-c` and script files share one grammar:
 | heredocs and here-strings | `cat <<EOF` ... `EOF`, `<<-EOF`, `<<'EOF'`, `cat <<< "text"` |
 | process substitution | `diff <(a) <(b)`, `tee >(cat > out)` |
 | lists | `a; b`, `a && b`, `a \|\| b` |
-| options | `set -e`, `set -u`, `set -x`, `set -o pipefail`, `set -H`/`+H`, `set -- a b` |
+| options | `set -e`, `set -u`, `set -x`, `set -o pipefail`, `set -H`/`+H`, `set -o vi`/`+o vi`, `set -- a b` |
 | traps | `trap 'cleanup' EXIT`, `trap -l` |
 | read and shift | `read -r name`, `shift 2` |
 | conditionals | `if`, `elif`, `else`, `fi`, `[[ -f x && "$y" =~ ^f ]]` |
@@ -116,6 +116,7 @@ The prompt, `-c` and script files share one grammar:
 | paste and multiline | bracketed paste inserts text verbatim; Enter submits the whole buffer; Up/Down, Home/End work per line |
 | autosuggest | history suffix ghost text; Right/End accepts, `tide autosuggest off` disables |
 | completion | Tab completes commands, variables, files and git branches; several matches open a menu (Tab/Shift-Tab, Enter, Esc) |
+| vi mode | `set -o vi`; Esc for normal mode, `h l 0 $ w b e j k`, `x dd dw d$ D cw C p P u r`, counts; `set +o vi` returns to emacs |
 | fuzzy files | Ctrl-T opens a ranked file list; type to filter, arrows to move, Enter inserts, Esc cancels |
 | syntax highlighting | `wave command`, `builtin`, `string`, `variable`, `operator`, `path`, `comment`, `error`; `tide highlight off` disables |
 | history expansion | `!!`, `!n`, `!-n`, `!prefix`, `!?text?`, `!$`, `!*`, `!^`, `^old^new^`; `set +H` disables |

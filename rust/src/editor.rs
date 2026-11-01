@@ -44,9 +44,17 @@ impl Editor {
         let bindings = build_bindings(shell);
         let mut undo: Vec<(Vec<char>, usize)> = Vec::new();
         let mut menu: Option<CompletionMenu> = None;
+        let mut vi_normal = false;
+        let mut vi_count = 0usize;
+        let mut vi_pending: Option<char> = None;
+        let mut vi_replace = false;
 
         loop {
-            let suggestion = autosuggest(shell, &buffer, cursor, prompt_width);
+            let suggestion = if vi_normal {
+                None
+            } else {
+                autosuggest(shell, &buffer, cursor, prompt_width)
+            };
             let ghost = suggestion
                 .as_deref()
                 .map(|text| prompt::painted(shell, "suggestion", text))
@@ -130,6 +138,71 @@ impl Editor {
                     }
                     Key::Ctrl('c') => menu = None,
                     _ => menu = None,
+                }
+            }
+
+            if key == Key::Escape && shell.vi_mode() {
+                vi_normal = true;
+                cursor = cursor.saturating_sub(1);
+                vi_pending = None;
+                vi_replace = false;
+                vi_count = 0;
+                continue;
+            }
+
+            if vi_normal {
+                match key {
+                    Key::Enter => {
+                        expand_abbreviation(&mut buffer, &mut cursor, shell, "");
+                        term::write_stdout("\r\n")?;
+                        return Ok(Line::Content(buffer.iter().collect()));
+                    }
+                    Key::Backspace => {
+                        if cursor < buffer.len() {
+                            push_undo(&mut undo, &buffer, cursor);
+                            buffer.remove(cursor);
+                        } else if cursor > 0 {
+                            push_undo(&mut undo, &buffer, cursor);
+                            buffer.remove(cursor - 1);
+                            cursor -= 1;
+                        }
+                        vi_count = 0;
+                        continue;
+                    }
+                    Key::Ctrl('r') => {
+                        if history_search(prompt_width, &prompt_last, shell, &mut buffer, &mut cursor)?
+                        {
+                            term::write_stdout("\r\n")?;
+                            return Ok(Line::Content(buffer.iter().collect()));
+                        }
+                        vi_count = 0;
+                        continue;
+                    }
+                    Key::Escape => {
+                        vi_pending = None;
+                        vi_replace = false;
+                        vi_count = 0;
+                        continue;
+                    }
+                    Key::Char(char) => {
+                        vi_command(
+                            char,
+                            &mut buffer,
+                            &mut cursor,
+                            &mut vi_normal,
+                            &mut vi_count,
+                            &mut vi_pending,
+                            &mut vi_replace,
+                            &mut undo,
+                            shell,
+                            self,
+                        );
+                        continue;
+                    }
+                    _ => {
+                        vi_count = 0;
+                        continue;
+                    }
                 }
             }
 
@@ -800,6 +873,283 @@ fn redraw_input(
         out.push_str(&format!("\x1b[{cursor_column}C"));
     }
     term::write_stdout(&out)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn vi_command(
+    char: char,
+    buffer: &mut Vec<char>,
+    cursor: &mut usize,
+    vi_normal: &mut bool,
+    count: &mut usize,
+    pending: &mut Option<char>,
+    replace: &mut bool,
+    undo: &mut Vec<(Vec<char>, usize)>,
+    shell: &Shell,
+    editor: &mut Editor,
+) {
+    if *replace {
+        if *cursor < buffer.len() {
+            push_undo(undo, buffer, *cursor);
+            let times = (*count).max(1);
+            for _ in 0..times {
+                if *cursor < buffer.len() {
+                    buffer[*cursor] = char;
+                    *cursor += 1;
+                }
+            }
+        }
+        *replace = false;
+        *count = 0;
+        return;
+    }
+
+    if char.is_ascii_digit() && !(char == '0' && *count == 0) {
+        *count = count
+            .saturating_mul(10)
+            .saturating_add((char as u8 - b'0') as usize);
+        return;
+    }
+
+    let times = (*count).max(1);
+
+    if let Some(operator) = *pending {
+        *pending = None;
+        match char {
+            'd' if operator == 'd' => editor.vi_delete_lines(buffer, cursor, times, undo),
+            'c' if operator == 'c' => {
+                editor.vi_delete_lines(buffer, cursor, times, undo);
+                *vi_normal = false;
+            }
+            'w' => {
+                let end = if operator == 'c' {
+                    (0..times).fold(*cursor, |index, _| vi_word_end(buffer, index))
+                } else {
+                    (0..times).fold(*cursor, |index, _| vi_word_forward(buffer, index))
+                };
+                editor.vi_kill_range(buffer, cursor, *cursor, end, undo);
+                if operator == 'c' {
+                    *vi_normal = false;
+                }
+            }
+            'b' => {
+                let start = (0..times).fold(*cursor, |index, _| vi_word_backward(buffer, index));
+                editor.vi_kill_range(buffer, cursor, start, *cursor, undo);
+            }
+            'e' => {
+                let end = (0..times).fold(*cursor, |index, _| vi_word_end(buffer, index));
+                editor.vi_kill_range(buffer, cursor, *cursor, end, undo);
+            }
+            '$' => {
+                let end = line_end(buffer, *cursor);
+                editor.vi_kill_range(buffer, cursor, *cursor, end, undo);
+            }
+            '0' => {
+                let start = line_start(buffer, *cursor);
+                editor.vi_kill_range(buffer, cursor, start, *cursor, undo);
+            }
+            _ => {}
+        }
+        *count = 0;
+        return;
+    }
+
+    match char {
+        'i' => *vi_normal = false,
+        'a' => {
+            *cursor = (*cursor + 1).min(buffer.len());
+            *vi_normal = false;
+        }
+        'I' => {
+            *cursor = line_start(buffer, *cursor);
+            *vi_normal = false;
+        }
+        'A' => {
+            *cursor = line_end(buffer, *cursor);
+            *vi_normal = false;
+        }
+        'o' => {
+            push_undo(undo, buffer, *cursor);
+            let end = line_end(buffer, *cursor);
+            buffer.insert(end, '\n');
+            *cursor = end + 1;
+            *vi_normal = false;
+        }
+        'O' => {
+            push_undo(undo, buffer, *cursor);
+            let start = line_start(buffer, *cursor);
+            buffer.insert(start, '\n');
+            *cursor = start;
+            *vi_normal = false;
+        }
+        'h' => *cursor = cursor.saturating_sub(times),
+        'l' => *cursor = (*cursor + times).min(buffer.len()),
+        '0' => *cursor = line_start(buffer, *cursor),
+        '$' => *cursor = vi_line_end(buffer, *cursor),
+        'w' => {
+            for _ in 0..times {
+                *cursor = vi_word_forward(buffer, *cursor);
+            }
+        }
+        'b' => {
+            for _ in 0..times {
+                *cursor = vi_word_backward(buffer, *cursor);
+            }
+        }
+        'e' => {
+            for _ in 0..times {
+                *cursor = vi_word_end(buffer, *cursor).saturating_sub(1).max(*cursor);
+            }
+        }
+        'j' => {
+            for _ in 0..times {
+                editor.recall_older(buffer, cursor, shell);
+                *cursor = cursor.saturating_sub(1);
+            }
+        }
+        'k' => {
+            for _ in 0..times {
+                editor.recall_newer(buffer, cursor, shell);
+                *cursor = cursor.saturating_sub(1);
+            }
+        }
+        'd' | 'c' => {
+            *pending = Some(char);
+            return;
+        }
+        'x' => {
+            let end = (*cursor + times).min(buffer.len());
+            editor.vi_kill_range(buffer, cursor, *cursor, end, undo);
+        }
+        'D' => {
+            let end = line_end(buffer, *cursor);
+            editor.vi_kill_range(buffer, cursor, *cursor, end, undo);
+        }
+        'C' => {
+            let end = line_end(buffer, *cursor);
+            editor.vi_kill_range(buffer, cursor, *cursor, end, undo);
+            *vi_normal = false;
+        }
+        'p' => editor.vi_paste(buffer, cursor, false, undo),
+        'P' => editor.vi_paste(buffer, cursor, true, undo),
+        'u' => {
+            if let Some((previous, position)) = undo.pop() {
+                *buffer = previous;
+                *cursor = position.min(buffer.len());
+            }
+        }
+        'r' => {
+            *replace = true;
+            return;
+        }
+        _ => {}
+    }
+    *count = 0;
+}
+
+fn vi_word_forward(buffer: &[char], cursor: usize) -> usize {
+    let mut index = cursor.min(buffer.len());
+    while index < buffer.len() && is_word_char(buffer[index]) {
+        index += 1;
+    }
+    while index < buffer.len() && !is_word_char(buffer[index]) && buffer[index] != '\n' {
+        index += 1;
+    }
+    index
+}
+
+fn vi_word_backward(buffer: &[char], cursor: usize) -> usize {
+    let mut index = cursor.min(buffer.len());
+    while index > 0 && !is_word_char(buffer[index - 1]) && buffer[index - 1] != '\n' {
+        index -= 1;
+    }
+    while index > 0 && is_word_char(buffer[index - 1]) {
+        index -= 1;
+    }
+    index
+}
+
+fn vi_line_end(buffer: &[char], cursor: usize) -> usize {
+    let end = line_end(buffer, cursor);
+    if end > line_start(buffer, cursor) {
+        end - 1
+    } else {
+        end
+    }
+}
+
+fn vi_word_end(buffer: &[char], cursor: usize) -> usize {
+    let mut index = cursor.min(buffer.len());
+    while index < buffer.len() && !is_word_char(buffer[index]) && buffer[index] != '\n' {
+        index += 1;
+    }
+    while index < buffer.len() && is_word_char(buffer[index]) {
+        index += 1;
+    }
+    index
+}
+
+impl Editor {
+    fn vi_kill_range(
+        &mut self,
+        buffer: &mut Vec<char>,
+        cursor: &mut usize,
+        start: usize,
+        end: usize,
+        undo: &mut Vec<(Vec<char>, usize)>,
+    ) {
+        if start >= end || end > buffer.len() {
+            return;
+        }
+        push_undo(undo, buffer, *cursor);
+        self.kill = buffer[start..end].iter().collect();
+        buffer.drain(start..end);
+        if *cursor >= end {
+            *cursor -= end - start;
+        } else if *cursor > start {
+            *cursor = start;
+        }
+    }
+
+    fn vi_delete_lines(
+        &mut self,
+        buffer: &mut Vec<char>,
+        cursor: &mut usize,
+        count: usize,
+        undo: &mut Vec<(Vec<char>, usize)>,
+    ) {
+        let start = line_start(buffer, *cursor);
+        let mut end = start;
+        for _ in 0..count {
+            end = line_end(buffer, end);
+            if end < buffer.len() && buffer[end] == '\n' {
+                end += 1;
+            }
+        }
+        self.vi_kill_range(buffer, cursor, start, end, undo);
+        *cursor = (*cursor).min(buffer.len());
+    }
+
+    fn vi_paste(
+        &mut self,
+        buffer: &mut Vec<char>,
+        cursor: &mut usize,
+        before: bool,
+        undo: &mut Vec<(Vec<char>, usize)>,
+    ) {
+        if self.kill.is_empty() {
+            return;
+        }
+        push_undo(undo, buffer, *cursor);
+        let at = if before {
+            *cursor
+        } else {
+            (*cursor + 1).min(buffer.len())
+        };
+        let text: Vec<char> = self.kill.chars().collect();
+        buffer.splice(at..at, text.iter().copied());
+        *cursor = at + text.len();
+    }
 }
 
 fn find_suggestion(entries: &[String], buffer: &[char], cursor: usize) -> Option<String> {

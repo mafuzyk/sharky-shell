@@ -1267,3 +1267,168 @@ fn completion_expands_tilde_paths() {
     session.finish();
     std::fs::remove_dir_all(&dir).ok();
 }
+
+fn decode_url(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap_or("");
+            if let Ok(value) = u8::from_str_radix(hex, 16) {
+                out.push(value as char);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index] as char);
+        index += 1;
+    }
+    out
+}
+
+fn vi_execute(session: &mut HistorySession, initial: &str, keys: &str) -> String {
+    let _ = session.writer.write_all(initial.as_bytes());
+    std::thread::sleep(Duration::from_millis(40));
+    let _ = session.writer.write_all(b"\x1b");
+    std::thread::sleep(Duration::from_millis(80));
+    let _ = session.writer.write_all(keys.as_bytes());
+    let _ = session.writer.write_all(b"\r");
+    let out = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    let Some(start) = out.find("cmdline_url=") else {
+        return String::new();
+    };
+    let start = start + "cmdline_url=".len();
+    let end = out[start..]
+        .find("\u{1b}\\")
+        .map(|offset| start + offset)
+        .unwrap_or(out.len());
+    decode_url(&out[start..end])
+}
+
+#[test]
+fn vi_motions_and_operators() {
+    let mut session = history_session();
+    session.run("set -o vi");
+
+    let cases = [
+        ("echo abc", "hx", "echo ac"),
+        ("echo abc", "0lx", "eho abc"),
+        ("echo abc", "0x", "cho abc"),
+        ("echo abc", "$x", "echo ab"),
+        ("echo one two", "0wx", "echo ne two"),
+        ("echo one", "0wbx", "cho one"),
+        ("echo one", "0ex", "ech one"),
+        ("echo one two", "0dw", "one two"),
+        ("echo abc", "0llD", "ec"),
+        ("echo abc", "0cwX", "X abc"),
+        ("echo abc", "0CX", "X"),
+        ("echo", "dwp", "echo"),
+        ("echo abc", "xu", "echo abc"),
+        ("echo abc", "0rX", "Xcho abc"),
+        ("a b c d", "03wx", "a b c "),
+        ("echo abc", "\x7f", "echo ab"),
+        ("echo abc", "ddiprintf DD", "printf DD"),
+    ];
+
+    for (initial, keys, expected) in cases {
+        let command = vi_execute(&mut session, initial, keys);
+        assert_eq!(command, expected, "initial={initial:?} keys={keys:?}");
+    }
+
+    let _ = session.writer.write_all(b"echo abc");
+    std::thread::sleep(Duration::from_millis(40));
+    let _ = session.writer.write_all(b"\x1b");
+    std::thread::sleep(Duration::from_millis(80));
+    let _ = session.writer.write_all(b"0d\x1b");
+    std::thread::sleep(Duration::from_millis(80));
+    let _ = session.writer.write_all(b"x\r");
+    let out = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    assert!(
+        out.contains("cmdline_url=cho%20abc"),
+        "Esc did not cancel the pending operator: {out:?}"
+    );
+
+    session.finish();
+}
+
+#[test]
+fn vi_history_and_mode_switches() {
+    let mut session = history_session();
+    session.run("set -o vi");
+    session.run("echo first");
+    session.run("echo second");
+
+    let _ = session.writer.write_all(b"\x1b");
+    std::thread::sleep(Duration::from_millis(80));
+    let _ = session.writer.write_all(b"k\r");
+    let out = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    assert!(out.contains("cmdline_url=echo%20second"), "vi k: {out:?}");
+
+    session.run("set +o vi");
+    let _ = session.writer.write_all(b"echo ok\r");
+    let out = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    assert!(
+        out.contains("cmdline_url=echo%20ok"),
+        "set +o vi broke insert mode: {out:?}"
+    );
+
+    session.run("set -o vi");
+    let command = vi_execute(&mut session, "echo ok", "x");
+    assert_eq!(command, "echo o");
+    session.finish();
+}
+
+#[test]
+fn vi_normal_mode_hides_autosuggest() {
+    let mut session = history_session();
+    session.run("set -o vi");
+    session.run("echo suggestion");
+
+    let _ = session.writer.write_all(b"echo sug");
+    read_until(
+        session.master.as_raw_fd(),
+        "gestion",
+        Duration::from_secs(5),
+    );
+    read_until(
+        session.master.as_raw_fd(),
+        "\u{0}",
+        Duration::from_millis(100),
+    );
+    let _ = session.writer.write_all(b"\x1b");
+    let after = read_until(
+        session.master.as_raw_fd(),
+        "\u{0}",
+        Duration::from_millis(300),
+    );
+    assert!(!after.contains("gestion"), "ghost in normal mode: {after:?}");
+
+    let _ = session.writer.write_all(b"A\r");
+    let out = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    assert!(
+        out.contains("cmdline_url=echo%20sug"),
+        "normal mode changed buffer: {out:?}"
+    );
+    session.finish();
+}

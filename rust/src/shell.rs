@@ -50,6 +50,7 @@ pub struct Shell {
     exit_trap_ran: bool,
     history: Option<History>,
     histexpand: bool,
+    vi: bool,
     z: Option<Z>,
     config_dir: Option<PathBuf>,
     substitution_fds: Vec<i32>,
@@ -137,6 +138,7 @@ impl Shell {
             exit_trap_ran: false,
             history: None,
             histexpand: true,
+            vi: false,
             z: None,
             config_dir: None,
             substitution_fds: Vec::new(),
@@ -305,6 +307,10 @@ impl Shell {
 
     pub fn histexpand(&self) -> bool {
         self.histexpand
+    }
+
+    pub fn vi_mode(&self) -> bool {
+        self.vi
     }
 
     pub fn set_interactive(&mut self, interactive: bool) {
@@ -2174,6 +2180,9 @@ impl Shell {
             if self.histexpand {
                 active.push("histexpand");
             }
+            if self.vi {
+                active.push("vi");
+            }
             if !active.is_empty() {
                 println!("{}", active.join(" "));
             }
@@ -2197,6 +2206,7 @@ impl Shell {
                     index += 1;
                     match args.get(index).map(String::as_str) {
                         Some("pipefail") => self.pipefail = on,
+                        Some("vi") => self.vi = on,
                         Some(name) => {
                             eprintln!("sharky: set: {name}: invalid option name");
                             status = 1;
