@@ -1432,3 +1432,58 @@ fn vi_normal_mode_hides_autosuggest() {
     );
     session.finish();
 }
+
+#[test]
+fn a_full_width_line_does_not_move_the_cursor_up() {
+    let dir = std::env::temp_dir().join(format!("sharky-width-{}", std::process::id()));
+    let config = dir.join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("config.sharky"),
+        "wave prompt \"> \"\ntide greeting off\n",
+    )
+    .unwrap();
+
+    let pty = openpty(None, None).expect("pty");
+    let size = libc::winsize {
+        ws_row: 24,
+        ws_col: 20,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: TIOCSWINSZ copies a valid winsize into the pty.
+    unsafe {
+        libc::ioctl(pty.master.as_raw_fd(), libc::TIOCSWINSZ, &size);
+    }
+
+    let stdin = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stdout = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stderr = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .stdin(stdin)
+        .stdout(stdout)
+        .stderr(stderr)
+        .env("SHARKY_CONFIG", &config)
+        .env("TERM", "xterm-256color")
+        .env("HOME", "/tmp")
+        .spawn()
+        .expect("spawn sharky");
+
+    let fd = pty.master.as_raw_fd();
+    let mut writer = unsafe { std::fs::File::from_raw_fd(pty.master.try_clone().unwrap().into_raw_fd()) };
+    read_until(fd, "> ", Duration::from_secs(5));
+
+    // prompt (2 cols) + 18 characters fills the 20-column row exactly.
+    let _ = writer.write_all(b"printf abcdefghijk");
+    let seen = read_until(fd, "abcdefghijk", Duration::from_secs(5));
+    assert!(
+        !seen.contains("\x1b[1A"),
+        "cursor moved above a full-width line: {seen:?}"
+    );
+
+    let _ = writer.write_all(b"\x03");
+    let _ = read_until(fd, HISTORY_PROMPT_END, Duration::from_secs(5));
+    let _ = writer.write_all(b"exit\r");
+    let _ = child.wait();
+    std::fs::remove_dir_all(&dir).ok();
+}

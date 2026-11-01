@@ -827,7 +827,7 @@ fn history_search(
     }
 
     clear_search_line(&line, columns)?;
-    let input_rows = (prompt_width + buffer.len()) / columns + 1;
+    let input_rows = position(buffer, buffer.len(), columns, prompt_width).0 + 1;
     if input_rows > 0 {
         term::write_stdout(&format!("\x1b[{input_rows}A"))?;
     }
@@ -1181,25 +1181,47 @@ fn autosuggest(shell: &Shell, buffer: &[char], cursor: usize, prompt_width: usiz
 }
 
 fn position(buffer: &[char], index: usize, columns: usize, prompt_width: usize) -> (usize, usize) {
-    let mut row = prompt_width / columns;
-    let mut column = prompt_width % columns;
+    let columns = columns.max(1);
+    let mut row = 0usize;
+    let mut column = 0usize;
+    let mut pending = false;
+
+    for _ in 0..prompt_width {
+        if pending {
+            row += 1;
+            column = 0;
+            pending = false;
+        }
+        if column + 1 >= columns {
+            column = columns - 1;
+            pending = true;
+        } else {
+            column += 1;
+        }
+    }
 
     for char in buffer.iter().take(index) {
         if *char == '\n' {
             row += 1;
             column = 0;
+            pending = false;
+            continue;
+        }
+        if pending {
+            row += 1;
+            column = 0;
+            pending = false;
+        }
+        if column + 1 >= columns {
+            column = columns - 1;
+            pending = true;
         } else {
             column += 1;
-            if column >= columns {
-                row += 1;
-                column = 0;
-            }
         }
     }
 
     (row, column)
 }
-
 fn line_start(buffer: &[char], cursor: usize) -> usize {
     buffer[..cursor.min(buffer.len())]
         .iter()
@@ -1760,7 +1782,9 @@ mod tests {
         assert_eq!(position(&text, 5, 10, 4), (1, 2));
 
         let wide = buffer("abcdefgh");
-        assert_eq!(position(&wide, 8, 4, 0), (2, 0));
+        assert_eq!(position(&wide, 4, 4, 0), (0, 3));
+        assert_eq!(position(&wide, 5, 4, 0), (1, 1));
+        assert_eq!(position(&wide, 8, 4, 0), (1, 3));
     }
 
     #[test]
