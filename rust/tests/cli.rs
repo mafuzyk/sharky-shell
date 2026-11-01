@@ -1498,6 +1498,53 @@ fn arithmetic_assigns_and_increments_variables() {
 }
 
 #[test]
+fn process_substitution_accepts_case_lists() {
+    let out = sharky(&["-c", "cat <(case x in x) printf hi;; esac)"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi");
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn process_substitution_fifo_fallback_works() {
+    let run = |script: &str| {
+        Command::new(env!("CARGO_BIN_EXE_sharky"))
+            .args(["-c", script])
+            .env("SHARKY_CONFIG", NO_CONFIG)
+            .env("SHARKY_PROCESS_SUBST_FIFO", "1")
+            .output()
+            .expect("failed to run sharky")
+    };
+
+    let out = run("cat <(printf hi)");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi");
+    assert_eq!(out.status.code(), Some(0));
+
+    let out = run("diff <(printf a) <(printf a)");
+    assert_eq!(out.status.code(), Some(0));
+
+    let out = run(r#"f() { true; cat "$1"; }; f <(printf hi)"#);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi");
+
+    let dir = temp_dir();
+    let out = run(&format!(
+        "printf hello > {dir}/in; tee >(cat > {dir}/out) < {dir}/in > /dev/null; wait; cat {dir}/out",
+        dir = dir.display()
+    ));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hello");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn process_substitution_survives_a_function_body() {
+    let out = sharky(&[
+        "-c",
+        r#"f() { true; cat "$1"; }; f <(printf hi)"#,
+    ]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi");
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
 fn process_substitution_feeds_and_reads_pipes() {
     let out = sharky(&["-c", "cat <(printf hi)"]);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "hi");

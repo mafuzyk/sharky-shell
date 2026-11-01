@@ -491,6 +491,10 @@ impl Lexer {
         let mut index = self.pos;
         let mut depth = 1;
         let mut state = Quote::Normal;
+        let mut case_depth = 0usize;
+        let mut case_pending = false;
+        let mut pattern = false;
+        let mut word = String::new();
 
         while index < self.chars.len() {
             let char = self.chars[index];
@@ -512,18 +516,31 @@ impl Lexer {
                 Quote::Normal => match char {
                     '\\' => index += 2,
                     '\'' => {
+                        flush_case_word(&mut word, &mut case_depth, &mut case_pending, &mut pattern);
                         state = Quote::Single;
                         index += 1;
                     }
                     '"' => {
+                        flush_case_word(&mut word, &mut case_depth, &mut case_pending, &mut pattern);
                         state = Quote::Double;
                         index += 1;
                     }
                     '(' => {
-                        depth += 1;
+                        flush_case_word(&mut word, &mut case_depth, &mut case_pending, &mut pattern);
+                        if pattern {
+                            pattern = false;
+                        } else {
+                            depth += 1;
+                        }
                         index += 1;
                     }
                     ')' => {
+                        flush_case_word(&mut word, &mut case_depth, &mut case_pending, &mut pattern);
+                        if pattern {
+                            pattern = false;
+                            index += 1;
+                            continue;
+                        }
                         depth -= 1;
                         if depth == 0 {
                             let source: String = self.chars[content_start..index].iter().collect();
@@ -532,7 +549,26 @@ impl Lexer {
                         }
                         index += 1;
                     }
-                    _ => index += 1,
+                    ';' => {
+                        flush_case_word(&mut word, &mut case_depth, &mut case_pending, &mut pattern);
+                        if self.chars.get(index + 1) == Some(&';') {
+                            pattern = true;
+                            index += 2;
+                            if self.chars.get(index) == Some(&'&') {
+                                index += 1;
+                            }
+                        } else {
+                            index += 1;
+                        }
+                    }
+                    char if char.is_alphanumeric() || char == '_' => {
+                        word.push(char);
+                        index += 1;
+                    }
+                    _ => {
+                        flush_case_word(&mut word, &mut case_depth, &mut case_pending, &mut pattern);
+                        index += 1;
+                    }
                 },
             }
         }
@@ -1189,4 +1225,32 @@ fn is_name_start(char: char) -> bool {
 
 fn is_name_char(char: char) -> bool {
     char.is_ascii_alphanumeric() || char == '_'
+}
+
+fn flush_case_word(
+    word: &mut String,
+    case_depth: &mut usize,
+    case_pending: &mut bool,
+    pattern: &mut bool,
+) {
+    if word.is_empty() {
+        return;
+    }
+    match word.as_str() {
+        "case" => {
+            *case_depth += 1;
+            *case_pending = true;
+        }
+        "in" if *case_pending => {
+            *pattern = true;
+            *case_pending = false;
+        }
+        "esac" => {
+            *case_depth = case_depth.saturating_sub(1);
+            *case_pending = false;
+            *pattern = false;
+        }
+        _ => {}
+    }
+    word.clear();
 }

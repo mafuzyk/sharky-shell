@@ -55,6 +55,7 @@ pub struct Shell {
     config_dir: Option<PathBuf>,
     substitution_fds: Vec<i32>,
     substitution_pids: Vec<Pid>,
+    substitution_paths: Vec<String>,
     pub exit_requested: Option<i32>,
     jobs: Vec<Job>,
     next_job: usize,
@@ -143,6 +144,7 @@ impl Shell {
             config_dir: None,
             substitution_fds: Vec::new(),
             substitution_pids: Vec::new(),
+            substitution_paths: Vec::new(),
             exit_requested: None,
             jobs: Vec::new(),
             next_job: 1,
@@ -262,7 +264,9 @@ impl Shell {
                 2
             }
         };
-        self.finish(status)
+        let status = self.finish(status);
+        self.close_substitutions_from(0);
+        status
     }
 
     pub fn finish(&mut self, status: i32) -> i32 {
@@ -545,12 +549,12 @@ impl Shell {
                 self.errexit_suppressed = true;
                 let flow = self.run_command(&pipeline.commands[0]);
                 self.errexit_suppressed = previous;
-                self.cleanup_substitutions();
+                self.reap_substitutions();
                 return flow;
             }
             let flow = self.run_command(&pipeline.commands[0]);
             let flow = self.errexit_check(flow);
-            self.cleanup_substitutions();
+            self.reap_substitutions();
             return flow;
         }
 
@@ -622,7 +626,7 @@ impl Shell {
         let command = describe_pipeline(pipeline);
         let pgid = leader.unwrap_or_else(getpgrp);
         let status = self.wait_pipeline(&pids, pgid, command);
-        self.cleanup_substitutions();
+        self.reap_substitutions();
         self.errexit_check(Flow::Status(status))
     }
 
@@ -685,6 +689,13 @@ impl Shell {
     }
 
     fn run_simple(&mut self, simple: &Simple) -> Flow {
+        let substitutions = self.substitution_fds.len();
+        let flow = self.run_simple_inner(simple);
+        self.close_substitutions_from(substitutions);
+        flow
+    }
+
+    fn run_simple_inner(&mut self, simple: &Simple) -> Flow {
         if simple.words.is_empty() && simple.redirects.is_empty() {
             for assignment in &simple.assignments {
                 self.assign(assignment);
@@ -775,6 +786,13 @@ impl Shell {
     }
 
     fn run_simple_child(&mut self, simple: &Simple) -> i32 {
+        let substitutions = self.substitution_fds.len();
+        let status = self.run_simple_child_inner(simple);
+        self.close_substitutions_from(substitutions);
+        status
+    }
+
+    fn run_simple_child_inner(&mut self, simple: &Simple) -> i32 {
         if simple.words.is_empty() && simple.redirects.is_empty() {
             for assignment in &simple.assignments {
                 self.assign(assignment);
@@ -2633,6 +2651,15 @@ impl Shell {
     }
 
     fn process_substitution(&mut self, source: &str, input: bool) -> String {
+        if std::env::var_os("SHARKY_PROCESS_SUBST_FIFO").is_none()
+            && Path::new("/dev/fd").exists()
+        {
+            return self.pipe_substitution(source, input);
+        }
+        self.fifo_substitution(source, input)
+    }
+
+    fn pipe_substitution(&mut self, source: &str, input: bool) -> String {
         use std::os::fd::{AsRawFd, IntoRawFd};
 
         let Ok((read, write)) = pipe2(OFlag::empty()) else {
@@ -2678,18 +2705,99 @@ impl Shell {
                     write.into_raw_fd()
                 };
                 self.substitution_fds.push(fd);
+                self.substitution_paths.push(String::new());
                 format!("/dev/fd/{fd}")
             }
             Err(_) => String::new(),
         }
     }
 
-    fn cleanup_substitutions(&mut self) {
-        for fd in self.substitution_fds.drain(..) {
-            let _ = close(fd);
+    fn fifo_substitution(&mut self, source: &str, input: bool) -> String {
+        use nix::fcntl::open;
+        use nix::sys::stat::Mode;
+        use nix::unistd::mkfifo;
+
+        let mut attempt = 0;
+        let path = loop {
+            if attempt >= 8 {
+                return String::new();
+            }
+            let path = std::env::temp_dir().join(format!(
+                "sharky-psub-{}-{attempt}",
+                std::process::id()
+            ));
+            attempt += 1;
+            match mkfifo(&path, Mode::from_bits_truncate(0o600)) {
+                Ok(()) => break path,
+                Err(nix::errno::Errno::EEXIST) => continue,
+                Err(_) => return String::new(),
+            }
+        };
+        let path_text = path.to_string_lossy().into_owned();
+
+        // SAFETY: the child opens the FIFO, runs shell code and exits.
+        match unsafe { fork() } {
+            Ok(ForkResult::Child) => {
+                let flags = if input {
+                    OFlag::O_WRONLY
+                } else {
+                    OFlag::O_RDONLY
+                };
+                let fd = match open(&path, flags, Mode::empty()) {
+                    Ok(fd) => fd,
+                    Err(_) => unsafe { _exit(1) },
+                };
+                let target = if input { 1 } else { 0 };
+                unsafe {
+                    let _ = nix::libc::dup2(fd.as_raw_fd(), target);
+                    for fd in 3..1024 {
+                        let _ = nix::libc::close(fd);
+                    }
+                }
+                let status = match self.eval(source) {
+                    Ok(code) => code,
+                    Err(err) => {
+                        eprintln!("sharky: {}", err.message);
+                        2
+                    }
+                };
+                unsafe { _exit(status) }
+            }
+            Ok(ForkResult::Parent { child }) => {
+                self.substitution_pids.push(child);
+                self.substitution_fds.push(-1);
+                self.substitution_paths.push(path_text.clone());
+                path_text
+            }
+            Err(_) => {
+                let _ = std::fs::remove_file(&path);
+                String::new()
+            }
         }
+    }
+
+    fn reap_substitutions(&mut self) {
         self.substitution_pids
             .retain(|pid| matches!(waitpid(*pid, Some(WaitPidFlag::WNOHANG)), Ok(WaitStatus::StillAlive)));
+    }
+
+    pub fn reap_substitutions_idle(&mut self) {
+        self.reap_substitutions();
+    }
+
+    pub fn close_substitutions_from(&mut self, start: usize) {
+        while self.substitution_fds.len() > start {
+            if let Some(fd) = self.substitution_fds.pop()
+                && fd >= 0
+            {
+                let _ = close(fd);
+            }
+            if let Some(path) = self.substitution_paths.pop()
+                && !path.is_empty()
+            {
+                let _ = std::fs::remove_file(path);
+            }
+        }
     }
 
     fn command_substitution(&mut self, source: &str) -> String {

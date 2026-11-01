@@ -24,6 +24,7 @@ pub fn run(shell: &mut Shell) -> i32 {
 
     loop {
         shell.reap_jobs();
+        shell.reap_substitutions_idle();
 
         let primary = buffer.is_empty();
         let mut prompt = if primary {
@@ -75,6 +76,7 @@ pub fn run(shell: &mut Shell) -> i32 {
                     let _ = term::write_stdout(&term::mark_command_start(&buffer));
                 });
                 shell.last_duration_ms = started.elapsed().as_millis() as u64;
+                shell.close_substitutions_from(0);
 
                 match outcome {
                     Ok(code) => {
