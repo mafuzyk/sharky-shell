@@ -7,7 +7,14 @@ use crate::shell::Shell;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn run() -> i32 {
-    let mut args = std::env::args().skip(1);
+    let mut raw = std::env::args_os();
+    let arg0 = raw.next().unwrap_or_default();
+    let login_arg0 = std::path::Path::new(&arg0)
+        .file_name()
+        .map(|name| name.to_string_lossy().starts_with('-'))
+        .unwrap_or(false);
+    let mut args = raw.map(|arg| arg.to_string_lossy().into_owned());
+    let mut login = login_arg0;
     let mut command = None;
     let mut script: Option<String> = None;
     let mut script_args = Vec::new();
@@ -31,6 +38,7 @@ pub fn run() -> i32 {
             "--json" => json = true,
             "--env" => state_env = true,
             "-i" => interactive = true,
+            "-l" | "--login" => login = true,
             "-c" => match args.next() {
                 Some(source) => command = Some(source),
                 None => {
@@ -91,6 +99,9 @@ pub fn run() -> i32 {
 
     let mut shell = Shell::new();
     shell.load_config(no_config);
+    if login {
+        crate::profiles::login(&mut shell);
+    }
 
     match (command, script) {
         (Some(source), _) => {
@@ -295,6 +306,7 @@ fn print_help() {
     println!();
     println!("  -c COMMAND   run COMMAND and exit");
     println!("  -i           force interactive mode");
+    println!("  -l, --login  read login profiles before the command");
     println!("  --json       print one JSON object for -c or state");
     println!("  --env        include the environment in state JSON");
     println!("  state        print shell state as JSON (requires --json)");

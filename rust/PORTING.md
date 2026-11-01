@@ -53,6 +53,7 @@ assert an exit status instead of waiting forever.
 - [x] `anchor` keybindings with the full editor action set
 - [x] Completion menu, variable/git/tilde sources and Ctrl-T fuzzy files
 - [x] Agent interface: `--json -c`, `state --json [--env]` and `-i`
+- [x] Login mode with sharky profiles and literal safe imports
 - [x] Indexed arrays: literals, `[@]`, index, `#`, `+=` and `a[i]=`
 - [x] `set -e/-u/-x`, `pipefail`, `set --`, `trap` EXIT, `read` and `shift`
 - [x] `[[ =~ ]]`, `-a`, `-L/-h`, integer coercion

@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use crate::shell::Shell;
+
 const FILES: &[&str] = &[
     ".profile",
     ".bash_profile",
@@ -9,6 +11,103 @@ const FILES: &[&str] = &[
     ".zprofile",
     ".config/fish/config.fish",
 ];
+
+pub fn login(shell: &mut Shell) {
+    let home = Path::new(&shell.var("HOME")).to_path_buf();
+
+    for path in [
+        std::path::PathBuf::from("/etc/sharky/profile.sharky"),
+        home.join(".config/sharky/profile.sharky"),
+    ] {
+        let Ok(source) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for (index, line) in source.lines().enumerate() {
+            if line.trim().is_empty() || line.trim_start().starts_with('#') {
+                continue;
+            }
+            if let Err(err) = shell.eval(line) {
+                eprintln!("sharky: {}:{}: {}", path.display(), index + 1, err.message);
+            }
+        }
+    }
+
+    for path in [
+        std::path::PathBuf::from("/etc/profile"),
+        home.join(".profile"),
+        home.join(".bash_profile"),
+        home.join(".zshprofile"),
+    ] {
+        let Ok(source) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in source.lines() {
+            if let Some((name, value)) = literal_assignment(line) {
+                shell.set_var(&name, value);
+            }
+        }
+    }
+}
+
+fn literal_assignment(line: &str) -> Option<(String, String)> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    let line = line.strip_prefix("export ").unwrap_or(line).trim();
+    let (name, value) = line.split_once('=')?;
+    let name = name.trim();
+    if name.is_empty()
+        || !name
+            .chars()
+            .next()
+            .is_some_and(|char| char.is_ascii_alphabetic() || char == '_')
+        || !name
+            .chars()
+            .all(|char| char.is_ascii_alphanumeric() || char == '_')
+    {
+        return None;
+    }
+
+    let value = value.trim();
+    if value.contains("$(")
+        || value.contains('`')
+        || value.contains(';')
+        || value.contains("&&")
+        || value.contains("||")
+        || value.contains('|')
+        || value.contains('<')
+        || value.contains('>')
+    {
+        return None;
+    }
+
+    let value = if let Some(inner) = value
+        .strip_prefix('"')
+        .and_then(|inner| inner.strip_suffix('"'))
+    {
+        if inner.contains('$') || inner.contains('"') {
+            return None;
+        }
+        inner.to_string()
+    } else if let Some(inner) = value
+        .strip_prefix('\'')
+        .and_then(|inner| inner.strip_suffix('\''))
+    {
+        if inner.contains('\'') {
+            return None;
+        }
+        inner.to_string()
+    } else {
+        if value.contains('"') || value.contains('\'') || value.contains('$') || value.contains('\\')
+        {
+            return None;
+        }
+        value.to_string()
+    };
+
+    Some((name.to_string(), value))
+}
 
 pub fn discover(home: &Path) -> Vec<String> {
     let mut entries = Vec::new();

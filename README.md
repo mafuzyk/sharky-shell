@@ -75,6 +75,14 @@ sharky -i                      # force the REPL; fails on a non-TTY
 `env_delta` contains only variables changed by the command; unset variables are
 `null`. Unlike the Ruby reference it never includes the `?` status pseudo-variable.
 
+## Login shell
+
+`sharky -l` (or an `argv[0]` beginning with `-`) reads
+`/etc/sharky/profile.sharky` and `~/.config/sharky/profile.sharky` as sharky
+code, then imports only literal `NAME=value` / `export NAME=value` lines from
+`/etc/profile`, `~/.profile`, `~/.bash_profile` and `~/.zshprofile`. Command
+substitution and arbitrary shell code in those files never run.
+
 ## Shell language
 
 The prompt, `-c` and script files share one grammar:

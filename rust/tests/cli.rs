@@ -1615,3 +1615,115 @@ fn state_json_does_not_create_history_or_z_files() {
     assert!(!data.join("sharky/z").exists());
     std::fs::remove_dir_all(&data).ok();
 }
+
+fn login_home(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("sharky-login-{}-{name}", std::process::id()));
+    std::fs::create_dir_all(dir.join(".config/sharky")).unwrap();
+    dir
+}
+
+fn sharky_with_home(home: &std::path::Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args(args)
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .env("HOME", home)
+        .output()
+        .expect("failed to run sharky")
+}
+
+#[test]
+fn login_profiles_run_before_the_command() {
+    let home = login_home("profile");
+    std::fs::write(
+        home.join(".config/sharky/profile.sharky"),
+        "LOGIN_VAR=from-profile\nalias loginhi 'printf ALIASED'\n",
+    )
+    .unwrap();
+
+    let out = sharky_with_home(&home, &["-l", "-c", r#"printf '%s|' "$LOGIN_VAR"; loginhi"#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "from-profile|ALIASED");
+    assert!(out.status.success());
+
+    let out = sharky_with_home(&home, &["-c", r#"printf '%s' "$LOGIN_VAR""#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn login_profile_errors_report_file_and_line_and_continue() {
+    let home = login_home("error");
+    std::fs::write(
+        home.join(".config/sharky/profile.sharky"),
+        ")\nLOGIN_OK=yes\n",
+    )
+    .unwrap();
+
+    let out = sharky_with_home(&home, &["-l", "-c", r#"printf '%s' "$LOGIN_OK""#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "yes");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("profile.sharky:1:"), "{stderr}");
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn login_imports_only_literal_standard_assignments() {
+    let home = login_home("imports");
+    std::fs::write(
+        home.join(".profile"),
+        "export IMPORTED=literal\nBAD=$(date)\nDANGER=foo; rm -rf /tmp/sharky-login\n",
+    )
+    .unwrap();
+    std::fs::write(home.join(".bash_profile"), "PLAIN=value\n").unwrap();
+
+    let out = sharky_with_home(
+        &home,
+        &[
+            "-l",
+            "-c",
+            r#"printf '%s|%s|%s' "$IMPORTED" "$PLAIN" "$BAD""#,
+        ],
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "literal|value|");
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn argv_zero_starting_with_a_dash_enters_login_mode() {
+    use std::os::unix::process::CommandExt;
+
+    let home = login_home("argv0");
+    std::fs::write(
+        home.join(".config/sharky/profile.sharky"),
+        "ARGV_LOGIN=yes\n",
+    )
+    .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .arg0("-sharky")
+        .args(["-c", r#"printf '%s' "$ARGV_LOGIN""#])
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .env("HOME", &home)
+        .output()
+        .expect("failed to run sharky");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "yes");
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn login_profiles_run_before_a_script() {
+    let home = login_home("script");
+    std::fs::write(
+        home.join(".config/sharky/profile.sharky"),
+        "SCRIPT_LOGIN=yes\n",
+    )
+    .unwrap();
+    let script = home.join("show.sh");
+    std::fs::write(&script, r#"printf '%s' "$SCRIPT_LOGIN""#).unwrap();
+
+    let out = sharky_with_home(
+        &home,
+        &["-l", script.to_str().unwrap()],
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "yes");
+    std::fs::remove_dir_all(&home).ok();
+}
