@@ -1033,7 +1033,10 @@ fn vi_command(
             }
         }
         'u' => {
-            if let Some((previous, position)) = undo.pop() {
+            for _ in 0..times {
+                let Some((previous, position)) = undo.pop() else {
+                    break;
+                };
                 *buffer = previous;
                 *cursor = position.min(buffer.len());
             }
