@@ -969,3 +969,66 @@ fn autosuggest_is_silent_mid_line() {
     session.finish();
     assert!(!extra.contains("gested"), "ghost mid-line: {extra:?}");
 }
+
+const HIGHLIGHT_CONFIG: &str = "coral sea #35B8C5
+coral kelp #8CCFA8
+coral danger #FF8F80
+wave command @sea
+wave builtin @kelp
+wave string @kelp
+wave variable @danger
+wave error @danger
+tide greeting off
+";
+
+#[test]
+fn highlight_paints_command_strings_and_variables() {
+    let mut session = history_session_with(Some(HIGHLIGHT_CONFIG));
+    let _ = session.writer.write_all(b"echo \"$HOME\"");
+    let seen = read_until(
+        session.master.as_raw_fd(),
+        "$HOME\u{1b}[0m\u{1b}[38;2;140;207;168m\"",
+        Duration::from_secs(5),
+    );
+    assert!(
+        seen.contains("\u{1b}[38;2;53;184;197mecho\u{1b}[0m"),
+        "command role missing: {seen:?}"
+    );
+    assert!(
+        seen.contains("\u{1b}[38;2;255;143;128m$HOME\u{1b}[0m"),
+        "variable role missing: {seen:?}"
+    );
+    assert!(
+        seen.contains("\u{1b}[38;2;140;207;168m\""),
+        "string role missing: {seen:?}"
+    );
+    let _ = session.writer.write_all(b"\x03");
+    let _ = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    session.finish();
+}
+
+#[test]
+fn highlight_off_renders_plain_text() {
+    let mut session = history_session_with(Some(&format!("{HIGHLIGHT_CONFIG}tide highlight off\n")));
+    let _ = session.writer.write_all(b"echo \"$HOME\"");
+    let seen = read_until(
+        session.master.as_raw_fd(),
+        "$HOME",
+        Duration::from_secs(5),
+    );
+    let _ = session.writer.write_all(b"\x03");
+    let _ = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    session.finish();
+    assert!(
+        !seen.contains("\u{1b}[38;2;"),
+        "highlight off emitted colour: {seen:?}"
+    );
+}

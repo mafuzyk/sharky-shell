@@ -95,6 +95,7 @@ The prompt, `-c` and script files share one grammar:
 | history search | Ctrl-R, type to filter, Enter runs the match, Ctrl-G cancels |
 | paste and multiline | bracketed paste inserts text verbatim; Enter submits the whole buffer; Up/Down, Home/End work per line |
 | autosuggest | history suffix ghost text; Right/End accepts, `tide autosuggest off` disables |
+| syntax highlighting | `wave command`, `builtin`, `string`, `variable`, `operator`, `path`, `comment`, `error`; `tide highlight off` disables |
 | history expansion | `!!`, `!n`, `!-n`, `!prefix`, `!?text?`, `!$`, `!*`, `!^`, `^old^new^`; `set +H` disables |
 | job control | `cmd &`, `jobs`, `fg`, `bg`, Ctrl-Z |
 | scripts | `source lib.sh`, `sharky file.sh args` |

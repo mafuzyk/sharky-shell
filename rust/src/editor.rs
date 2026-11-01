@@ -1,3 +1,4 @@
+use crate::highlight;
 use crate::prompt;
 use crate::shell::Shell;
 use crate::term::{self, Key};
@@ -42,7 +43,8 @@ impl Editor {
                 .as_deref()
                 .map(|text| prompt::painted(shell, "suggestion", text))
                 .unwrap_or_default();
-            self.render_input(&buffer, cursor, prompt_width, &ghost)?;
+            let display = highlight::render(shell, &buffer);
+            self.render_input(&buffer, cursor, prompt_width, &ghost, &display)?;
 
             let key = term::read_key()?;
 
@@ -223,6 +225,7 @@ impl Editor {
         cursor: usize,
         prompt_width: usize,
         ghost: &str,
+        display: &str,
     ) -> std::io::Result<()> {
         let columns = term::width().max(1);
         let (cursor_row, cursor_column) = position(buffer, cursor, columns, prompt_width);
@@ -238,11 +241,11 @@ impl Editor {
         if start_column > 0 {
             out.push_str(&format!("\x1b[{start_column}C"));
         }
-        for char in buffer {
-            if *char == '\n' {
+        for char in display.chars() {
+            if char == '\n' {
                 out.push_str("\r\n");
             } else {
-                out.push(*char);
+                out.push(char);
             }
         }
         out.push_str(ghost);
