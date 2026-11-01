@@ -43,6 +43,7 @@ impl Editor {
 
         let bindings = build_bindings(shell);
         let mut undo: Vec<(Vec<char>, usize)> = Vec::new();
+        let mut menu: Option<CompletionMenu> = None;
 
         loop {
             let suggestion = autosuggest(shell, &buffer, cursor, prompt_width);
@@ -51,7 +52,19 @@ impl Editor {
                 .map(|text| prompt::painted(shell, "suggestion", text))
                 .unwrap_or_default();
             let display = highlight::render(shell, &buffer);
-            self.render_input(&buffer, cursor, prompt_width, &ghost, &display)?;
+            let (menu_text, menu_rows) = menu
+                .as_ref()
+                .map(|menu| render_menu(shell, menu))
+                .unwrap_or_default();
+            self.render_input(
+                &buffer,
+                cursor,
+                prompt_width,
+                &ghost,
+                &display,
+                &menu_text,
+                menu_rows,
+            )?;
 
             let key = term::read_key()?;
 
@@ -91,6 +104,35 @@ impl Editor {
                 continue;
             }
 
+            if let Some(active) = menu.as_mut() {
+                match key {
+                    Key::Tab => {
+                        active.selected = (active.selected + 1) % active.candidates.len();
+                        continue;
+                    }
+                    Key::ShiftTab => {
+                        active.selected = if active.selected == 0 {
+                            active.candidates.len() - 1
+                        } else {
+                            active.selected - 1
+                        };
+                        continue;
+                    }
+                    Key::Enter => {
+                        if let Some(active) = menu.take() {
+                            insert_selection(&mut buffer, &mut cursor, &active);
+                        }
+                        continue;
+                    }
+                    Key::Escape => {
+                        menu = None;
+                        continue;
+                    }
+                    Key::Ctrl('c') => menu = None,
+                    _ => menu = None,
+                }
+            }
+
             if let Some(bound) = bound_key(key)
                 && let Some(action) = bindings.get(&bound).copied()
             {
@@ -122,7 +164,16 @@ impl Editor {
                         continue;
                     }
                     Outcome::Complete => {
-                        complete(&mut buffer, &mut cursor, shell);
+                        menu = complete_menu(&mut buffer, &mut cursor, shell);
+                        continue;
+                    }
+                    Outcome::FuzzyFiles => {
+                        if let Some(path) = fuzzy_files(shell)? {
+                            push_undo(&mut undo, &buffer, cursor);
+                            insert_text(&mut buffer, &mut cursor, &path);
+                        }
+                        term::write_stdout("\x1b[2J\x1b[H")?;
+                        term::write_stdout(prompt)?;
                         continue;
                     }
                 }
@@ -192,6 +243,7 @@ impl Editor {
             Action::Abort => return Ok(Outcome::Abort),
             Action::HistorySearch => return Ok(Outcome::HistorySearch),
             Action::Complete => return Ok(Outcome::Complete),
+            Action::FuzzyFiles => return Ok(Outcome::FuzzyFiles),
             Action::ClearScreen => {
                 term::write_stdout("\x1b[2J\x1b[H")?;
                 term::write_stdout(prompt)?;
@@ -341,6 +393,7 @@ impl Editor {
         *cursor = buffer.len();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_input(
         &self,
         buffer: &[char],
@@ -348,6 +401,8 @@ impl Editor {
         prompt_width: usize,
         ghost: &str,
         display: &str,
+        menu_text: &str,
+        menu_rows: usize,
     ) -> std::io::Result<()> {
         let columns = term::width().max(1);
         let (cursor_row, cursor_column) = position(buffer, cursor, columns, prompt_width);
@@ -372,8 +427,14 @@ impl Editor {
         }
         out.push_str(ghost);
 
-        if end_row > cursor_row {
-            out.push_str(&format!("\x1b[{}A", end_row - cursor_row));
+        if menu_rows > 0 {
+            out.push_str("\r\n");
+            out.push_str(menu_text);
+        }
+
+        let bottom_row = end_row + menu_rows;
+        if bottom_row > cursor_row {
+            out.push_str(&format!("\x1b[{}A", bottom_row - cursor_row));
         }
         out.push('\r');
         if cursor_column > 0 {
@@ -407,6 +468,7 @@ enum Action {
     HistorySearch,
     Complete,
     AcceptSuggestion,
+    FuzzyFiles,
     HistoryPrev,
     HistoryNext,
 }
@@ -417,6 +479,7 @@ enum Outcome {
     Abort,
     HistorySearch,
     Complete,
+    FuzzyFiles,
 }
 
 const DEFAULT_BINDINGS: &[(&str, &str)] = &[
@@ -438,6 +501,7 @@ const DEFAULT_BINDINGS: &[(&str, &str)] = &[
     ("ctrl-k", "kill_line"),
     ("ctrl-y", "yank"),
     ("ctrl-_", "undo"),
+    ("ctrl-t", "fuzzy_files"),
 ];
 
 fn build_bindings(shell: &Shell) -> HashMap<BoundKey, Action> {
@@ -478,6 +542,7 @@ fn parse_action(name: &str) -> Option<Action> {
         "history_search" => Action::HistorySearch,
         "complete" => Action::Complete,
         "accept_suggestion" => Action::AcceptSuggestion,
+        "fuzzy_files" => Action::FuzzyFiles,
         "history_prev" => Action::HistoryPrev,
         "history_next" => Action::HistoryNext,
         _ => return None,
@@ -904,7 +969,186 @@ fn fallback_line() -> std::io::Result<Line> {
     Ok(Line::Content(line.trim_end_matches('\n').to_string()))
 }
 
-fn complete(buffer: &mut Vec<char>, cursor: &mut usize, shell: &Shell) {
+fn fuzzy_files(shell: &Shell) -> std::io::Result<Option<String>> {
+    let files = collect_files(&shell.cwd, 500);
+    let mut query = String::new();
+    let mut selected = 0usize;
+
+    loop {
+        let mut matches: Vec<(u32, String)> = files
+            .iter()
+            .filter_map(|path| {
+                fuzzy_score(path, &query).map(|score| (score + recency_bonus(shell, path), path.clone()))
+            })
+            .collect();
+        matches.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
+
+        let columns = term::width().max(10);
+        let shown = matches.len().min(10);
+        if selected >= shown {
+            selected = shown.saturating_sub(1);
+        }
+
+        let mut screen = String::from("\x1b[2J\x1b[H");
+        screen.push_str(&format!("fuzzy> {query}\r\n"));
+        for (index, (_, path)) in matches.iter().take(shown).enumerate() {
+            let marker = if index == selected { "> " } else { "  " };
+            let available = columns.saturating_sub(marker.chars().count() + 1);
+            let text: String = path.chars().take(available).collect();
+            screen.push_str(marker);
+            screen.push_str(&text);
+            screen.push_str("\r\n");
+        }
+        if matches.len() > shown {
+            screen.push_str(&format!("  (+{} more)\r\n", matches.len() - shown));
+        }
+        if files.len() >= 500 {
+            screen.push_str("  (file list capped)\r\n");
+        }
+        term::write_stdout(&screen)?;
+
+        match term::read_key()? {
+            Key::Enter => return Ok(matches.get(selected).map(|(_, path)| path.clone())),
+            Key::Escape | Key::Ctrl('c') => return Ok(None),
+            Key::Up => selected = selected.saturating_sub(1),
+            Key::Down => {
+                selected = (selected + 1).min(shown.saturating_sub(1));
+            }
+            Key::Backspace => {
+                query.pop();
+                selected = 0;
+            }
+            Key::Ctrl('u') => {
+                query.clear();
+                selected = 0;
+            }
+            Key::Char(char) => {
+                query.push(char);
+                selected = 0;
+            }
+            _ => {}
+        }
+    }
+}
+
+fn recency_bonus(shell: &Shell, path: &str) -> u32 {
+    let recent = shell
+        .history_entries()
+        .iter()
+        .rev()
+        .take(50)
+        .any(|entry| entry.split_whitespace().any(|word| word == path));
+    if recent { 200 } else { 0 }
+}
+
+fn fuzzy_score(text: &str, query: &str) -> Option<u32> {
+    if query.is_empty() {
+        return Some(0);
+    }
+
+    let mut score = 0u32;
+    let mut cursor = 0usize;
+    let mut last: Option<usize> = None;
+    let mut first = None;
+
+    for needle in query.chars() {
+        let found = text[cursor..].char_indices().find(|(_, char)| *char == needle)?;
+        let position = cursor + found.0;
+        if first.is_none() {
+            first = Some(position);
+        }
+        score += if last.is_some_and(|last| last + 1 == position) {
+            10
+        } else {
+            2
+        };
+        last = Some(position);
+        cursor = position + needle.len_utf8();
+    }
+
+    let start = first.unwrap_or(0) as u32;
+    Some(score.saturating_sub(start).saturating_sub(text.len() as u32 / 8))
+}
+
+fn collect_files(root: &std::path::Path, cap: usize) -> Vec<String> {
+    let mut files = Vec::new();
+    collect_files_in(root, root, cap, 0, &mut files);
+    files
+}
+
+fn collect_files_in(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    cap: usize,
+    depth: usize,
+    files: &mut Vec<String>,
+) {
+    if files.len() >= cap || depth > 8 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        if files.len() >= cap {
+            return;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') || matches!(name.as_str(), "target" | "node_modules") {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files_in(root, &path, cap, depth + 1, files);
+        } else if let Ok(relative) = path.strip_prefix(root) {
+            files.push(relative.to_string_lossy().into_owned());
+        }
+    }
+}
+
+fn render_menu(shell: &Shell, menu: &CompletionMenu) -> (String, usize) {
+    const MAX_ROWS: usize = 8;
+    let shown = menu.candidates.len().min(MAX_ROWS);
+    let mut rows = shown;
+    let mut out = String::new();
+
+    for (index, candidate) in menu.candidates.iter().take(shown).enumerate() {
+        if index > 0 {
+            out.push_str("\r\n");
+        }
+        let line = if index == menu.selected {
+            format!("> {candidate}")
+        } else {
+            format!("  {candidate}")
+        };
+        if index == menu.selected {
+            out.push_str(&prompt::painted(shell, "selection", &line));
+        } else {
+            out.push_str(&line);
+        }
+    }
+
+    if menu.candidates.len() > shown {
+        out.push_str(&format!(
+            "\r\n  (+{} more)",
+            menu.candidates.len() - shown
+        ));
+        rows += 1;
+    }
+
+    (out, rows)
+}
+
+struct CompletionMenu {
+    start: usize,
+    candidates: Vec<String>,
+    selected: usize,
+}
+
+fn complete_menu(buffer: &mut Vec<char>, cursor: &mut usize, shell: &Shell) -> Option<CompletionMenu> {
     let mut start = *cursor;
     while start > 0 && !buffer[start - 1].is_whitespace() {
         start -= 1;
@@ -912,11 +1156,22 @@ fn complete(buffer: &mut Vec<char>, cursor: &mut usize, shell: &Shell) {
 
     let word: String = buffer[start..*cursor].iter().collect();
     if word.is_empty() {
-        return;
+        return None;
     }
 
-    let command_position = buffer[..start].iter().all(|char| char.is_whitespace());
-    let mut candidates = if word.contains('/') || !command_position {
+    let before: String = buffer[..start].iter().collect();
+    let command_position = before
+        .chars()
+        .rev()
+        .find(|char| !char.is_whitespace())
+        .map(|char| matches!(char, '|' | ';' | '&' | '(' | '{'))
+        .unwrap_or(true);
+
+    let mut candidates = if word.starts_with('$') {
+        variable_candidates(&word, shell)
+    } else if let Some(candidates) = git_branch_candidates(&word, &before, &shell.cwd) {
+        candidates
+    } else if word.contains('/') || !command_position {
         file_candidates(&word)
     } else {
         command_candidates(&word, shell)
@@ -925,30 +1180,143 @@ fn complete(buffer: &mut Vec<char>, cursor: &mut usize, shell: &Shell) {
     candidates.sort();
     candidates.dedup();
 
-    let Some(first) = candidates.first() else {
-        return;
-    };
+    let first = candidates.first()?.clone();
 
     let common = candidates
         .iter()
         .fold(first.clone(), |prefix, candidate| common_prefix(&prefix, candidate));
 
-    let insert = if candidates.len() == 1 {
-        let suffix = &candidates[0][word.len()..];
-        match std::fs::metadata(&candidates[0]) {
-            Ok(meta) if meta.is_dir() => format!("{suffix}/"),
-            _ => format!("{suffix} "),
-        }
-    } else if common.len() > word.len() {
-        common[word.len()..].to_string()
-    } else {
-        return;
-    };
+    if candidates.len() == 1 {
+        let candidate = &candidates[0];
+        let suffix = &candidate[word.len()..];
+        let trailing = if candidate.ends_with('/') {
+            ""
+        } else if std::fs::metadata(candidate).map(|meta| meta.is_dir()).unwrap_or(false) {
+            "/"
+        } else if candidate.starts_with('$') {
+            ""
+        } else {
+            " "
+        };
+        insert_text(buffer, cursor, &format!("{suffix}{trailing}"));
+        return None;
+    }
 
-    for (offset, char) in insert.chars().enumerate() {
+    if common.len() > word.len() {
+        insert_text(buffer, cursor, &common[word.len()..]);
+    }
+
+    Some(CompletionMenu {
+        start,
+        candidates,
+        selected: 0,
+    })
+}
+
+fn insert_text(buffer: &mut Vec<char>, cursor: &mut usize, text: &str) {
+    for (offset, char) in text.chars().enumerate() {
         buffer.insert(*cursor + offset, char);
     }
-    *cursor += insert.chars().count();
+    *cursor += text.chars().count();
+}
+
+fn insert_selection(
+    buffer: &mut Vec<char>,
+    cursor: &mut usize,
+    menu: &CompletionMenu,
+) {
+    let Some(candidate) = menu.candidates.get(menu.selected) else {
+        return;
+    };
+    let end = (*cursor).min(buffer.len());
+    buffer.drain(menu.start..end);
+    *cursor = menu.start;
+    insert_text(buffer, cursor, candidate);
+}
+
+fn variable_candidates(word: &str, shell: &Shell) -> Vec<String> {
+    let mut names = shell.variable_names();
+    names.sort();
+    names.dedup();
+
+    match word.strip_prefix("${") {
+        Some(prefix) => names
+            .into_iter()
+            .filter(|name| name.starts_with(prefix))
+            .map(|name| format!("${{{name}}}"))
+            .collect(),
+        None => {
+            let prefix = word.trim_start_matches('$');
+            names
+                .into_iter()
+                .filter(|name| name.starts_with(prefix))
+                .map(|name| format!("${name}"))
+                .collect()
+        }
+    }
+}
+
+fn git_branch_candidates(word: &str, before: &str, cwd: &std::path::Path) -> Option<Vec<String>> {
+    let words: Vec<&str> = before.split_whitespace().collect();
+    if words.first().copied() != Some("git") {
+        return None;
+    }
+    let subcommand = words.get(1).copied()?;
+    let wanted = match subcommand {
+        "checkout" | "switch" | "merge" | "rebase" => true,
+        "branch" => words.iter().any(|word| *word == "-d" || *word == "-D"),
+        _ => false,
+    };
+    if !wanted {
+        return None;
+    }
+
+    let root = git_root(cwd)?;
+    let mut branches = Vec::new();
+    let heads = root.join(".git/refs/heads");
+    collect_branch_dir(&heads, &heads, &mut branches);
+    if let Ok(packed) = std::fs::read_to_string(root.join(".git/packed-refs")) {
+        for line in packed.lines() {
+            let Some((_, reference)) = line.split_once(' ') else {
+                continue;
+            };
+            if let Some(name) = reference.strip_prefix("refs/heads/") {
+                branches.push(name.to_string());
+            }
+        }
+    }
+    branches.retain(|branch| branch.starts_with(word));
+    Some(branches)
+}
+
+fn git_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut current = start.to_path_buf();
+    loop {
+        if current.join(".git").exists() {
+            return Some(current);
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
+fn collect_branch_dir(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    out: &mut Vec<String>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_branch_dir(root, &path, out);
+        } else if let Ok(relative) = path.strip_prefix(root) {
+            out.push(relative.to_string_lossy().into_owned());
+        }
+    }
 }
 
 fn command_candidates(word: &str, shell: &Shell) -> Vec<String> {
@@ -982,12 +1350,20 @@ fn command_candidates(word: &str, shell: &Shell) -> Vec<String> {
 }
 
 fn file_candidates(word: &str) -> Vec<String> {
-    let (dir, base) = match word.rfind('/') {
-        Some(index) => (&word[..index], &word[index + 1..]),
-        None => ("", word),
+    let home = std::env::var("HOME").unwrap_or_default();
+    let lookup = match word.strip_prefix('~') {
+        Some(rest) => format!("{home}{rest}"),
+        None => word.to_string(),
     };
 
-    let directory = if dir.is_empty() { "." } else { dir };
+    let (directory, base) = match lookup.rfind('/') {
+        Some(index) => (&lookup[..index], &lookup[index + 1..]),
+        None => (".", lookup.as_str()),
+    };
+    let display_end = word.rfind('/').map(|index| index + 1).unwrap_or(0);
+    let display = word[..display_end].to_string();
+
+    let directory = if directory.is_empty() { "/" } else { directory };
     let Ok(entries) = std::fs::read_dir(directory) else {
         return Vec::new();
     };
@@ -996,17 +1372,18 @@ fn file_candidates(word: &str) -> Vec<String> {
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if !name.starts_with(base) || name.starts_with('.') {
+            if !name.starts_with(base) || (name.starts_with('.') && !base.starts_with('.')) {
                 return None;
             }
-            Some(if dir.is_empty() {
+            Some(if display.is_empty() {
                 name
             } else {
-                format!("{dir}/{name}")
+                format!("{display}{name}")
             })
         })
         .collect()
 }
+
 
 fn common_prefix(left: &str, right: &str) -> String {
     left.chars()
@@ -1085,6 +1462,20 @@ mod suggestion_tests {
     }
 }
 
+
+#[cfg(test)]
+mod fuzzy_tests {
+    use super::fuzzy_score;
+
+    #[test]
+    fn ranks_contiguous_and_shorter_matches_higher() {
+        let beta = fuzzy_score("beta.txt", "bet").expect("beta");
+        let alphabet = fuzzy_score("alphabet.txt", "bet").expect("alphabet");
+        assert!(beta > alphabet, "{beta} <= {alphabet}");
+        assert!(fuzzy_score("src/editor.rs", "edr").is_some());
+        assert!(fuzzy_score("alpha", "zzz").is_none());
+    }
+}
 
 #[cfg(test)]
 mod action_tests {

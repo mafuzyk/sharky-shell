@@ -28,6 +28,7 @@ pub const ACTIONS: &[&str] = &[
     "capitalize_word",
     "undo",
     "accept_suggestion",
+    "fuzzy_files",
 ];
 
 pub fn valid_key(name: &str) -> bool {

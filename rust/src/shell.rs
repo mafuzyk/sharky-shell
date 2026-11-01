@@ -315,6 +315,13 @@ impl Shell {
         self.settings.get(key).map(String::as_str)
     }
 
+    pub fn variable_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.env.iter().map(|(key, _)| key.clone()).collect();
+        names.extend(self.arrays.keys().cloned());
+        names.extend(self.assoc.keys().cloned());
+        names
+    }
+
     pub fn keybinds(&self) -> &HashMap<String, String> {
         &self.keybinds
     }

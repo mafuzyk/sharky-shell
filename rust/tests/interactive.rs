@@ -1076,3 +1076,194 @@ fn anchor_rebinds_keys_to_actions() {
     );
     session.finish();
 }
+
+fn completion_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "sharky-complete-{}-{name}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn completion_menu_navigates_and_inserts() {
+    let dir = completion_dir("menu");
+    std::fs::write(dir.join("alpha.txt"), "ALPHA-CONTENT").unwrap();
+    std::fs::write(dir.join("alpine.txt"), "ALPINE-CONTENT").unwrap();
+
+    let mut session = history_session();
+    session.run(&format!("cd {}", dir.display()));
+    let _ = session.writer.write_all(b"cat al");
+    let _ = session.writer.write_all(b"\t");
+    let seen = read_until(
+        session.master.as_raw_fd(),
+        "alpine.txt",
+        Duration::from_secs(5),
+    );
+    assert!(seen.contains("alpha.txt"), "menu missing alpha: {seen:?}");
+    assert!(seen.contains("alpine.txt"), "menu missing alpine: {seen:?}");
+
+    let _ = session.writer.write_all(b"\t");
+    let _ = session.writer.write_all(b"\r");
+    let _ = session.writer.write_all(b"\r");
+    let out = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    assert!(
+        out.contains("ALPINE-CONTENT"),
+        "selection did not run: {out:?}"
+    );
+    assert!(
+        out.contains("cmdline_url=cat%20alpine.txt"),
+        "wrong selection inserted: {out:?}"
+    );
+    session.finish();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn completion_inserts_a_single_candidate() {
+    let dir = completion_dir("single");
+    std::fs::write(dir.join("only.txt"), "ONLY-CONTENT").unwrap();
+
+    let mut session = history_session();
+    let cd_out = session.run(&format!("cd {}", dir.display()));
+    assert!(cd_out.contains("133;D;0"), "cd failed: {cd_out:?}");
+    let _ = session.writer.write_all(b"cat onl\t\r");
+    let out = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    assert!(out.contains("ONLY-CONTENT"), "single completion: {out:?}");
+    session.finish();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn completion_expands_variables() {
+    let mut session = history_session();
+    let _ = session.writer.write_all(b"echo $HOM");
+    read_until(
+        session.master.as_raw_fd(),
+        "$HOM",
+        Duration::from_secs(5),
+    );
+    let _ = session.writer.write_all(b"\t\r");
+    let out = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    assert!(
+        out.contains("cmdline_url=echo%20%24HOME"),
+        "variable not completed: {out:?}"
+    );
+    session.finish();
+}
+
+#[test]
+fn completion_reads_git_branches_without_a_subprocess() {
+    let dir = completion_dir("git");
+    std::fs::create_dir_all(dir.join(".git/refs/heads")).unwrap();
+    std::fs::write(dir.join(".git/refs/heads/main"), "0000").unwrap();
+    std::fs::write(dir.join(".git/refs/heads/feature-x"), "0000").unwrap();
+
+    let mut session = history_session();
+    session.run(&format!("cd {}", dir.display()));
+    let _ = session.writer.write_all(b"git checkout ma\t");
+    let seen = read_until(
+        session.master.as_raw_fd(),
+        "git checkout main",
+        Duration::from_secs(5),
+    );
+    assert!(seen.contains("git checkout main"), "branch completion: {seen:?}");
+    let _ = session.writer.write_all(b"\x03");
+    let _ = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    session.finish();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+
+#[test]
+fn fuzzy_file_search_inserts_a_match() {
+    let dir = completion_dir("fuzzy");
+    std::fs::write(dir.join("alpha.txt"), "ALPHA-CONTENT").unwrap();
+    std::fs::write(dir.join("beta.txt"), "BETA-CONTENT").unwrap();
+
+    let mut session = history_session();
+    session.run(&format!("cd {}", dir.display()));
+    let _ = session.writer.write_all(b"cat \x14");
+    let seen = read_until(session.master.as_raw_fd(), "fuzzy>", Duration::from_secs(5));
+    assert!(seen.contains("beta.txt"), "fuzzy list missing files: {seen:?}");
+
+    let _ = session.writer.write_all(b"bet");
+    read_until(
+        session.master.as_raw_fd(),
+        "beta.txt",
+        Duration::from_secs(5),
+    );
+    let _ = session.writer.write_all(b"\r");
+    let _ = session.writer.write_all(b"\r");
+    let out = read_until(
+        session.master.as_raw_fd(),
+        "BETA-CONTENT",
+        Duration::from_secs(5),
+    );
+    assert!(out.contains("BETA-CONTENT"), "fuzzy choice did not run: {out:?}");
+    session.finish();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn fuzzy_file_search_cancel_keeps_the_buffer() {
+    let dir = completion_dir("fuzzy-cancel");
+    std::fs::write(dir.join("alpha.txt"), "ALPHA-CONTENT").unwrap();
+
+    let mut session = history_session();
+    session.run(&format!("cd {}", dir.display()));
+    let _ = session.writer.write_all(b"cat \x14");
+    read_until(session.master.as_raw_fd(), "fuzzy>", Duration::from_secs(5));
+    let _ = session.writer.write_all(b"\x1b");
+    std::thread::sleep(Duration::from_millis(100));
+    let _ = session.writer.write_all(b"alpha.txt\r");
+    let out = read_until(
+        session.master.as_raw_fd(),
+        "ALPHA-CONTENT",
+        Duration::from_secs(5),
+    );
+    assert!(
+        out.contains("ALPHA-CONTENT"),
+        "cancel changed the buffer: {out:?}"
+    );
+    session.finish();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn completion_expands_tilde_paths() {
+    let dir = std::env::temp_dir().join(format!("sharky-tilde-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("only.txt"), "TILDE-CONTENT").unwrap();
+    let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+
+    let mut session = history_session();
+    let _ = session
+        .writer
+        .write_all(format!("cat ~/{name}/onl\t\r").as_bytes());
+    let out = read_until(
+        session.master.as_raw_fd(),
+        "TILDE-CONTENT",
+        Duration::from_secs(5),
+    );
+    assert!(out.contains("TILDE-CONTENT"), "tilde completion: {out:?}");
+    session.finish();
+    std::fs::remove_dir_all(&dir).ok();
+}
