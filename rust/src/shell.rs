@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
@@ -29,6 +29,7 @@ pub struct Shell {
     pub last_duration_ms: u64,
     funcs: HashMap<String, List>,
     arrays: HashMap<String, Vec<String>>,
+    assoc: HashMap<String, BTreeMap<String, String>>,
     positional: Vec<String>,
     aliases: HashMap<String, String>,
     abbreviations: HashMap<String, String>,
@@ -112,6 +113,7 @@ impl Shell {
             last_duration_ms: 0,
             funcs: HashMap::new(),
             arrays: HashMap::new(),
+            assoc: HashMap::new(),
             positional: Vec::new(),
             aliases: HashMap::new(),
             abbreviations: HashMap::new(),
@@ -336,7 +338,7 @@ impl Shell {
     pub fn command_words(&self) -> Vec<String> {
         let mut words: Vec<String> = [
             ":", "true", "false", "cd", "exit", "export", "unset", "set", "source", ".",
-            "break", "continue", "return", "jobs", "fg", "bg",
+            "break", "continue", "return", "jobs", "fg", "bg", "declare",
         ]
         .iter()
         .map(|word| word.to_string())
@@ -1113,6 +1115,7 @@ impl Shell {
             "history" => Some(Flow::Status(self.history_builtin(&words[1..]))),
             "wait" => Some(Flow::Status(self.wait_builtin(&words[1..]))),
             "kill" => Some(Flow::Status(self.kill_builtin(&words[1..]))),
+            "declare" => Some(Flow::Status(self.declare(&words[1..]))),
             "z" => Some(Flow::Status(self.z_builtin(&words[1..], false))),
             "zi" => Some(Flow::Status(self.z_builtin(&words[1..], true))),
             "reload" => Some(Flow::Status(self.reload())),
@@ -1187,16 +1190,77 @@ impl Shell {
                 for element in elements {
                     values.extend(self.expand_word(element));
                 }
-                self.set_array(&assignment.name, values, assignment.append);
+                if self.assoc.contains_key(&assignment.name) {
+                    let mut map = BTreeMap::new();
+                    for value in values {
+                        if let Some((key, value)) = assoc_literal(&value) {
+                            map.insert(key, value);
+                        }
+                    }
+                    if assignment.append {
+                        self.assoc
+                            .entry(assignment.name.clone())
+                            .or_default()
+                            .extend(map);
+                    } else {
+                        self.assoc.insert(assignment.name.clone(), map);
+                    }
+                } else {
+                    self.set_array(&assignment.name, values, assignment.append);
+                }
             }
             AssignmentValue::Word(word) => {
                 let value = self.expand_assignment(word);
-                match &assignment.index {
-                    Some(index) => self.set_array_element(&assignment.name, index, value),
-                    None => self.set_var(&assignment.name, value),
+                if self.assoc.contains_key(&assignment.name) {
+                    let key = assignment.index.clone().unwrap_or_else(|| "0".to_string());
+                    self.assoc
+                        .entry(assignment.name.clone())
+                        .or_default()
+                        .insert(key, value);
+                } else {
+                    match &assignment.index {
+                        Some(index) => self.set_array_element(&assignment.name, index, value),
+                        None => self.set_var(&assignment.name, value),
+                    }
                 }
             }
         }
+    }
+
+    fn declare(&mut self, args: &[String]) -> i32 {
+        let mut kind = None;
+        let mut names = Vec::new();
+        for arg in args {
+            match arg.as_str() {
+                "-A" => kind = Some(true),
+                "-a" => kind = Some(false),
+                other if other.starts_with('-') => {
+                    eprintln!("sharky: declare: unsupported option: {other}");
+                    return 2;
+                }
+                other => names.push(other.to_string()),
+            }
+        }
+
+        let Some(assoc) = kind else {
+            eprintln!("sharky: declare: usage: declare -A|-a name ...");
+            return 2;
+        };
+        if names.is_empty() {
+            eprintln!("sharky: declare: usage: declare -A|-a name ...");
+            return 2;
+        }
+
+        for name in names {
+            if assoc {
+                self.arrays.remove(&name);
+                self.assoc.entry(name).or_default();
+            } else {
+                self.assoc.remove(&name);
+                self.arrays.entry(name).or_default();
+            }
+        }
+        0
     }
 
     fn set_array(&mut self, name: &str, values: Vec<String>, append: bool) {
@@ -1207,8 +1271,15 @@ impl Shell {
         }
     }
 
+    fn resolve_array_index(&mut self, text: &str) -> usize {
+        if let Ok(index) = text.trim().parse::<usize>() {
+            return index;
+        }
+        arith::evaluate(text, self).unwrap_or(0).max(0) as usize
+    }
+
     fn set_array_element(&mut self, name: &str, index: &str, value: String) {
-        let index: usize = index.trim().parse().unwrap_or(0);
+        let index = self.resolve_array_index(index);
         let array = self.arrays.entry(name.to_string()).or_default();
         while array.len() <= index {
             array.push(String::new());
@@ -1234,7 +1305,23 @@ impl Shell {
 
     fn unset(&mut self, args: &[String]) -> i32 {
         for name in args {
+            if let Some((array, index)) = split_array_argument(name) {
+                if let Some(assoc) = self.assoc.get_mut(&array) {
+                    assoc.remove(&index);
+                    continue;
+                }
+                if let Some(values) = self.arrays.get_mut(&array) {
+                    if let Ok(index) = index.parse::<usize>() {
+                        if index < values.len() {
+                            values.remove(index);
+                        }
+                    }
+                    continue;
+                }
+            }
             self.env.retain(|(key, _)| key != name);
+            self.arrays.remove(name);
+            self.assoc.remove(name);
         }
         0
     }
@@ -1987,9 +2074,17 @@ impl Shell {
                     fields.push(&home, true);
                 }
                 Part::Double(inner) => {
-                    let mut text = String::new();
-                    self.expand_parts(inner, &mut text);
-                    fields.push(&text, true);
+                    if let [Part::Parameter(parameter)] = inner.as_slice()
+                        && let Some(values) = self.parameter_elements(parameter)
+                    {
+                        for value in values {
+                            fields.field_quoted(&value);
+                        }
+                    } else {
+                        let mut text = String::new();
+                        self.expand_parts(inner, &mut text);
+                        fields.push(&text, true);
+                    }
                 }
                 Part::Variable(name) if name == "@" || name == "*" => {
                     for value in &self.positional {
@@ -2001,8 +2096,14 @@ impl Shell {
                     fields.push(&value, false);
                 }
                 Part::Parameter(parameter) => {
-                    let value = self.parameter_value(parameter);
-                    fields.push(&value, false);
+                    if let Some(values) = self.parameter_elements(parameter) {
+                        for value in values {
+                            fields.field(&value);
+                        }
+                    } else {
+                        let value = self.parameter_value(parameter);
+                        fields.push(&value, false);
+                    }
                 }
                 Part::CmdSub(source) => {
                     let value = self.command_substitution(source);
@@ -2069,34 +2170,54 @@ impl Shell {
     }
 
     fn parameter_value(&mut self, parameter: &Parameter) -> String {
-        if parameter.operator == Some(ParamOp::Length)
-            && parameter.index.is_some()
-            && let Some(array) = self.arrays.get(&parameter.name)
-        {
-            return array.len().to_string();
+        let index = parameter.index.as_deref();
+        let multiple = matches!(index, Some("@") | Some("*"));
+
+        if parameter.operator == Some(ParamOp::Length) && multiple {
+            if let Some(array) = self.arrays.get(&parameter.name) {
+                return array.len().to_string();
+            }
+            if let Some(assoc) = self.assoc.get(&parameter.name) {
+                return assoc.len().to_string();
+            }
+            return "0".to_string();
         }
 
-        if parameter.operator == Some(ParamOp::Keys) && parameter.index.is_some() {
-            return self
-                .arrays
-                .get(&parameter.name)
-                .map(|array| {
-                    (0..array.len())
-                        .map(|index| index.to_string())
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                })
-                .unwrap_or_default();
+        if parameter.operator == Some(ParamOp::Keys) && multiple {
+            if let Some(array) = self.arrays.get(&parameter.name) {
+                return (0..array.len())
+                    .map(|index| index.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+            }
+            if let Some(assoc) = self.assoc.get(&parameter.name) {
+                return assoc.keys().cloned().collect::<Vec<_>>().join(" ");
+            }
+            return String::new();
         }
+
+        let numeric_index = if self.assoc.contains_key(&parameter.name) {
+            0
+        } else {
+            index
+                .map(|text| self.resolve_array_index(text))
+                .unwrap_or(0)
+        };
 
         let no_nounset = matches!(
             parameter.operator,
             Some(ParamOp::Default | ParamOp::Assign | ParamOp::Alternate | ParamOp::Error)
         );
-        let value = if let Some(array) = self.arrays.get(&parameter.name) {
-            match parameter.index.as_deref() {
+        let value = if let Some(assoc) = self.assoc.get(&parameter.name) {
+            match index {
+                Some("@") | Some("*") => assoc.values().cloned().collect::<Vec<_>>().join(" "),
+                Some(key) => assoc.get(key).cloned().unwrap_or_default(),
+                None => assoc.get("0").cloned().unwrap_or_default(),
+            }
+        } else if let Some(array) = self.arrays.get(&parameter.name) {
+            match index {
                 Some("@") | Some("*") => array.join(" "),
-                Some(index) => array_index(array, index).unwrap_or_default(),
+                Some(_) => array.get(numeric_index).cloned().unwrap_or_default(),
                 None => array.first().cloned().unwrap_or_default(),
             }
         } else if no_nounset {
@@ -2187,6 +2308,30 @@ impl Shell {
         }
     }
 
+    fn parameter_elements(&mut self, parameter: &Parameter) -> Option<Vec<String>> {
+        let index = parameter.index.as_deref()?;
+        if index != "@" && index != "*" {
+            return None;
+        }
+        match parameter.operator {
+            None | Some(ParamOp::Substring) => {}
+            _ => return None,
+        }
+
+        let mut values = if let Some(assoc) = self.assoc.get(&parameter.name) {
+            assoc.values().cloned().collect::<Vec<_>>()
+        } else {
+            self.arrays.get(&parameter.name).cloned().unwrap_or_default()
+        };
+
+        if parameter.operator == Some(ParamOp::Substring) {
+            let argument = parameter.argument.as_deref().unwrap_or("");
+            let (start, end) = slice_bounds(values.len(), argument);
+            values = values[start..end].to_vec();
+        }
+        Some(values)
+    }
+
     fn command_substitution(&mut self, source: &str) -> String {
         use std::io::Read;
         use std::os::fd::{FromRawFd, IntoRawFd};
@@ -2246,14 +2391,13 @@ impl Shell {
     }
 }
 
-fn substring_value(value: &str, argument: &str) -> String {
+fn slice_bounds(len: usize, argument: &str) -> (usize, usize) {
     let (offset, length) = match argument.split_once(':') {
         Some((offset, length)) => (offset, Some(length)),
         None => (argument, None),
     };
     let offset: i64 = offset.trim().parse().unwrap_or(0);
-    let chars: Vec<char> = value.chars().collect();
-    let len = chars.len() as i64;
+    let len = len as i64;
     let start = if offset < 0 {
         (len + offset).max(0)
     } else {
@@ -2270,7 +2414,42 @@ fn substring_value(value: &str, argument: &str) -> String {
         }
         None => len,
     };
-    chars[start as usize..end as usize].iter().collect()
+    (start as usize, end as usize)
+}
+
+fn substring_value(value: &str, argument: &str) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let (start, end) = slice_bounds(chars.len(), argument);
+    chars[start..end].iter().collect()
+}
+
+fn assoc_literal(text: &str) -> Option<(String, String)> {
+    let rest = text.strip_prefix('[')?;
+    let close = rest.find("]=")?;
+    if close == 0 {
+        return None;
+    }
+    Some((rest[..close].to_string(), rest[close + 2..].to_string()))
+}
+
+fn split_array_argument(text: &str) -> Option<(String, String)> {
+    let open = text.find('[')?;
+    if !text.ends_with(']') {
+        return None;
+    }
+    let name = &text[..open];
+    let index = &text[open + 1..text.len() - 1];
+    if name.is_empty() || index.is_empty() {
+        return None;
+    }
+    let mut chars = name.chars();
+    let first = chars.next()?;
+    if !(first.is_ascii_alphabetic() || first == '_')
+        || !chars.all(|char| char.is_ascii_alphanumeric() || char == '_')
+    {
+        return None;
+    }
+    Some((name.to_string(), index.to_string()))
 }
 
 fn upper_first(value: &str) -> String {
@@ -2456,6 +2635,7 @@ fn is_builtin_name(name: &str) -> bool {
             | "zi"
             | "reload"
             | "shift"
+            | "declare"
     )
 }
 
@@ -2662,6 +2842,13 @@ impl Fields {
         }
     }
 
+    fn field_quoted(&mut self, text: &str) {
+        if self.started {
+            self.flush();
+        }
+        self.done.push((text.to_string(), false));
+    }
+
     fn field(&mut self, text: &str) {
         if self.started {
             self.flush();
@@ -2754,19 +2941,6 @@ fn trim_suffix(value: &str, pattern: &str, longest: bool) -> String {
     }
 
     value.to_string()
-}
-
-fn array_index(array: &[String], index: &str) -> Option<String> {
-    let index: isize = index.trim().parse().unwrap_or(0);
-    let position = if index < 0 {
-        array.len() as isize + index
-    } else {
-        index
-    };
-    if position < 0 {
-        return None;
-    }
-    array.get(position as usize).cloned()
 }
 
 fn brace_expand(text: &str) -> Option<Vec<String>> {

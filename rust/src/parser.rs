@@ -626,7 +626,7 @@ fn as_assignment(word: &Word) -> Option<Assignment> {
         }
         let name = &prefix[..open];
         let index = &prefix[open + 1..prefix.len() - 1];
-        if !is_name(name) || index.is_empty() || !index.chars().all(|char| char.is_ascii_digit()) {
+        if !is_name(name) || index.is_empty() {
             return None;
         }
         (name.to_string(), Some(index.to_string()), false)

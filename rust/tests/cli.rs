@@ -907,7 +907,7 @@ fn parameter_substitution_replaces_literal_text() {
 fn array_assignment_expands_elements() {
     let out = sharky(&["-c", r#"a=(one two); printf '[%s]' "${a[@]}""#]);
     assert_eq!(out.status.code(), Some(0));
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "[one two]");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "[one][two]");
 }
 
 #[test]
@@ -1299,4 +1299,50 @@ fn ansi_c_quoting_decodes_escapes() {
         let out = sharky(&["-c", script]);
         assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{script}");
     }
+}
+
+
+#[test]
+fn associative_arrays_store_and_read_keys() {
+    let out = sharky(&[
+        "-c",
+        r#"declare -A a; a[one]=1; a[two]=2; printf '%s|%s|%s' "${a[one]}" "${#a[@]}" "${!a[@]}""#,
+    ]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "1|2|one two");
+}
+
+#[test]
+fn associative_array_literals_fill_declared_arrays() {
+    let out = sharky(&[
+        "-c",
+        r#"declare -A a; a=([x]=1 [y]=2); printf '%s|%s' "${a[x]}" "${a[y]}""#,
+    ]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "1|2");
+}
+
+#[test]
+fn quoted_array_expansion_keeps_one_field_per_element() {
+    let out = sharky(&["-c", r#"a=(one two three); printf '<%s>' "${a[@]}""#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "<one><two><three>");
+
+    let out = sharky(&["-c", r#"a=(one two three); printf '<%s>' "${a[@]:1:2}""#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "<two><three>");
+
+    let out = sharky(&["-c", r#"a=(one two); printf '%s' "${#a[0]}""#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "3");
+}
+
+#[test]
+fn indexed_arrays_accept_arithmetic_indexes_and_unset_keys() {
+    let out = sharky(&["-c", r#"a=(one two three); i=1; printf '%s' "${a[i]}""#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "two");
+
+    let out = sharky(&["-c", r#"a=(one two); a[1]=TWO; printf '%s' "${a[1]}""#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "TWO");
+
+    let out = sharky(&[
+        "-c",
+        r#"declare -A a; a[k]=v; unset 'a[k]'; printf '%s' "${#a[@]}""#,
+    ]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "0");
 }

@@ -74,7 +74,8 @@ The prompt, `-c` and script files share one grammar:
 | parameter operators | `${NAME:-default}`, `${#NAME}`, `${NAME#pre}`, `${NAME/pat/repl}`, `${NAME//pat/repl}`, `${NAME:1:2}`, `${NAME^^}`, `${!NAME}` |
 | ANSI-C quoting | `$'a\tb'`, `$'\x41\u00e9'` |
 | brace expansion | `file{1..3}.txt`, `a{b,c}d` |
-| indexed arrays | `a=(one two)`, `"${a[1]}"`, `"${a[@]}"`, `"${#a[@]}"` |
+| indexed arrays | `a=(one two)`, `"${a[1]}"`, `"${a[@]}"`, `"${#a[@]}"`, `"${a[@]:1:2}"` |
+| associative arrays | `declare -A a`, `a[key]=value`, `"${a[key]}"`, `"${!a[@]}"` |
 | command substitution | `files=$(ls \| wc -l)` |
 | arithmetic | `$((2 + 3 * 4))`, `((total > 10))` |
 | globbing and tilde | `src/*.rs`, `~/bin` |
