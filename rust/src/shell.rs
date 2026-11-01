@@ -373,7 +373,7 @@ impl Shell {
             ":", "true", "false", "cd", "exit", "export", "unset", "set", "source", ".",
             "break", "continue", "return", "jobs", "fg", "bg", "declare", "pwd", "type",
             "alias", "abbr", "unabbr", "unalias", "history", "wait", "kill", "z", "zi",
-            "reload", "trap", "read", "shift",
+            "reload", "trap", "read", "shift", "wake",
         ]
         .iter()
         .map(|word| word.to_string())
@@ -1348,6 +1348,12 @@ impl Shell {
             "unabbr" => Some(Flow::Status(self.unabbr(&words[1..]))),
             "unalias" => Some(Flow::Status(self.unalias(&words[1..]))),
             "history" => Some(Flow::Status(self.history_builtin(&words[1..]))),
+            "wake" => {
+                if let Some(command) = words.get(1) {
+                    self.wake.push(command.clone());
+                }
+                Some(Flow::Status(0))
+            }
             "wait" => Some(Flow::Status(self.wait_builtin(&words[1..]))),
             "kill" => Some(Flow::Status(self.kill_builtin(&words[1..]))),
             "declare" => Some(Flow::Status(self.declare(&words[1..]))),

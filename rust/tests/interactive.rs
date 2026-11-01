@@ -863,6 +863,26 @@ fn multiline_home_moves_to_the_line_start() {
 }
 
 #[test]
+fn bracketed_paste_inserts_control_bytes_verbatim() {
+    let mut session = history_session();
+    paste(
+        &mut session.writer,
+        "printf '%s' 'a\u{3}b\u{1b}[Ac'",
+    );
+    let _ = session.writer.write_all(b"\r");
+    let out = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    assert!(
+        out.contains("a%03b%1B%5BAc"),
+        "paste dropped control bytes: {out:?}"
+    );
+    session.finish();
+}
+
+#[test]
 fn bracketed_paste_is_disabled_around_prompts() {
     let mut session = history_session();
     let seen = session.run("echo paste-toggle");
@@ -977,10 +997,12 @@ fn autosuggest_is_silent_mid_line() {
 const HIGHLIGHT_CONFIG: &str = "coral sea #35B8C5
 coral kelp #8CCFA8
 coral danger #FF8F80
+coral arg #112233
 wave command @sea
 wave builtin @kelp
 wave string @kelp
 wave variable @danger
+wave argument @arg
 wave error @danger
 tide greeting off
 ";
@@ -1005,6 +1027,17 @@ fn highlight_paints_command_strings_and_variables() {
     assert!(
         seen.contains("\u{1b}[38;2;140;207;168m\""),
         "string role missing: {seen:?}"
+    );
+
+    let _ = session.writer.write_all(b" hello");
+    let seen = read_until(
+        session.master.as_raw_fd(),
+        "\u{1b}[38;2;17;34;51m hello\u{1b}[0m",
+        Duration::from_secs(5),
+    );
+    assert!(
+        seen.contains("\u{1b}[38;2;17;34;51m hello\u{1b}[0m"),
+        "argument role missing: {seen:?}"
     );
     let _ = session.writer.write_all(b"\x03");
     let _ = read_until(
@@ -1472,6 +1505,96 @@ fn vi_execute(session: &mut HistorySession, initial: &str, keys: &str) -> String
 }
 
 #[test]
+fn sigterm_restores_the_terminal() {
+    let mut session = history_session();
+    let pid = nix::unistd::Pid::from_raw(session.child.id() as i32);
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM).expect("signal");
+    let seen = read_until(
+        session.master.as_raw_fd(),
+        "\x1b[?2004l",
+        Duration::from_secs(5),
+    );
+    assert!(
+        seen.contains("\x1b[?2004l"),
+        "SIGTERM left paste mode on: {seen:?}"
+    );
+    let status = session.child.wait().expect("wait");
+    assert!(!status.success());
+    std::fs::remove_dir_all(&session.data).ok();
+}
+
+#[test]
+fn undo_is_reachable_from_ctrl_underscore() {
+    let mut session = history_session();
+    let _ = session.writer.write_all(b"echo abc");
+    std::thread::sleep(Duration::from_millis(60));
+    let _ = session.writer.write_all(b"\x7f");
+    std::thread::sleep(Duration::from_millis(60));
+    let _ = session.writer.write_all(b"\x1f\r");
+    let out = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    assert!(
+        out.contains("cmdline_url=echo%20abc"),
+        "Ctrl-_ did not undo: {out:?}"
+    );
+    session.finish();
+}
+
+#[test]
+fn vi_escape_cancels_a_pending_operator_without_moving() {
+    let mut session = history_session();
+    session.run("set -o vi");
+    let _ = session.writer.write_all(b"echo abc");
+    std::thread::sleep(Duration::from_millis(40));
+    let _ = session.writer.write_all(b"\x1b");
+    std::thread::sleep(Duration::from_millis(80));
+    let _ = session.writer.write_all(b"0lld");
+    std::thread::sleep(Duration::from_millis(80));
+    let _ = session.writer.write_all(b"\x1b");
+    std::thread::sleep(Duration::from_millis(80));
+    let _ = session.writer.write_all(b"x\r");
+    let out = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    assert!(
+        out.contains("cmdline_url=eco%20abc"),
+        "Esc moved the cursor or kept the operator: {out:?}"
+    );
+    session.finish();
+}
+
+#[test]
+fn vi_count_deletes_all_requested_lines() {
+    let mut session = history_session();
+    session.run("set -o vi");
+    paste(&mut session.writer, "one\ntwo\nthree");
+    read_until(
+        session.master.as_raw_fd(),
+        "three",
+        Duration::from_secs(5),
+    );
+    let _ = session.writer.write_all(b"\x1b");
+    std::thread::sleep(Duration::from_millis(60));
+    let _ = session.writer.write_all(b"\x1b[A\x1b[A0");
+    let _ = session.writer.write_all(b"2dd\r");
+    let out = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    assert!(
+        out.contains("cmdline_url=three"),
+        "2dd did not remove two lines: {out:?}"
+    );
+    session.finish();
+}
+
+#[test]
 fn vi_huge_counts_do_not_crash() {
     let mut session = history_session();
     session.run("set -o vi");
@@ -1505,6 +1628,9 @@ fn vi_motions_and_operators() {
         ("echo abc", "xu", "echo abc"),
         ("echo abc", "0rX", "Xcho abc"),
         ("a b c d", "03wx", "a b c "),
+        ("echo one two", "02ex", "echo on two"),
+        ("echo abc", "0x3p", "ceeeho abc"),
+        ("echo abc", "0x3P", "eeecho abc"),
         ("echo abc", "\x7f", "echo ab"),
         ("echo abc", "ddiprintf DD", "printf DD"),
     ];

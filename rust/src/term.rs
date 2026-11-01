@@ -28,6 +28,24 @@ pub struct RawMode {
     original: libc::termios,
 }
 
+static RAW_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static mut SAVED_TERMIOS: Option<libc::termios> = None;
+
+pub extern "C" fn restore_terminal_and_exit(signal: libc::c_int) {
+    // SAFETY: the handler only reads the saved termios and exits immediately.
+    unsafe {
+        if RAW_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+            let saved = std::ptr::addr_of!(SAVED_TERMIOS);
+            if let Some(termios) = (*saved).as_ref() {
+                libc::tcsetattr(0, libc::TCSANOW, termios);
+            }
+        }
+        let clear = b"\x1b[?2004l";
+        libc::write(1, clear.as_ptr() as *const _, clear.len());
+        libc::_exit(128 + signal);
+    }
+}
+
 impl RawMode {
     pub fn enable() -> Option<Self> {
         // SAFETY: termios is a plain C struct initialised by tcgetattr.
@@ -44,6 +62,8 @@ impl RawMode {
             if libc::tcsetattr(0, libc::TCSADRAIN, &termios) != 0 {
                 return None;
             }
+            SAVED_TERMIOS = Some(original);
+            RAW_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
             let _ = write_stdout("\x1b[?2004h");
             Some(RawMode { original })
         }
@@ -53,6 +73,7 @@ impl RawMode {
 impl Drop for RawMode {
     fn drop(&mut self) {
         let _ = write_stdout("\x1b[?2004l");
+        RAW_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
         // SAFETY: restoring the termios captured in enable().
         unsafe {
             libc::tcsetattr(0, libc::TCSADRAIN, &self.original);
@@ -94,6 +115,7 @@ pub fn read_key() -> io::Result<Key> {
         0x0b => Key::Ctrl('k'),
         0x15 => Key::Ctrl('u'),
         0x17 => Key::Ctrl('w'),
+        0x1f => Key::Ctrl('_'),
         0x7f | 0x08 => Key::Backspace,
         b'\r' | b'\n' => Key::Enter,
         b'\t' => Key::Tab,

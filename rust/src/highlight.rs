@@ -37,11 +37,7 @@ pub fn render(shell: &Shell, text: &[char]) -> String {
             index += 1;
         }
         let segment: String = text[start..index].iter().collect();
-        if role == Role::Argument {
-            out.push_str(&segment);
-        } else {
-            out.push_str(&prompt::painted(shell, role_key(role), &segment));
-        }
+        out.push_str(&prompt::painted(shell, role_key(role), &segment));
     }
     out
 }

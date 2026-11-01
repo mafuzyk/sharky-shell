@@ -7,6 +7,7 @@ pub fn expand(line: &str, history: &[String]) -> Result<String, String> {
     let mut out = String::new();
     let mut index = 0;
     let mut single = false;
+    let mut double = false;
 
     while index < chars.len() {
         let char = chars[index];
@@ -22,8 +23,15 @@ pub fn expand(line: &str, history: &[String]) -> Result<String, String> {
             continue;
         }
 
-        if char == '\'' {
+        if char == '\'' && !double {
             single = !single;
+            out.push(char);
+            index += 1;
+            continue;
+        }
+
+        if char == '"' && !single {
+            double = !double;
             out.push(char);
             index += 1;
             continue;
@@ -147,17 +155,65 @@ fn argument(history: &[String], which: Argument) -> Result<String, String> {
     let previous = history
         .last()
         .ok_or_else(|| "!$: event not found".to_string())?;
-    let mut words = previous.split_whitespace();
-    let _command = words.next();
-    let args: Vec<&str> = words.collect();
-    if args.is_empty() {
+    let args = history_words(previous);
+    if args.len() < 2 {
         return Err("!$: event not found".to_string());
     }
+    let args = &args[1..];
     Ok(match which {
-        Argument::First => args[0].to_string(),
-        Argument::Last => args[args.len() - 1].to_string(),
+        Argument::First => args[0].clone(),
+        Argument::Last => args[args.len() - 1].clone(),
         Argument::All => args.join(" "),
     })
+}
+
+fn history_words(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+
+    for char in line.chars() {
+        if escaped {
+            current.push(char);
+            escaped = false;
+            continue;
+        }
+        match quote {
+            Some('\'') => {
+                current.push(char);
+                if char == '\'' {
+                    quote = None;
+                }
+            }
+            Some(_) => {
+                current.push(char);
+                if char == '\\' {
+                    escaped = true;
+                } else if char == '"' {
+                    quote = None;
+                }
+            }
+            None => {
+                if char.is_whitespace() {
+                    if !current.is_empty() {
+                        words.push(std::mem::take(&mut current));
+                    }
+                    continue;
+                }
+                current.push(char);
+                if char == '\'' || char == '"' {
+                    quote = Some(char);
+                } else if char == '\\' {
+                    escaped = true;
+                }
+            }
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
 }
 
 fn quick_substitution(line: &str, history: &[String]) -> Result<String, String> {
@@ -213,6 +269,28 @@ mod tests {
         assert_eq!(expand("echo \\!\\!", &history).unwrap(), "echo \\!\\!");
         assert_eq!(expand("echo \"!!\"", &history).unwrap(), "echo \"echo alpha\"");
         assert_eq!(expand("echo a ! b", &history).unwrap(), "echo a ! b");
+    }
+
+    #[test]
+    fn argument_selectors_respect_quotes() {
+        let history = vec!["echo 'one two'".to_string()];
+        assert_eq!(
+            expand("printf '<%s>' !$", &history).unwrap(),
+            "printf '<%s>' 'one two'"
+        );
+
+        let history = vec!["echo a b".to_string()];
+        assert_eq!(expand("printf '<%s>' !*", &history).unwrap(), "printf '<%s>' a b");
+        assert_eq!(expand("printf '<%s>' !^", &history).unwrap(), "printf '<%s>' a");
+    }
+
+    #[test]
+    fn apostrophe_inside_double_quotes_does_not_suppress() {
+        let history = vec!["echo BASE".to_string()];
+        assert_eq!(
+            expand("echo \"it's !!\"", &history).unwrap(),
+            "echo \"it's echo BASE\""
+        );
     }
 
     #[test]

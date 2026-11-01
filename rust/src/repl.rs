@@ -128,5 +128,9 @@ fn install_signals() {
         let _ = signal(Signal::SIGTSTP, SigHandler::SigIgn);
         let _ = signal(Signal::SIGTTOU, SigHandler::SigIgn);
         let _ = signal(Signal::SIGTTIN, SigHandler::SigIgn);
+        let _ =
+            signal(Signal::SIGTERM, SigHandler::Handler(crate::term::restore_terminal_and_exit));
+        let _ =
+            signal(Signal::SIGHUP, SigHandler::Handler(crate::term::restore_terminal_and_exit));
     }
 }

@@ -48,6 +48,7 @@ impl Editor {
         let mut vi_count = 0usize;
         let mut vi_pending: Option<char> = None;
         let mut vi_replace = false;
+        let mut last_row = prompt_width / term::width().max(1);
 
         loop {
             let suggestion = if vi_normal {
@@ -64,7 +65,7 @@ impl Editor {
                 .as_ref()
                 .map(|menu| render_menu(shell, menu, term::width()))
                 .unwrap_or_default();
-            self.render_input(
+            last_row = self.render_input(
                 &buffer,
                 cursor,
                 prompt_width,
@@ -72,6 +73,7 @@ impl Editor {
                 &display,
                 &menu_text,
                 menu_rows,
+                last_row,
             )?;
 
             let key = term::read_key()?;
@@ -106,6 +108,40 @@ impl Editor {
                         push_undo(&mut undo, &buffer, cursor);
                         buffer.insert(cursor, char);
                         cursor += 1;
+                    }
+                    Key::Ctrl(char) => {
+                        let code = (char as u32).wrapping_sub('a' as u32).wrapping_add(1);
+                        if let Some(char) = char::from_u32(code) {
+                            push_undo(&mut undo, &buffer, cursor);
+                            buffer.insert(cursor, char);
+                            cursor += 1;
+                        }
+                    }
+                    Key::Alt(char) => {
+                        push_undo(&mut undo, &buffer, cursor);
+                        buffer.insert(cursor, '\x1b');
+                        buffer.insert(cursor + 1, char);
+                        cursor += 2;
+                    }
+                    Key::Up
+                    | Key::Down
+                    | Key::Left
+                    | Key::Right
+                    | Key::Home
+                    | Key::End
+                    | Key::ShiftTab => {
+                        let sequence = match key {
+                            Key::Up => "\x1b[A",
+                            Key::Down => "\x1b[B",
+                            Key::Right => "\x1b[C",
+                            Key::Left => "\x1b[D",
+                            Key::Home => "\x1b[H",
+                            Key::End => "\x1b[F",
+                            Key::ShiftTab => "\x1b[Z",
+                            _ => unreachable!(),
+                        };
+                        push_undo(&mut undo, &buffer, cursor);
+                        insert_text(&mut buffer, &mut cursor, sequence);
                     }
                     _ => {}
                 }
@@ -183,6 +219,16 @@ impl Editor {
                     Key::Escape => {
                         vi_pending = None;
                         vi_replace = false;
+                        vi_count = 0;
+                        continue;
+                    }
+                    Key::Up => {
+                        cursor = move_line(&buffer, cursor, true);
+                        vi_count = 0;
+                        continue;
+                    }
+                    Key::Down => {
+                        cursor = move_line(&buffer, cursor, false);
                         vi_count = 0;
                         continue;
                     }
@@ -376,10 +422,12 @@ impl Editor {
                 }
             }
             Action::TransposeChars => {
-                if buffer.len() >= 2 && *cursor >= 2 {
+                if buffer.len() >= 2 && *cursor >= 1 {
                     push_undo(undo, buffer, *cursor);
-                    buffer.swap(*cursor - 2, *cursor - 1);
-                    if *cursor < buffer.len() {
+                    if *cursor == buffer.len() {
+                        buffer.swap(*cursor - 2, *cursor - 1);
+                    } else {
+                        buffer.swap(*cursor - 1, *cursor);
                         *cursor += 1;
                     }
                 }
@@ -479,7 +527,8 @@ impl Editor {
         display: &str,
         menu_text: &str,
         menu_rows: usize,
-    ) -> std::io::Result<()> {
+        previous_row: usize,
+    ) -> std::io::Result<usize> {
         let columns = term::width().max(1);
         let (cursor_row, cursor_column) = position(buffer, cursor, columns, prompt_width);
         let (end_row, _) = position(buffer, buffer.len(), columns, prompt_width);
@@ -487,8 +536,8 @@ impl Editor {
         let start_column = prompt_width % columns;
 
         let mut out = String::new();
-        if cursor_row > prompt_row {
-            out.push_str(&format!("\x1b[{}A", cursor_row - prompt_row));
+        if previous_row > prompt_row {
+            out.push_str(&format!("\x1b[{}A", previous_row - prompt_row));
         }
         out.push('\r');
         if start_column > 0 {
@@ -520,7 +569,8 @@ impl Editor {
             out.push_str(&format!("\x1b[{cursor_column}C"));
         }
 
-        term::write_stdout(&out)
+        term::write_stdout(&out)?;
+        Ok(cursor_row)
     }
 }
 
@@ -1006,7 +1056,7 @@ fn vi_command(
         }
         'e' => {
             for _ in 0..times {
-                *cursor = vi_word_end(buffer, *cursor).saturating_sub(1).max(*cursor);
+                *cursor = vi_next_word_end(buffer, *cursor);
             }
         }
         'j' => {
@@ -1038,8 +1088,16 @@ fn vi_command(
             editor.vi_kill_range(buffer, cursor, *cursor, end, undo);
             *vi_normal = false;
         }
-        'p' => editor.vi_paste(buffer, cursor, false, undo),
-        'P' => editor.vi_paste(buffer, cursor, true, undo),
+        'p' => {
+            for _ in 0..times {
+                editor.vi_paste(buffer, cursor, false, undo);
+            }
+        }
+        'P' => {
+            for _ in 0..times {
+                editor.vi_paste(buffer, cursor, true, undo);
+            }
+        }
         'u' => {
             if let Some((previous, position)) = undo.pop() {
                 *buffer = previous;
@@ -1084,6 +1142,17 @@ fn vi_line_end(buffer: &[char], cursor: usize) -> usize {
     } else {
         end
     }
+}
+
+fn vi_next_word_end(buffer: &[char], cursor: usize) -> usize {
+    let mut index = (cursor + 1).min(buffer.len());
+    while index < buffer.len() && !is_word_char(buffer[index]) && buffer[index] != '\n' {
+        index += 1;
+    }
+    while index < buffer.len() && is_word_char(buffer[index]) {
+        index += 1;
+    }
+    index.saturating_sub(1)
 }
 
 fn vi_word_end(buffer: &[char], cursor: usize) -> usize {
@@ -1156,7 +1225,7 @@ impl Editor {
         };
         let text: Vec<char> = self.kill.chars().collect();
         buffer.splice(at..at, text.iter().copied());
-        *cursor = at + text.len();
+        *cursor = at + text.len().saturating_sub(1);
     }
 }
 
@@ -1182,7 +1251,8 @@ fn autosuggest(shell: &Shell, buffer: &[char], cursor: usize, prompt_width: usiz
     }
     let columns = term::width().max(1);
     let (_, column) = position(buffer, cursor, columns, prompt_width);
-    if column + suffix.chars().count() >= columns {
+    let suffix_width: usize = suffix.chars().map(char_width).sum();
+    if column + suffix_width >= columns {
         return None;
     }
     Some(suffix)
@@ -1215,20 +1285,51 @@ fn position(buffer: &[char], index: usize, columns: usize, prompt_width: usize) 
             pending = false;
             continue;
         }
-        if pending {
-            row += 1;
-            column = 0;
-            pending = false;
-        }
-        if column + 1 >= columns {
-            column = columns - 1;
-            pending = true;
+        let width = if *char == '\t' {
+            let stop = (column / 8 + 1) * 8;
+            stop - column
         } else {
-            column += 1;
+            char_width(*char)
+        };
+        for _ in 0..width {
+            if pending {
+                row += 1;
+                column = 0;
+                pending = false;
+            }
+            if column + 1 >= columns {
+                column = columns - 1;
+                pending = true;
+            } else {
+                column += 1;
+            }
         }
     }
 
     (row, column)
+}
+
+fn char_width(char: char) -> usize {
+    let code = char as u32;
+    if is_zero_width(code) {
+        0
+    } else if is_wide(code) {
+        2
+    } else {
+        1
+    }
+}
+
+fn is_zero_width(code: u32) -> bool {
+    matches!(code, 0x0300..=0x036f | 0x1ab0..=0x1aff | 0x1dc0..=0x1dff
+        | 0x20d0..=0x20ff | 0xfe20..=0xfe2f | 0xfe00..=0xfe0f | 0x200b..=0x200f)
+}
+
+fn is_wide(code: u32) -> bool {
+    matches!(code, 0x1100..=0x115f | 0x2e80..=0xa4cf | 0xac00..=0xd7a3
+        | 0xf900..=0xfaff | 0xfe10..=0xfe19 | 0xfe30..=0xfe6f
+        | 0xff00..=0xff60 | 0xffe0..=0xffe6 | 0x1f300..=0x1f64f
+        | 0x1f900..=0x1f9ff | 0x20000..=0x3fffd)
 }
 fn line_start(buffer: &[char], cursor: usize) -> usize {
     buffer[..cursor.min(buffer.len())]
@@ -1310,7 +1411,11 @@ fn last_line_width(prompt: &str) -> usize {
 
     while let Some(char) = chars.next() {
         if char != '\x1b' {
-            width += 1;
+            if char == '\t' {
+                width = (width / 8 + 1) * 8;
+            } else {
+                width += char_width(char);
+            }
             continue;
         }
         match chars.next() {
@@ -1374,7 +1479,7 @@ fn fuzzy_files(shell: &Shell) -> std::io::Result<Option<String>> {
         for (index, (_, path)) in matches.iter().take(shown).enumerate() {
             let marker = if index == selected { "> " } else { "  " };
             let available = columns.saturating_sub(marker.chars().count() + 1);
-            let text: String = path.chars().take(available).collect();
+            let text = take_columns(path, available);
             screen.push_str(marker);
             screen.push_str(&text);
             screen.push_str("\r\n");
@@ -1516,10 +1621,7 @@ fn render_menu(shell: &Shell, menu: &CompletionMenu, columns: usize) -> (String,
     for (index, candidate) in menu.candidates[start..end].iter().enumerate() {
         let index = start + index;
         let marker = if index == menu.selected { "> " } else { "  " };
-        let line: String = format!("{marker}{candidate}")
-            .chars()
-            .take(width)
-            .collect();
+        let line = take_columns(&format!("{marker}{candidate}"), width);
         if index == menu.selected {
             push_row(&mut out, prompt::painted(shell, "selection", &line));
         } else {
@@ -1844,6 +1946,20 @@ fn file_candidates(word: &str, shell: &Shell) -> Vec<String> {
 }
 
 
+fn take_columns(text: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0;
+    for char in text.chars() {
+        let char_width = char_width(char);
+        if used + char_width > width {
+            break;
+        }
+        out.push(char);
+        used += char_width;
+    }
+    out
+}
+
 fn common_prefix(left: &str, right: &str) -> String {
     left.chars()
         .zip(right.chars())
@@ -2026,8 +2142,9 @@ mod action_tests {
 
     #[test]
     fn transpose_and_case_conversion() {
-        assert_eq!(apply(Action::TransposeChars, "abc", 2).0, "bac");
+        assert_eq!(apply(Action::TransposeChars, "abc", 2).0, "acb");
         assert_eq!(apply(Action::TransposeChars, "abc", 3).0, "acb");
+        assert_eq!(apply(Action::TransposeChars, "abc", 1).0, "bac");
         assert_eq!(apply(Action::UpcaseWord, "one two", 0).0, "ONE two");
         assert_eq!(apply(Action::DowncaseWord, "ONE TWO", 0).0, "one TWO");
         assert_eq!(apply(Action::CapitalizeWord, "oNE two", 0).0, "One two");

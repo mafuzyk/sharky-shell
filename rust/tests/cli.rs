@@ -1341,6 +1341,18 @@ fn parameter_indirection_and_name_prefixes() {
 }
 
 #[test]
+fn ansi_c_nul_truncates_the_string() {
+    let out = sharky(&["-c", r#"printf '<%s>' $'abc\0def'"#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "<abc>");
+
+    let out = sharky(&[
+        "-c",
+        r#"x=$'abc\0def'; printf '%s|%s' "${#x}" "$x""#,
+    ]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "3|abc");
+}
+
+#[test]
 fn ansi_c_quoting_decodes_escapes() {
     let cases = [
         ("printf '%s' $'a\\tb'", "a\tb"),
@@ -1957,6 +1969,39 @@ fn login_profiles_run_before_the_command() {
 
     let out = sharky_with_home(&home, &["-c", r#"printf '%s' "$LOGIN_VAR""#]);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn login_profiles_run_control_flow_as_one_unit() {
+    let home = login_home("flow");
+    std::fs::write(
+        home.join(".config/sharky/profile.sharky"),
+        "if false; then\nprintf UNEXPECTED\nfi\nprintf VISIBLE\n",
+    )
+    .unwrap();
+
+    let out = sharky_with_home(&home, &["-l", "-c", "printf COMMAND"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "VISIBLECOMMAND");
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("UNEXPECTED"));
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn wake_is_a_builtin_and_profiles_can_register_it() {
+    let home = login_home("wake");
+    std::fs::write(
+        home.join(".config/sharky/profile.sharky"),
+        "wake \"printf WAKE\"\n",
+    )
+    .unwrap();
+
+    let out = sharky_with_home(&home, &["-l", "-c", "printf AFTER"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "AFTER");
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("wake"),
+        "{out:?}"
+    );
     std::fs::remove_dir_all(&home).ok();
 }
 

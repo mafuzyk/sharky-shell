@@ -3,8 +3,8 @@ use crate::lexer::{self, Part, Token, TokenKind, Word};
 
 pub struct ParseError {
     pub message: String,
-    #[allow(dead_code)]
     pub incomplete: bool,
+    pub line: usize,
 }
 
 impl ParseError {
@@ -12,20 +12,39 @@ impl ParseError {
         ParseError {
             message: message.into(),
             incomplete,
+            line: 0,
         }
+    }
+
+    fn with_line(mut self, line: usize) -> Self {
+        self.line = line;
+        self
     }
 }
 
 pub fn parse(source: &str) -> Result<Program, ParseError> {
+    let line_starts: Vec<usize> = source
+        .chars()
+        .enumerate()
+        .filter(|(_, char)| *char == '\n')
+        .map(|(index, _)| index + 1)
+        .collect();
     let tokens = lexer::tokenize(source).map_err(|err| {
-        ParseError::new(format!("syntax error: {}", err.message), err.incomplete)
+        let line = line_starts.partition_point(|start| *start <= err.pos);
+        ParseError::new(format!("syntax error: {}", err.message), err.incomplete).with_line(line)
     })?;
-    Parser { tokens, pos: 0 }.parse()
+    Parser {
+        tokens,
+        pos: 0,
+        line_starts,
+    }
+    .parse()
 }
 
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    line_starts: Vec<usize>,
 }
 
 impl Parser {
@@ -34,6 +53,15 @@ impl Parser {
             .get(self.pos)
             .map(|token| token.kind.clone())
             .unwrap_or(TokenKind::Eof)
+    }
+
+    fn current_line(&self) -> usize {
+        let pos = self.tokens.get(self.pos).map(|token| token.pos).unwrap_or(0);
+        self.line_starts.partition_point(|start| *start <= pos)
+    }
+
+    fn error(&self, message: impl Into<String>, incomplete: bool) -> ParseError {
+        ParseError::new(message, incomplete).with_line(self.current_line())
     }
 
     fn advance(&mut self) -> Token {
@@ -256,7 +284,7 @@ impl Parser {
                     self.advance();
                     return Ok(Command::Test(words));
                 }
-                TokenKind::Eof => return Err(ParseError::new("unclosed [[", true)),
+                TokenKind::Eof => return Err(self.error("unclosed [[", true)),
                 _ => return Err(self.unexpected()),
             }
         }
@@ -367,7 +395,7 @@ impl Parser {
         loop {
             let condition = self.parse_list(&["then"], false)?;
             if condition.entries.is_empty() {
-                return Err(ParseError::new("syntax error: missing condition after 'if'", false));
+                return Err(self.error("syntax error: missing condition after 'if'", false));
             }
             self.expect_word("then")?;
             let body = self.parse_list(&["elif", "else", "fi"], false)?;
@@ -399,7 +427,7 @@ impl Parser {
             self.advance();
             let parts: Vec<&str> = source.split(';').collect();
             if parts.len() != 3 {
-                return Err(ParseError::new(
+                return Err(self.error(
                     "syntax error: malformed arithmetic for",
                     false,
                 ));
@@ -444,7 +472,7 @@ impl Parser {
         self.advance();
         let condition = self.parse_list(&["do"], false)?;
         if condition.entries.is_empty() {
-            return Err(ParseError::new("syntax error: missing loop condition", false));
+            return Err(self.error("syntax error: missing loop condition", false));
         }
         self.expect_word("do")?;
         let body = self.parse_list(&["done"], false)?;
@@ -466,7 +494,7 @@ impl Parser {
 
         while !self.at_word("esac") {
             if matches!(self.kind(), TokenKind::Eof) {
-                return Err(ParseError::new("unclosed case", true));
+                return Err(self.error("unclosed case", true));
             }
 
             if matches!(self.kind(), TokenKind::LParen) {
@@ -632,7 +660,7 @@ impl Parser {
                     self.advance();
                 }
                 TokenKind::Eof => {
-                    return Err(ParseError::new("unclosed array assignment", true));
+                    return Err(self.error("unclosed array assignment", true));
                 }
                 _ => return Err(self.unexpected()),
             }
@@ -676,7 +704,7 @@ impl Parser {
 
         self.advance();
         let TokenKind::Word(word) = self.kind() else {
-            return Err(ParseError::new("syntax error: redirect without a target", false));
+            return Err(self.error("syntax error: redirect without a target", false));
         };
         self.advance();
         Ok(Some(Redirect {
@@ -693,7 +721,7 @@ impl Parser {
             TokenKind::Word(word) => format!("'{}'", literal(&word).unwrap_or_default()),
             other => format!("{other:?}"),
         };
-        ParseError::new(format!("syntax error: unexpected {found}"), incomplete)
+        self.error(format!("syntax error: unexpected {found}"), incomplete)
     }
 }
 

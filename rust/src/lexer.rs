@@ -412,6 +412,15 @@ impl Lexer {
                 Some('\\') => {
                     self.pos += 1;
                     let escaped = self.scan_ansi_escape();
+                    if escaped.starts_with('\0') {
+                        while let Some(char) = self.current() {
+                            self.pos += 1;
+                            if char == '\'' {
+                                return Ok(Part::Single(text));
+                            }
+                        }
+                        return Err(LexError::new("unclosed $' string", start, true));
+                    }
                     text.push_str(&escaped);
                 }
                 Some(char) => {
