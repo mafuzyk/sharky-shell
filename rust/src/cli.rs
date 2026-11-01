@@ -25,6 +25,10 @@ pub fn run() -> i32 {
     let mut interactive = false;
 
     while let Some(arg) = args.next() {
+        if script.is_some() {
+            script_args.push(arg);
+            continue;
+        }
         match arg.as_str() {
             "--version" => {
                 println!("sharky {VERSION}");

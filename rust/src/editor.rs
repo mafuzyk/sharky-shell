@@ -142,8 +142,10 @@ impl Editor {
             }
 
             if key == Key::Escape && shell.vi_mode() {
-                vi_normal = true;
-                cursor = cursor.saturating_sub(1);
+                if !vi_normal {
+                    vi_normal = true;
+                    cursor = cursor.saturating_sub(1);
+                }
                 vi_pending = None;
                 vi_replace = false;
                 vi_count = 0;
@@ -711,9 +713,10 @@ fn parse_bound(name: &str) -> Option<BoundKey> {
 fn strip_prefix_any<'a>(name: &'a str, prefixes: &[&str]) -> Option<&'a str> {
     for prefix in prefixes {
         if name.len() > prefix.len()
-            && name[..prefix.len()].eq_ignore_ascii_case(prefix)
+            && let Some(head) = name.get(..prefix.len())
+            && head.eq_ignore_ascii_case(prefix)
         {
-            return Some(&name[prefix.len()..]);
+            return name.get(prefix.len()..);
         }
     }
     None
@@ -910,7 +913,8 @@ fn vi_command(
     if char.is_ascii_digit() && !(char == '0' && *count == 0) {
         *count = count
             .saturating_mul(10)
-            .saturating_add((char as u8 - b'0') as usize);
+            .saturating_add((char as u8 - b'0') as usize)
+            .min(9999);
         return;
     }
 
@@ -986,7 +990,7 @@ fn vi_command(
             *vi_normal = false;
         }
         'h' => *cursor = cursor.saturating_sub(times),
-        'l' => *cursor = (*cursor + times).min(buffer.len()),
+        'l' => *cursor = cursor.saturating_add(times).min(buffer.len()),
         '0' => *cursor = line_start(buffer, *cursor),
         '$' => *cursor = vi_line_end(buffer, *cursor),
         'w' => {
@@ -1770,10 +1774,16 @@ fn common_prefix(left: &str, right: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{line_end, line_start, move_line, position};
+    use super::{BoundKey, line_end, line_start, move_line, parse_bound, position};
 
     fn buffer(text: &str) -> Vec<char> {
         text.chars().collect()
+    }
+
+    #[test]
+    fn multibyte_single_character_bindings_parse() {
+        assert_eq!(parse_bound("界"), Some(BoundKey::Char('界')));
+        assert_eq!(parse_bound("m-界"), Some(BoundKey::Alt('界')));
     }
 
     #[test]

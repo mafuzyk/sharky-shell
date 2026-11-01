@@ -1246,6 +1246,69 @@ fn parameter_substrings_use_offsets_and_lengths() {
 }
 
 #[test]
+fn parameter_substrings_clamp_and_evaluate_offsets() {
+    let cases = [
+        ("x=abcdef; n=2; printf '%s' \"${x:n:1+1}\"", "cd"),
+        ("x=abcdef; printf '%s' \"${x:1:2+1}\"", "bcd"),
+        ("x=abc; printf '<%s>' \"${x: -4}\"", "<>"),
+        ("x=abc; printf '%s' \"${x:1:9223372036854775807}\"", "bc"),
+        ("x=abc; printf '<%s>' \"${x:1/0}\"", "<>"),
+        ("a=(one two); printf '<%s>' \"${a[@]: -3}\"", "<>"),
+    ];
+    for (script, expected) in cases {
+        let out = sharky(&["-c", script]);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{script}");
+    }
+}
+
+#[test]
+fn malformed_arithmetic_for_is_a_status_two_error() {
+    let out = sharky(&["-c", "for ((i=0)); do printf BAD; break; done"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty(), "{out:?}");
+}
+
+#[test]
+fn arithmetic_short_circuits_without_side_effects() {
+    let out = sharky(&["-c", "i=0; ((0 && i++)); printf '%s' \"$i\""]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "0");
+
+    let out = sharky(&["-c", "i=0; ((1 || i++)); printf '%s' \"$i\""]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "0");
+
+    let out = sharky(&["-c", "i=0; ((1 && i++)); printf '%s' \"$i\""]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "1");
+}
+
+#[test]
+fn set_dash_o_without_a_name_reports_the_mode() {
+    let out = sharky(&["-c", "set -o vi; set -o"]);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("vi"), "{out:?}");
+
+    let out = sharky(&["-c", "set +o vi; set -o"]);
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("vi"), "{out:?}");
+}
+
+#[test]
+fn script_arguments_are_not_parsed_as_shell_options() {
+    let dir = std::env::temp_dir().join(format!("sharky-script-args-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = dir.join("args.sh");
+    std::fs::write(&script, "printf '<%s>' \"$1\"\n").unwrap();
+    let out = sharky(&[script.to_str().unwrap(), "--json"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "<--json>");
+    assert_eq!(out.status.code(), Some(0));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn time_accepts_a_negated_pipeline() {
+    let out = sharky(&["-c", "time ! false | cat; printf '%s' \"$?\""]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "1");
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("syntax error"));
+}
+
+#[test]
 fn parameter_case_operators_change_the_value() {
     let cases = [
         ("x=hello; printf '%s' \"${x^}\"", "Hello"),

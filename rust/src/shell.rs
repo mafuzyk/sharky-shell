@@ -519,7 +519,8 @@ impl Shell {
 
     fn run_pipeline(&mut self, pipeline: &Pipeline) -> Flow {
         let Some(posix) = pipeline.timed else {
-            return self.run_pipeline_inner(pipeline);
+            let flow = self.run_pipeline_inner(pipeline);
+            return negate_flow(flow, pipeline.negate);
         };
 
         let started = std::time::Instant::now();
@@ -532,7 +533,7 @@ impl Shell {
         let user = (self_user_after - self_user).max(0.0) + (child_user_after - child_user).max(0.0);
         let sys = (self_sys_after - self_sys).max(0.0) + (child_sys_after - child_sys).max(0.0);
         report_time(real, user, sys, posix);
-        flow
+        negate_flow(flow, pipeline.negate)
     }
 
     fn run_pipeline_inner(&mut self, pipeline: &Pipeline) -> Flow {
@@ -2162,6 +2163,29 @@ impl Shell {
         0
     }
 
+    fn active_options(&self) -> Vec<&'static str> {
+        let mut active = Vec::new();
+        if self.errexit {
+            active.push("errexit");
+        }
+        if self.nounset {
+            active.push("nounset");
+        }
+        if self.xtrace {
+            active.push("xtrace");
+        }
+        if self.pipefail {
+            active.push("pipefail");
+        }
+        if self.histexpand {
+            active.push("histexpand");
+        }
+        if self.vi {
+            active.push("vi");
+        }
+        active
+    }
+
     fn set(&mut self, args: &[String]) -> i32 {
         if args.first().map(String::as_str) == Some("--") {
             self.positional = args[1..].to_vec();
@@ -2169,25 +2193,7 @@ impl Shell {
         }
 
         if args.is_empty() {
-            let mut active = Vec::new();
-            if self.errexit {
-                active.push("errexit");
-            }
-            if self.nounset {
-                active.push("nounset");
-            }
-            if self.xtrace {
-                active.push("xtrace");
-            }
-            if self.pipefail {
-                active.push("pipefail");
-            }
-            if self.histexpand {
-                active.push("histexpand");
-            }
-            if self.vi {
-                active.push("vi");
-            }
+            let active = self.active_options();
             if !active.is_empty() {
                 println!("{}", active.join(" "));
             }
@@ -2215,6 +2221,12 @@ impl Shell {
                         Some(name) => {
                             eprintln!("sharky: set: {name}: invalid option name");
                             status = 1;
+                        }
+                        None if on => {
+                            let active = self.active_options();
+                            if !active.is_empty() {
+                                println!("{}", active.join(" "));
+                            }
                         }
                         None => {
                             eprintln!("sharky: set: {option}: option name required");
@@ -2509,7 +2521,15 @@ impl Shell {
             Some(ParamOp::TrimPrefixLong) => trim_prefix(&value, &argument, true),
             Some(ParamOp::TrimSuffixShort) => trim_suffix(&value, &argument, false),
             Some(ParamOp::TrimSuffixLong) => trim_suffix(&value, &argument, true),
-            Some(ParamOp::Substring) => substring_value(&value, &argument),
+            Some(ParamOp::Substring) => match self.slice_parts(&argument) {
+                Some((offset, length)) => {
+                    let chars: Vec<char> = value.chars().collect();
+                    bound_slice(chars.len(), offset, length)
+                        .map(|(start, end)| chars[start..end].iter().collect())
+                        .unwrap_or_default()
+                }
+                None => String::new(),
+            },
             Some(ParamOp::UpperFirst) => upper_first(&value),
             Some(ParamOp::UpperAll) => value.to_uppercase(),
             Some(ParamOp::LowerFirst) => lower_first(&value),
@@ -2572,10 +2592,42 @@ impl Shell {
 
         if parameter.operator == Some(ParamOp::Substring) {
             let argument = parameter.argument.as_deref().unwrap_or("");
-            let (start, end) = slice_bounds(values.len(), argument);
+            let Some((offset, length)) = self.slice_parts(argument) else {
+                return Some(Vec::new());
+            };
+            let Some((start, end)) = bound_slice(values.len(), offset, length) else {
+                return Some(Vec::new());
+            };
             values = values[start..end].to_vec();
         }
         Some(values)
+    }
+
+    fn arithmetic_index(&mut self, text: &str) -> Option<i64> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Some(0);
+        }
+        match arith::evaluate(text, self) {
+            Ok(value) => Some(value),
+            Err(message) => {
+                eprintln!("sharky: arithmetic: {message}");
+                None
+            }
+        }
+    }
+
+    fn slice_parts(&mut self, argument: &str) -> Option<(i64, Option<i64>)> {
+        let (offset, length) = match argument.split_once(':') {
+            Some((offset, length)) => (offset, Some(length)),
+            None => (argument, None),
+        };
+        let offset = self.arithmetic_index(offset)?;
+        let length = match length {
+            Some(text) => Some(self.arithmetic_index(text)?),
+            None => None,
+        };
+        Some((offset, length))
     }
 
     fn process_substitution(&mut self, source: &str, input: bool) -> String {
@@ -2697,36 +2749,22 @@ impl Shell {
     }
 }
 
-fn slice_bounds(len: usize, argument: &str) -> (usize, usize) {
-    let (offset, length) = match argument.split_once(':') {
-        Some((offset, length)) => (offset, Some(length)),
-        None => (argument, None),
-    };
-    let offset: i64 = offset.trim().parse().unwrap_or(0);
+fn bound_slice(len: usize, offset: i64, length: Option<i64>) -> Option<(usize, usize)> {
     let len = len as i64;
     let start = if offset < 0 {
-        (len + offset).max(0)
+        match len.checked_add(offset) {
+            Some(start) if start >= 0 => start,
+            _ => return None,
+        }
     } else {
         offset.min(len)
     };
     let end = match length {
-        Some(length) => {
-            let length: i64 = length.trim().parse().unwrap_or(0);
-            if length < 0 {
-                (len + length).max(start)
-            } else {
-                (start + length).min(len)
-            }
-        }
+        Some(length) if length < 0 => len.checked_add(length).unwrap_or(0).max(start),
+        Some(length) => start.saturating_add(length).min(len),
         None => len,
     };
-    (start as usize, end as usize)
-}
-
-fn substring_value(value: &str, argument: &str) -> String {
-    let chars: Vec<char> = value.chars().collect();
-    let (start, end) = slice_bounds(chars.len(), argument);
-    chars[start..end].iter().collect()
+    Some((start as usize, end.max(start) as usize))
 }
 
 fn assoc_literal(text: &str) -> Option<(String, String)> {
@@ -2984,6 +3022,16 @@ fn flow_status(flow: Flow) -> i32 {
     match flow {
         Flow::Status(code) | Flow::Exit(code) | Flow::Return(code) => code,
         Flow::Break | Flow::Continue => 0,
+    }
+}
+
+fn negate_flow(flow: Flow, negate: bool) -> Flow {
+    if !negate {
+        return flow;
+    }
+    match flow {
+        Flow::Status(code) => Flow::Status(i32::from(code == 0)),
+        other => other,
     }
 }
 

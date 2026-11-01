@@ -16,6 +16,7 @@ pub fn evaluate(source: &str, shell: &mut Shell) -> Result<i64, String> {
         tokens,
         pos: 0,
         shell,
+        active: true,
     };
     let value = parser.expression(0)?;
     match parser.peek() {
@@ -157,6 +158,7 @@ struct Parser<'a> {
     tokens: Vec<Token>,
     pos: usize,
     shell: &'a mut Shell,
+    active: bool,
 }
 
 impl Parser<'_> {
@@ -189,21 +191,37 @@ impl Parser<'_> {
             self.advance();
 
             if op == "&&" && left == 0 {
-                self.expression(right_power)?;
+                self.with_active(false, |parser| parser.expression(right_power))?;
                 left = 0;
                 continue;
             }
             if op == "||" && left != 0 {
-                self.expression(right_power)?;
+                self.with_active(false, |parser| parser.expression(right_power))?;
                 left = 1;
                 continue;
             }
 
             let right = self.expression(right_power)?;
-            left = apply(op, left, right)?;
+            left = if self.active {
+                apply(op, left, right)?
+            } else {
+                0
+            };
         }
 
         Ok(left)
+    }
+
+    fn with_active<T>(
+        &mut self,
+        active: bool,
+        action: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let previous = self.active;
+        self.active = active;
+        let result = action(self);
+        self.active = previous;
+        result
     }
 
     fn assignment(&mut self) -> Result<Option<i64>, String> {
@@ -220,6 +238,9 @@ impl Parser<'_> {
         self.advance();
         self.advance();
         let right = self.expression(0)?;
+        if !self.active {
+            return Ok(Some(0));
+        }
         let current = self.shell.var(&name).trim().parse::<i64>().unwrap_or(0);
         let value = match operator {
             "=" => right,
@@ -259,7 +280,9 @@ impl Parser<'_> {
                 } else {
                     current.wrapping_sub(1)
                 };
-                self.shell.set_var(&name, value.to_string());
+                if self.active {
+                    self.shell.set_var(&name, value.to_string());
+                }
                 Ok(value)
             }
             Token::Op("-") => {
@@ -298,7 +321,9 @@ impl Parser<'_> {
                     } else {
                         value.wrapping_sub(1)
                     };
-                    self.shell.set_var(&name, next.to_string());
+                    if self.active {
+                        self.shell.set_var(&name, next.to_string());
+                    }
                     return Ok(value);
                 }
                 Ok(value)

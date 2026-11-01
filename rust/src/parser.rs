@@ -164,18 +164,17 @@ impl Parser {
                 return Ok(Pipeline {
                     commands: vec![Command::Simple(Simple::default())],
                     timed,
+                    negate: false,
                 });
             }
         }
 
-        if self.at_word("!") {
+        let negate = if self.at_word("!") {
             self.advance();
-            let command = self.parse_pipeline_command()?;
-            return Ok(Pipeline {
-                commands: vec![Command::Not(Box::new(command))],
-                timed,
-            });
-        }
+            true
+        } else {
+            false
+        };
 
         let mut commands = vec![self.parse_pipeline_command()?];
         while matches!(self.kind(), TokenKind::Pipe) {
@@ -184,7 +183,11 @@ impl Parser {
             commands.push(self.parse_pipeline_command()?);
         }
 
-        Ok(Pipeline { commands, timed })
+        Ok(Pipeline {
+            commands,
+            timed,
+            negate,
+        })
     }
 
     fn parse_pipeline_command(&mut self) -> Result<Command, ParseError> {
@@ -394,10 +397,16 @@ impl Parser {
         if let TokenKind::Arithmetic(source) = self.kind() {
             let source = source.clone();
             self.advance();
-            let mut parts = source.splitn(3, ';').map(|part| part.trim().to_string());
-            let init = parts.next().unwrap_or_default();
-            let condition = parts.next().unwrap_or_default();
-            let step = parts.next().unwrap_or_default();
+            let parts: Vec<&str> = source.split(';').collect();
+            if parts.len() != 3 {
+                return Err(ParseError::new(
+                    "syntax error: malformed arithmetic for",
+                    false,
+                ));
+            }
+            let init = parts[0].trim().to_string();
+            let condition = parts[1].trim().to_string();
+            let step = parts[2].trim().to_string();
             self.skip_separators();
             self.expect_word("do")?;
             let body = self.parse_list(&["done"], false)?;

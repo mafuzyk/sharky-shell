@@ -26,6 +26,7 @@ pub struct AndOr {
 pub struct Pipeline {
     pub commands: Vec<Command>,
     pub timed: Option<bool>,
+    pub negate: bool,
 }
 
 #[derive(Debug, Clone)]

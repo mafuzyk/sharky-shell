@@ -1311,6 +1311,19 @@ fn vi_execute(session: &mut HistorySession, initial: &str, keys: &str) -> String
 }
 
 #[test]
+fn vi_huge_counts_do_not_crash() {
+    let mut session = history_session();
+    session.run("set -o vi");
+    let out = vi_execute(
+        &mut session,
+        "echo abc",
+        "0l999999999999999999999l",
+    );
+    assert_eq!(out, "echo abc");
+    session.finish();
+}
+
+#[test]
 fn vi_motions_and_operators() {
     let mut session = history_session();
     session.run("set -o vi");
