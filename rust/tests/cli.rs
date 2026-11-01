@@ -1634,6 +1634,78 @@ fn json_command_reports_environment_delta_and_cwd() {
 }
 
 #[test]
+fn json_command_wraps_exec_in_the_envelope() {
+    let out = sharky(&["--json", "-c", "exec /bin/echo hi"]);
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(text.lines().count(), 1, "{text}");
+    assert!(text.starts_with('{'), "{text}");
+    assert!(text.contains("\"stdout\":\"hi\\n\""), "{text}");
+}
+
+#[test]
+fn json_capture_files_are_private_and_removed() {
+    let dir = temp_dir();
+    let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args(["--json", "-c", "stat -L -c %a /proc/self/fd/1"])
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .env("TMPDIR", &dir)
+        .output()
+        .expect("failed to run sharky");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("\"stdout\":\"600\\n\""), "{text}");
+    let leftovers: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn json_capture_failure_does_not_run_the_command() {
+    let dir = temp_dir();
+    let missing = dir.join("missing");
+    let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args(["--json", "-c", "printf HI"])
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .env("TMPDIR", &missing)
+        .output()
+        .expect("failed to run sharky");
+    assert!(out.stdout.is_empty(), "{out:?}");
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("capture"), "{out:?}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn login_profiles_stay_inside_the_json_envelope() {
+    let home = login_home("json-envelope");
+    std::fs::write(
+        home.join(".config/sharky/profile.sharky"),
+        "printf PROFILE\n",
+    )
+    .unwrap();
+    let out = sharky_with_home(&home, &["-l", "--json", "-c", "printf COMMAND"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(text.lines().count(), 1, "{text}");
+    assert!(text.starts_with('{'), "{text}");
+    assert!(text.contains("\"stdout\":\"PROFILECOMMAND\""), "{text}");
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn state_json_replaces_non_utf8_environment_values() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args(["--no-config", "state", "--json", "--env"])
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .env("AUDIT_BAD", std::ffi::OsStr::from_bytes(b"A\xff"))
+        .output()
+        .expect("failed to run sharky");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("\"AUDIT_BAD\":\"A\u{fffd}\""), "{text}");
+}
+
+#[test]
 fn state_json_reports_a_stable_shape() {
     let out = sharky(&["--no-config", "state", "--json"]);
     assert_eq!(out.status.code(), Some(0));

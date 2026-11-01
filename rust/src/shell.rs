@@ -103,11 +103,11 @@ enum Action {
 impl Shell {
     pub fn new() -> Self {
         let env = std::env::vars_os()
-            .filter_map(|(key, value)| {
-                Some((
-                    key.into_string().ok()?,
-                    String::from_utf8(value.into_vec()).ok()?,
-                ))
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    String::from_utf8_lossy(&value.into_vec()).into_owned(),
+                )
             })
             .collect();
 

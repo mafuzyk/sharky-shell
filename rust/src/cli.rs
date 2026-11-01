@@ -2,6 +2,9 @@ use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 
+use nix::sys::wait::{WaitStatus, waitpid};
+use nix::unistd::{ForkResult, fork};
+
 use crate::shell::Shell;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -103,14 +106,14 @@ pub fn run() -> i32 {
 
     let mut shell = Shell::new();
     shell.load_config(no_config);
-    if login {
+    if login && !(json && command.is_some()) {
         crate::profiles::login(&mut shell);
     }
 
     match (command, script) {
         (Some(source), _) => {
             if json {
-                return run_json_command(&mut shell, &source);
+                return run_json_command(&mut shell, &source, login);
             }
             shell.run(&source)
         }
@@ -176,9 +179,82 @@ fn run_state(no_config: bool, include_env: bool) -> i32 {
     0
 }
 
-fn run_json_command(shell: &mut Shell, source: &str) -> i32 {
+fn run_json_command(shell: &mut Shell, source: &str, login: bool) -> i32 {
     let before = shell.env.clone();
-    let (status, stdout, stderr, duration_ms) = capture(|| shell.run(source));
+    let stdout_file = match capture_file("out") {
+        Ok(file) => file,
+        Err(err) => {
+            eprintln!("sharky: capture: {err}");
+            return 1;
+        }
+    };
+    let stderr_file = match capture_file("err") {
+        Ok(file) => file,
+        Err(err) => {
+            eprintln!("sharky: capture: {err}");
+            return 1;
+        }
+    };
+    let delta_file = match capture_file("delta") {
+        Ok(file) => file,
+        Err(err) => {
+            eprintln!("sharky: capture: {err}");
+            return 1;
+        }
+    };
+
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+
+    let started = std::time::Instant::now();
+    let pid = match unsafe { fork() } {
+        Ok(ForkResult::Child) => {
+            // SAFETY: the child owns these descriptors and exits without
+            // unwinding, so it never touches the parent's file handles.
+            unsafe {
+                nix::libc::dup2(stdout_file.as_raw_fd(), 1);
+                nix::libc::dup2(stderr_file.as_raw_fd(), 2);
+            }
+            if login {
+                crate::profiles::login(shell);
+            }
+            let status = shell.run(source);
+            write_delta(&delta_file, shell, &before);
+            let _ = std::io::stdout().flush();
+            let _ = std::io::stderr().flush();
+            unsafe { nix::libc::_exit(status) }
+        }
+        Ok(ForkResult::Parent { child }) => child,
+        Err(err) => {
+            eprintln!("sharky: capture: fork: {err}");
+            return 1;
+        }
+    };
+
+    let status = match waitpid(pid, None) {
+        Ok(WaitStatus::Exited(_, code)) => code,
+        Ok(WaitStatus::Signaled(_, signal, _)) => 128 + signal as i32,
+        _ => 1,
+    };
+    let duration_ms = started.elapsed().as_millis() as u64;
+
+    let stdout = read_capture(&stdout_file);
+    let stderr = read_capture(&stderr_file);
+    let (cwd, env_delta) = match read_delta(&delta_file) {
+        Some((cwd, delta)) => (cwd, delta),
+        None => (json_string(&shell.cwd.to_string_lossy()), "{}".to_string()),
+    };
+
+    let object = format!(
+        "{{\"schema_version\":1,\"status\":{status},\"stdout\":{},\"stderr\":{},\"duration_ms\":{duration_ms},\"cwd\":{cwd},\"env_delta\":{env_delta}}}",
+        json_string(&stdout),
+        json_string(&stderr),
+    );
+    println!("{object}");
+    status
+}
+
+fn env_delta(shell: &Shell, before: &[(String, String)]) -> String {
     let mut delta: Vec<(String, Option<String>)> = Vec::new();
     for (key, value) in &shell.env {
         if before
@@ -190,96 +266,98 @@ fn run_json_command(shell: &mut Shell, source: &str) -> i32 {
             delta.push((key.clone(), Some(value.clone())));
         }
     }
-    for (key, _) in &before {
+    for (key, _) in before {
         if !shell.env.iter().any(|(name, _)| name == key) {
             delta.push((key.clone(), None));
         }
     }
     delta.sort_by(|left, right| left.0.cmp(&right.0));
 
-    let mut env_delta = String::from("{");
+    let mut out = String::from("{");
     for (index, (key, value)) in delta.iter().enumerate() {
         if index > 0 {
-            env_delta.push(',');
+            out.push(',');
         }
-        env_delta.push_str(&json_string(key));
-        env_delta.push(':');
+        out.push_str(&json_string(key));
+        out.push(':');
         match value {
-            Some(value) => env_delta.push_str(&json_string(value)),
-            None => env_delta.push_str("null"),
+            Some(value) => out.push_str(&json_string(value)),
+            None => out.push_str("null"),
         }
     }
-    env_delta.push('}');
-
-    let object = format!(
-        "{{\"schema_version\":1,\"status\":{status},\"stdout\":{},\"stderr\":{},\"duration_ms\":{duration_ms},\"cwd\":{},\"env_delta\":{env_delta}}}",
-        json_string(&stdout),
-        json_string(&stderr),
-        json_string(&shell.cwd.to_string_lossy()),
-    );
-    println!("{object}");
-    status
+    out.push('}');
+    out
 }
 
-fn capture(run: impl FnOnce() -> i32) -> (i32, String, String, u64) {
-    let _ = std::io::stdout().flush();
-    let _ = std::io::stderr().flush();
+fn write_delta(file: &std::fs::File, shell: &Shell, before: &[(String, String)]) {
+    use std::io::{Seek, SeekFrom, Write};
 
-    let stdout_path = temp_path("out");
-    let stderr_path = temp_path("err");
-    let stdout_file = std::fs::File::create(&stdout_path).ok();
-    let stderr_file = std::fs::File::create(&stderr_path).ok();
+    let mut file = file;
+    let _ = file.seek(SeekFrom::Start(0));
+    let _ = writeln!(file, "{}", json_string(&shell.cwd.to_string_lossy()));
+    let _ = writeln!(file, "{}", env_delta(shell, before));
+}
 
-    let saved_stdout = unsafe { nix::libc::dup(1) };
-    let saved_stderr = unsafe { nix::libc::dup(2) };
-    if let Some(file) = &stdout_file {
-        unsafe {
-            nix::libc::dup2(file.as_raw_fd(), 1);
+fn read_delta(file: &std::fs::File) -> Option<(String, String)> {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let mut file = file;
+    let _ = file.seek(SeekFrom::Start(0));
+    let _ = file.flush();
+    let text = read_capture(file);
+    let mut lines = text.lines();
+    let cwd = lines.next()?.to_string();
+    let delta = lines.next()?.to_string();
+    Some((cwd, delta))
+}
+
+fn read_capture(file: &std::fs::File) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = file;
+    let _ = file.seek(SeekFrom::Start(0));
+    let mut bytes = Vec::new();
+    let _ = file.read_to_end(&mut bytes);
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn capture_file(kind: &str) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    for _ in 0..4 {
+        let path = temp_path(kind);
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(file) => {
+                // The descriptor is all we need; the name is gone at once.
+                let _ = std::fs::remove_file(&path);
+                return Ok(file);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
         }
     }
-    if let Some(file) = &stderr_file {
-        unsafe {
-            nix::libc::dup2(file.as_raw_fd(), 2);
-        }
-    }
-
-    let started = std::time::Instant::now();
-    let status = run();
-    let duration_ms = started.elapsed().as_millis() as u64;
-
-    let _ = std::io::stdout().flush();
-    let _ = std::io::stderr().flush();
-    unsafe {
-        if saved_stdout >= 0 {
-            nix::libc::dup2(saved_stdout, 1);
-            nix::libc::close(saved_stdout);
-        }
-        if saved_stderr >= 0 {
-            nix::libc::dup2(saved_stderr, 2);
-            nix::libc::close(saved_stderr);
-        }
-    }
-    drop(stdout_file);
-    drop(stderr_file);
-
-    let stdout = std::fs::read(&stdout_path)
-        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-        .unwrap_or_default();
-    let stderr = std::fs::read(&stderr_path)
-        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-        .unwrap_or_default();
-    let _ = std::fs::remove_file(&stdout_path);
-    let _ = std::fs::remove_file(&stderr_path);
-
-    (status, stdout, stderr, duration_ms)
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "capture file already exists",
+    ))
 }
 
 fn temp_path(kind: &str) -> PathBuf {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.subsec_nanos())
+        .unwrap_or(0);
     std::env::temp_dir().join(format!(
-        "sharky-json-{}-{counter}-{kind}",
+        "sharky-json-{}-{counter}-{nanos}-{kind}",
         std::process::id()
     ))
 }
