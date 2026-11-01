@@ -126,6 +126,50 @@ Set the prompt template (\fBprompt\fR) and styles. Styles reference colours with
 Unknown instructions, wrong arity, invalid colours and undefined colour
 references are reported as \fBfile:line\fR errors; the shell keeps running with
 its defaults.
+.SH KEYS
+.TP
+.B Tab
+Complete the current word. Several candidates insert the common prefix and
+open an inline menu; Tab and Shift-Tab move, Enter inserts and Esc closes.
+.TP
+.B Right, End
+Accept the autosuggest ghost text when the cursor is at the end of the line.
+.TP
+.B Ctrl-T
+Open the fuzzy file list. Type to filter, arrows move, Enter inserts and Esc
+cancels without changing the buffer.
+.TP
+.B Ctrl-R
+Incremental history search. Enter runs the match and Ctrl-G cancels.
+.TP
+.B Ctrl-_
+Undo the last edit.
+.TP
+.B Up, Down, Home, End
+Move between buffer lines and within the current line. Bracketed paste is
+inserted verbatim; Enter submits the whole buffer.
+.PP
+With
+.B set -o vi
+the editor uses vi bindings: Esc enters normal mode; h, l, 0, $, w, b, e, j and
+k move; x, dd, dw, d$, D, cw, C, p, P, u and r<char> edit. A count prefix is
+accepted. Esc cancels a pending operator, Enter submits and Backspace edits.
+.SH LIMITATIONS
+Whitespace splitting uses space, tab and newline; IFS is not supported.
+.PP
+ANSI-C escapes above 0x7f are stored as UTF-8 characters, not raw bytes.
+.PP
+A process substitution created inside a pipeline is reaped by the process that
+created it, so the top-level
+.B wait
+does not observe it. Direct substitutions are tracked and reaped.
+.PP
+.B TIMEFORMAT
+is not supported; use
+.B time
+or
+.B time -p.
+.PP
 .SH FILES
 .TP
 .I ~/.config/sharky/config.sharky

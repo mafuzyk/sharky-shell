@@ -4,6 +4,43 @@ All notable changes to sharky are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project uses semantic
 versioning.
 
+## [Unreleased]
+
+### Added
+
+- Named-FIFO fallback for process substitution on hosts without `/dev/fd`.
+- `wake` is a builtin, so login profiles can register startup commands.
+
+### Fixed
+
+- `declare -A a=([k]=v ...)` parses and fills the map.
+- Associative keys accept quoting and expansion; `"${a[*]}"` joins, while
+  `"${a[@]}"` keeps one field per value, including prefixes, suffixes and case
+  operators.
+- `unset 'a[i]'` leaves a hole instead of renumbering later elements.
+- Process-substitution descriptors survive function bodies, and substitution
+  children are reaped at prompt idle.
+- Completion escapes file names and never opens a menu in a narrow terminal;
+  the fuzzy pager uses the alternate screen.
+- Multiline redraw returns from the row it drew, wide characters count two
+  columns, and pasted control sequences are inserted verbatim.
+- SIGTERM and SIGHUP restore the terminal and disable bracketed paste.
+- JSON capture uses private exclusive files, survives `exec`, aborts before
+  running when capture cannot be set up, and keeps profiles inside the
+  envelope. Non-UTF-8 environment values are replaced, not dropped.
+- Arithmetic and substring offsets no longer abort on overflow; arithmetic
+  offsets are evaluated, `&&`/`||` short-circuit without side effects, and
+  malformed C-style `for` is a status-2 error.
+- History selectors respect quoting, and an apostrophe inside double quotes no
+  longer suppresses expansion.
+- Profiles run as whole units, so `if`/loops are not executed line by line.
+- Vi counts work for `e`, `p`, `P` and `dd`; Esc cancels an operator without
+  moving the cursor.
+- Ctrl-_ reaches undo, transpose follows readline, and `set -o` without a name
+  reports active options.
+- Extglob handles quoted parentheses, nullable `+()` alternatives and globs in
+  directory components.
+
 ## [3.5.2] - 2026-11-01
 
 ### Fixed

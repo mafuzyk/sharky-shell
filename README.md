@@ -126,6 +126,11 @@ The prompt, `-c` and script files share one grammar:
 This is a subset of Bash, not a drop-in replacement. Unsupported syntax fails
 with status 2 instead of silently falling back to another shell.
 
+Known limits: word splitting uses space, tab and newline (IFS is not
+supported); ANSI-C escapes above 0x7f are UTF-8 characters, not raw bytes; a
+process substitution created inside a pipeline is reaped by its parent process,
+so the top-level `wait` does not observe it. `TIMEFORMAT` is out of scope.
+
 ## Configuration
 
 Configuration lives in `$SHARKY_CONFIG`, or

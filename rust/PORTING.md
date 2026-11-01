@@ -75,7 +75,7 @@ assert an exit status instead of waiting forever.
 - [x] Configuration parser: `config.sharky` and `theme.sharky`
 - [x] Koral shell integration marks (OSC 133 and OSC 7)
 - [x] `sharky-config` crate shared with Koral
-- [ ] Configuration applied by the interactive shell (prompt, keybinds)
+- [x] Configuration applied by the interactive shell (prompt, keybinds)
 - [x] AUR packaging
 
 ## Decisions

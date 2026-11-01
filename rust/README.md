@@ -1,15 +1,16 @@
 # sharky (Rust)
 
-An interactive Unix shell written in Rust. This directory is the v2
+An interactive Unix shell written in Rust. This directory is the v3
 implementation; the Ruby v1 tree at the repository root is frozen at tag
 `v1-ruby` and only serves as the behavioural oracle for the differential tests.
 
-Status: the shell runs commands, scripts and an interactive session, with job
-control (`&`, `jobs`, `fg`, `bg`, Ctrl-Z), `[[ ]]` conditionals, `((...))`,
-heredocs, here-strings, brace expansion, indexed arrays, `${var/pat/repl}`,
-`set` options, `trap` EXIT, `read`, `shift`, `[[ =~ ]]`, the core builtins
-a Starship prompt (`tide starship on`), startup commands (`wake`) and
-automatic `PATH` discovery.
+Status: 3.5 adds vi mode, login profiles, `exec` and `time`, history expansion,
+process substitution, associative arrays and slices, extended parameter
+expansion, `$'...'`, extglob, C-style `for`, `;;&`/`;&`, the JSON agent
+interface, autosuggest, syntax highlighting, completion with an inline menu and
+a fuzzy file pager. The shell keeps job control, `[[ ]]`, `((...))`, heredocs,
+here-strings, brace expansion, `${var/pat/repl}`, `set` options, traps, `read`
+and `shift`.
 
 ## Build
 
@@ -43,8 +44,8 @@ Read `man sharky` for the supported language subset.
 ## Configuration
 
 `$SHARKY_CONFIG`, or `${XDG_CONFIG_HOME:-~/.config}/sharky`, holds two small
-declarative files. They are parsed by `src/config.rs`, never executed by the
-command parser:
+declarative files. They are parsed by the `config` crate (`config/`), never
+executed by the command parser:
 
 ```text
 // config.sharky

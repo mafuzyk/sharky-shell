@@ -63,9 +63,12 @@ fn interactive_shell_shows_a_prompt_and_runs_commands() {
     let seen = read_until(fd, "❯", Duration::from_secs(5));
     assert!(seen.contains('❯'), "no prompt in {seen:?}");
 
-    let _ = writer.write_all(b"printf hi\r");
-    let seen = read_until(fd, "hi", Duration::from_secs(5));
-    assert!(seen.contains("hi"), "command output missing in {seen:?}");
+    let _ = writer.write_all(b"printf 'OUT-%s' 42\r");
+    let seen = read_until(fd, "OUT-42", Duration::from_secs(5));
+    assert!(
+        seen.contains("OUT-42"),
+        "command output missing in {seen:?}"
+    );
 
     let _ = writer.write_all(b"exit\r");
     let status = child.wait().expect("wait");
@@ -82,9 +85,12 @@ fn interactive_shell_keeps_running_after_a_failed_command() {
     let _ = writer.write_all(b"nosuchcommand_here\r");
     read_until(fd, "not found", Duration::from_secs(5));
 
-    let _ = writer.write_all(b"printf after\r");
-    let seen = read_until(fd, "after", Duration::from_secs(5));
-    assert!(seen.contains("after"), "shell died after a failure: {seen:?}");
+    let _ = writer.write_all(b"printf 'AFTER-FAIL'\r");
+    let seen = read_until(fd, "AFTER-FAIL", Duration::from_secs(5));
+    assert!(
+        seen.contains("AFTER-FAIL"),
+        "shell died after a failure: {seen:?}"
+    );
 
     let _ = writer.write_all(b"exit\r");
     let _ = child.wait();
@@ -754,10 +760,9 @@ fn interactive_exec_failure_keeps_the_shell_alive() {
     let mut session = history_session();
     let out = session.run("exec /nonexistent/sharky");
     assert!(out.contains("exec"), "no exec error in {out:?}");
+    assert!(out.contains("133;D;127"), "unexpected failure status: {out:?}");
     let out = session.run("echo after");
     assert!(out.contains("after"), "shell died after failed exec: {out:?}");
-    let out = session.run("echo $?");
-    assert!(out.contains('1'), "unexpected failure status: {out:?}");
     session.finish();
 }
 
@@ -790,15 +795,16 @@ fn bracketed_paste_inserts_at_the_cursor() {
     let mut session = history_session();
     let _ = session.writer.write_all(b"echo pre");
     read_until(session.master.as_raw_fd(), "echo pre", Duration::from_secs(5));
-    paste(&mut session.writer, " mid");
-    read_until(session.master.as_raw_fd(), "pre mid", Duration::from_secs(5));
+    let _ = session.writer.write_all(b"\x1b[D\x1b[D\x1b[D");
+    paste(&mut session.writer, "X");
+    read_until(session.master.as_raw_fd(), "Xpre", Duration::from_secs(5));
     let _ = session.writer.write_all(b"\r");
     let out = read_until(
         session.master.as_raw_fd(),
         HISTORY_PROMPT_END,
         Duration::from_secs(5),
     );
-    assert!(out.contains("pre mid"), "paste at cursor failed: {out:?}");
+    assert!(out.contains("Xpre"), "paste at cursor failed: {out:?}");
     session.finish();
 }
 
@@ -857,6 +863,10 @@ fn multiline_home_moves_to_the_line_start() {
         HISTORY_PROMPT_END,
         Duration::from_secs(5),
     );
+    assert!(
+        out.contains("cmdline_url=%20echo%20one%0Aecho%20two"),
+        "Home did not move to the line start: {out:?}"
+    );
     assert!(out.contains("one"), "first line did not run: {out:?}");
     assert!(out.contains("two"), "second line did not run: {out:?}");
     session.finish();
@@ -908,13 +918,16 @@ fn autosuggest_shows_a_ghost_and_right_accepts_it() {
 
     let _ = session.writer.write_all(b"\x1b[C");
     std::thread::sleep(Duration::from_millis(50));
-    let _ = session.writer.write_all(b"\x03");
+    let _ = session.writer.write_all(b"\r");
     let out = read_until(
         session.master.as_raw_fd(),
         HISTORY_PROMPT_END,
         Duration::from_secs(5),
     );
-    assert!(!out.contains("133;C"), "accepting ran the command: {out:?}");
+    assert!(
+        out.contains("cmdline_url=echo%20suggested"),
+        "Right did not accept the ghost: {out:?}"
+    );
 
     let _ = session.writer.write_all(b"echo sug");
     read_until(session.master.as_raw_fd(), "gested", Duration::from_secs(5));
@@ -1779,6 +1792,12 @@ fn a_full_width_line_does_not_move_the_cursor_up() {
     assert!(
         !seen.contains("\x1b[1A"),
         "cursor moved above a full-width line: {seen:?}"
+    );
+    let _ = writer.write_all(b"X");
+    let seen = read_until(fd, "X", Duration::from_secs(5));
+    assert!(
+        !seen.contains("\x1b[1A"),
+        "cursor moved above after wrapping: {seen:?}"
     );
 
     let _ = writer.write_all(b"\x03");

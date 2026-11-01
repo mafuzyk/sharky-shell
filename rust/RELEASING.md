@@ -21,10 +21,10 @@ The differential suite needs a local Ruby v1 checkout; it is skipped when
 ```sh
 cd ..                       # repository root
 git checkout main
-git merge --ff-only v3
-git tag -a v3.0.0 -m "sharky 3.0.0"
+git merge --ff-only v3.5
+git tag -a v3.5.3 -m "sharky 3.5.3"
 git push origin main
-git push origin v3.0.0
+git push origin v3.5.3
 ```
 
 Pushing is the first irreversible step: it publishes the tag, and the release

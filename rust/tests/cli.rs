@@ -1956,7 +1956,7 @@ fn state_json_does_not_create_history_or_z_files() {
         .expect("failed to run sharky");
     assert!(out.status.success());
     assert!(!data.join("sharky/history").exists());
-    assert!(!data.join("sharky/z").exists());
+    assert!(!data.join("sharky/z.jsonl").exists());
     std::fs::remove_dir_all(&data).ok();
 }
 
@@ -2107,9 +2107,9 @@ fn login_profiles_run_before_a_script() {
 
 #[test]
 fn set_reports_and_toggles_vi_mode() {
-    let out = sharky(&["-c", "set -o vi; set"]);
+    let out = sharky(&["-c", "set -o vi; set -o"]);
     assert!(String::from_utf8_lossy(&out.stdout).contains("vi"));
 
-    let out = sharky(&["-c", "set -o vi; set +o vi; set"]);
+    let out = sharky(&["-c", "set -o vi; set +o vi; set -o"]);
     assert!(!String::from_utf8_lossy(&out.stdout).contains("vi"));
 }
