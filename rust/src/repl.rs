@@ -1,4 +1,5 @@
 use crate::editor::{Editor, Line};
+use crate::histexpand;
 use crate::prompt;
 use crate::shell::Shell;
 use crate::term;
@@ -40,10 +41,28 @@ pub fn run(shell: &mut Shell) -> i32 {
         }
 
         match editor.read_line(&prompt, shell) {
-            Ok(Line::Content(text)) => {
+            Ok(Line::Content(mut text)) => {
                 if buffer.is_empty() && text.trim().is_empty() {
                     status = shell.last_status;
                     continue;
+                }
+
+                if buffer.is_empty() && shell.histexpand() {
+                    match histexpand::expand(&text, shell.history_entries()) {
+                        Ok(expanded) => {
+                            if expanded != text {
+                                println!("{expanded}");
+                                text = expanded;
+                            }
+                        }
+                        Err(message) => {
+                            eprintln!("sharky: {message}");
+                            shell.last_status = 1;
+                            status = 1;
+                            pending_end = Some(1);
+                            continue;
+                        }
+                    }
                 }
 
                 if !buffer.is_empty() {

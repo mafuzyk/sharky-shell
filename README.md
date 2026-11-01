@@ -83,7 +83,7 @@ The prompt, `-c` and script files share one grammar:
 | heredocs and here-strings | `cat <<EOF` ... `EOF`, `<<-EOF`, `<<'EOF'`, `cat <<< "text"` |
 | process substitution | `diff <(a) <(b)`, `tee >(cat > out)` |
 | lists | `a; b`, `a && b`, `a \|\| b` |
-| options | `set -e`, `set -u`, `set -x`, `set -o pipefail`, `set -- a b` |
+| options | `set -e`, `set -u`, `set -x`, `set -o pipefail`, `set -H`/`+H`, `set -- a b` |
 | traps | `trap 'cleanup' EXIT`, `trap -l` |
 | read and shift | `read -r name`, `shift 2` |
 | conditionals | `if`, `elif`, `else`, `fi`, `[[ -f x && "$y" =~ ^f ]]` |
@@ -93,6 +93,7 @@ The prompt, `-c` and script files share one grammar:
 | groups and subshells | `{ a; b; }`, `( a; b )` |
 | builtins | `type`, `alias`, `unalias`, `abbr`, `unabbr`, `history`, `pwd`, `read`, `shift` |
 | history search | Ctrl-R, type to filter, Enter runs the match, Ctrl-G cancels |
+| history expansion | `!!`, `!n`, `!-n`, `!prefix`, `!?text?`, `!$`, `!*`, `!^`, `^old^new^`; `set +H` disables |
 | job control | `cmd &`, `jobs`, `fg`, `bg`, Ctrl-Z |
 | scripts | `source lib.sh`, `sharky file.sh args` |
 

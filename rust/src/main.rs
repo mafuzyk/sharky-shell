@@ -3,6 +3,7 @@ mod ast;
 mod cli;
 mod editor;
 mod exec;
+mod histexpand;
 mod history;
 mod lexer;
 mod parser;

@@ -1429,3 +1429,10 @@ fn process_substitution_feeds_and_reads_pipes() {
     let out = sharky(&["-c", "cat <(false); printf '|%s' \"$?\""]);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "|0");
 }
+
+#[test]
+fn history_expansion_never_runs_in_c() {
+    let out = sharky(&["-c", "echo hi; !!"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\n");
+    assert_eq!(out.status.code(), Some(127));
+}

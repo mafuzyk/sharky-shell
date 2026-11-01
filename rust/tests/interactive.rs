@@ -574,3 +574,145 @@ fn koral_osc7_encodes_the_working_directory() {
     assert!(seen.contains("%20"), "space not encoded: {seen:?}");
     assert!(seen.contains("%C3%A9"), "non-ASCII not encoded: {seen:?}");
 }
+
+struct HistorySession {
+    child: std::process::Child,
+    master: std::os::fd::OwnedFd,
+    writer: std::fs::File,
+    data: std::path::PathBuf,
+}
+
+fn history_session() -> HistorySession {
+    let data = std::env::temp_dir().join(format!(
+        "sharky-histexpand-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&data).unwrap();
+
+    let pty = openpty(None, None).expect("pty");
+    let stdin = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stdout = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stderr = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+
+    let child = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .stdin(stdin)
+        .stdout(stdout)
+        .stderr(stderr)
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .env("TERM", "xterm-256color")
+        .env("HOME", "/tmp")
+        .env("XDG_DATA_HOME", &data)
+        .spawn()
+        .expect("spawn sharky");
+
+    let writer = unsafe { std::fs::File::from_raw_fd(pty.master.try_clone().unwrap().into_raw_fd()) };
+    read_until(
+        pty.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    HistorySession {
+        child,
+        master: pty.master,
+        writer,
+        data,
+    }
+}
+
+const HISTORY_PROMPT_END: &str = "\u{1b}]133;B\u{1b}\\";
+
+impl HistorySession {
+    fn run(&mut self, line: &str) -> String {
+        let fd = self.master.as_raw_fd();
+        let _ = self.writer.write_all(format!("{line}\r").as_bytes());
+        read_until(fd, HISTORY_PROMPT_END, Duration::from_secs(5))
+    }
+
+    fn finish(mut self) {
+        let _ = self.writer.write_all(b"exit\r");
+        let _ = self.child.wait();
+        std::fs::remove_dir_all(&self.data).ok();
+    }
+}
+
+#[test]
+fn history_expansion_covers_events_and_arguments() {
+    let mut session = history_session();
+    session.run("history -c");
+    session.run("printf 'BASE'");
+    let out = session.run("!!");
+    assert!(out.contains("printf 'BASE'"), "no echoed expansion in {out:?}");
+    assert!(out.contains("BASE"), "past command did not run: {out:?}");
+
+    let out = session.run("!2");
+    assert!(out.contains("printf 'BASE'"), "!n failed: {out:?}");
+
+    session.run("printf 'A'");
+    session.run("printf 'B'");
+    let out = session.run("echo !-2");
+    assert!(out.contains("printf A"), "!-n failed: {out:?}");
+
+    session.run("printf '%s' lastarg");
+    let out = session.run("echo !$");
+    assert!(out.contains("lastarg"), "!$ failed: {out:?}");
+
+    session.run("echo a b");
+    let out = session.run("printf '<%s>' !*");
+    assert!(out.contains("<a><b>"), "!* failed: {out:?}");
+
+    session.run("echo first second");
+    let out = session.run("printf '<%s>' !^");
+    assert!(out.contains("<first>"), "!^ failed: {out:?}");
+
+    session.run("echo PREFIXMARK");
+    let out = session.run("!echo P");
+    assert!(out.contains("echo PREFIXMARK"), "!prefix failed: {out:?}");
+    assert!(out.contains("PREFIXMARK"), "!prefix did not run: {out:?}");
+
+    session.run("printf 'SUBB'");
+    let out = session.run("echo !?SUBB?");
+    assert!(out.contains("printf SUBB"), "!?sub? failed: {out:?}");
+
+    session.run("echo old");
+    let out = session.run("^old^new^");
+    assert!(out.contains("echo new"), "quick substitution failed: {out:?}");
+    assert!(out.contains("new"), "quick substitution did not run: {out:?}");
+
+    session.finish();
+}
+
+#[test]
+fn history_expansion_respects_quotes_and_reports_missing_events() {
+    let mut session = history_session();
+    session.run("echo quoted");
+
+    let out = session.run("echo '!!'");
+    assert!(!out.contains("echo quoted"), "single quotes expanded: {out:?}");
+    assert!(out.contains("!!"), "single-quoted text missing: {out:?}");
+
+    let out = session.run("echo \\!\\!");
+    assert!(!out.contains("echo quoted"), "backslash expanded: {out:?}");
+    assert!(out.contains("!!"), "escaped text missing: {out:?}");
+
+    session.run("echo dqtarget");
+    let out = session.run("echo \"!!\"");
+    assert!(out.contains("echo dqtarget"), "double quotes must expand: {out:?}");
+
+    let out = session.run("!doesnotexist");
+    assert!(out.contains("event not found"), "missing error: {out:?}");
+    let out = session.run("echo $?");
+    assert!(out.contains('1'), "missing event status: {out:?}");
+
+    session.run("set +H");
+    let out = session.run("echo !!");
+    assert!(!out.contains("echo quoted"), "set +H did not disable: {out:?}");
+
+    session.run("set -H");
+    let out = session.run("echo reenabled");
+    assert!(out.contains("reenabled"), "echo reenabled output: {out:?}");
+    let out = session.run("!!");
+    assert!(out.contains("echo reenabled"), "set -H did not re-enable: {out:?}");
+
+    session.finish();
+}

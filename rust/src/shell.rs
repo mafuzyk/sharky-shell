@@ -49,6 +49,7 @@ pub struct Shell {
     traps: HashMap<String, String>,
     exit_trap_ran: bool,
     history: Option<History>,
+    histexpand: bool,
     z: Option<Z>,
     config_dir: Option<PathBuf>,
     substitution_fds: Vec<i32>,
@@ -135,6 +136,7 @@ impl Shell {
             traps: HashMap::new(),
             exit_trap_ran: false,
             history: None,
+            histexpand: true,
             z: None,
             config_dir: None,
             substitution_fds: Vec::new(),
@@ -299,6 +301,10 @@ impl Shell {
             Flow::Status(code) | Flow::Exit(code) | Flow::Return(code) => code,
             Flow::Break | Flow::Continue => 0,
         })
+    }
+
+    pub fn histexpand(&self) -> bool {
+        self.histexpand
     }
 
     pub fn set_interactive(&mut self, interactive: bool) {
@@ -2053,6 +2059,9 @@ impl Shell {
             if self.pipefail {
                 active.push("pipefail");
             }
+            if self.histexpand {
+                active.push("histexpand");
+            }
             if !active.is_empty() {
                 println!("{}", active.join(" "));
             }
@@ -2065,6 +2074,8 @@ impl Shell {
             match args[index].as_str() {
                 "-e" => self.errexit = true,
                 "+e" => self.errexit = false,
+                "-H" => self.histexpand = true,
+                "+H" => self.histexpand = false,
                 "-u" => self.nounset = true,
                 "+u" => self.nounset = false,
                 "-x" => self.xtrace = true,
