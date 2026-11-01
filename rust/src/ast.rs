@@ -42,6 +42,12 @@ pub enum Command {
         words: Vec<Word>,
         body: List,
     },
+    ForArith {
+        init: String,
+        condition: String,
+        step: String,
+        body: List,
+    },
     While {
         condition: List,
         body: List,
@@ -49,7 +55,7 @@ pub enum Command {
     },
     Case {
         word: Word,
-        arms: Vec<(Vec<Word>, List)>,
+        arms: Vec<CaseArm>,
     },
     Function {
         name: String,
@@ -100,6 +106,15 @@ pub enum RedirectOp {
     Here { body: String, expand: bool },
     HereString,
     Both { append: bool },
+}
+
+pub type CaseArm = (Vec<Word>, List, CaseTerm);
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CaseTerm {
+    Break,
+    Fallthrough,
+    Continue,
 }
 
 pub fn literal(word: &Word) -> Option<String> {

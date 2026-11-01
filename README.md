@@ -78,7 +78,7 @@ The prompt, `-c` and script files share one grammar:
 | associative arrays | `declare -A a`, `a[key]=value`, `"${a[key]}"`, `"${!a[@]}"` |
 | command substitution | `files=$(ls \| wc -l)` |
 | arithmetic | `$((2 + 3 * 4))`, `((total > 10))` |
-| globbing and tilde | `src/*.rs`, `~/bin` |
+| globbing and tilde | `src/*.rs`, `~/bin`, `@(a|b).txt`, `!(tmp)` |
 | pipelines and redirects | `a \| b > out 2>&1`, `cmd &> out`, `cmd &>> out` |
 | heredocs and here-strings | `cat <<EOF` ... `EOF`, `<<-EOF`, `<<'EOF'`, `cat <<< "text"` |
 | lists | `a; b`, `a && b`, `a \|\| b` |
@@ -86,8 +86,8 @@ The prompt, `-c` and script files share one grammar:
 | traps | `trap 'cleanup' EXIT`, `trap -l` |
 | read and shift | `read -r name`, `shift 2` |
 | conditionals | `if`, `elif`, `else`, `fi`, `[[ -f x && "$y" =~ ^f ]]` |
-| loops | `for x in a b; do ...; done`, `while`, `until` |
-| case | `case $x in f*) ...;; *) ...;; esac` |
+| loops | `for x in a b; do ...; done`, `for ((i=0; i<3; i++))`, `while`, `until` |
+| case | `case $x in f*) ...;; *) ...;; esac`, `;;&`, `;&` |
 | functions | `greet() { printf 'hi %s\n' "$1"; }` |
 | groups and subshells | `{ a; b; }`, `( a; b )` |
 | builtins | `type`, `alias`, `unalias`, `abbr`, `unabbr`, `history`, `pwd`, `read`, `shift` |

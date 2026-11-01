@@ -362,6 +362,25 @@ impl Parser {
 
     fn parse_for(&mut self) -> Result<Command, ParseError> {
         self.advance();
+        if let TokenKind::Arithmetic(source) = self.kind() {
+            let source = source.clone();
+            self.advance();
+            let mut parts = source.splitn(3, ';').map(|part| part.trim().to_string());
+            let init = parts.next().unwrap_or_default();
+            let condition = parts.next().unwrap_or_default();
+            let step = parts.next().unwrap_or_default();
+            self.skip_separators();
+            self.expect_word("do")?;
+            let body = self.parse_list(&["done"], false)?;
+            self.expect_word("done")?;
+            return Ok(Command::ForArith {
+                init,
+                condition,
+                step,
+                body,
+            });
+        }
+
         let name = literal(&self.take_word()?).unwrap_or_default();
         if name.is_empty() {
             return Err(self.unexpected());
@@ -432,13 +451,16 @@ impl Parser {
             self.advance();
 
             let body = self.parse_case_body()?;
-            arms.push((patterns, body));
 
-            if self.at_double_semi() {
-                self.advance();
-                self.advance();
+            if let Some((terminator, count)) = self.case_terminator() {
+                for _ in 0..count {
+                    self.advance();
+                }
+                arms.push((patterns, body, terminator));
                 self.skip_separators();
-            } else if !self.at_word("esac") {
+            } else if self.at_word("esac") {
+                arms.push((patterns, body, CaseTerm::Break));
+            } else {
                 return Err(self.unexpected());
             }
         }
@@ -447,12 +469,21 @@ impl Parser {
         Ok(Command::Case { word, arms })
     }
 
-    fn at_double_semi(&self) -> bool {
-        matches!(self.kind(), TokenKind::Semi)
-            && matches!(
-                self.tokens.get(self.pos + 1).map(|token| &token.kind),
-                Some(TokenKind::Semi)
-            )
+    fn case_terminator(&self) -> Option<(CaseTerm, usize)> {
+        if !matches!(self.kind(), TokenKind::Semi) {
+            return None;
+        }
+        let next = self.tokens.get(self.pos + 1).map(|token| &token.kind);
+        let third = self.tokens.get(self.pos + 2).map(|token| &token.kind);
+        if matches!(next, Some(TokenKind::Semi)) && matches!(third, Some(TokenKind::Amp)) {
+            Some((CaseTerm::Continue, 3))
+        } else if matches!(next, Some(TokenKind::Amp)) {
+            Some((CaseTerm::Fallthrough, 2))
+        } else if matches!(next, Some(TokenKind::Semi)) {
+            Some((CaseTerm::Break, 2))
+        } else {
+            None
+        }
     }
 
     fn parse_case_body(&mut self) -> Result<List, ParseError> {
@@ -461,7 +492,7 @@ impl Parser {
 
         loop {
             if self.at_word("esac")
-                || self.at_double_semi()
+                || self.case_terminator().is_some()
                 || matches!(self.kind(), TokenKind::Eof)
             {
                 break;
@@ -477,7 +508,7 @@ impl Parser {
             if background {
                 self.skip_newlines();
             } else if matches!(self.kind(), TokenKind::Semi) {
-                if self.at_double_semi() {
+                if self.case_terminator().is_some() {
                     break;
                 }
                 self.advance();

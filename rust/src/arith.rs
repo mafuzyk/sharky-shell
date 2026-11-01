@@ -10,7 +10,7 @@ enum Token {
     End,
 }
 
-pub fn evaluate(source: &str, shell: &Shell) -> Result<i64, String> {
+pub fn evaluate(source: &str, shell: &mut Shell) -> Result<i64, String> {
     let tokens = tokenize(source)?;
     let mut parser = Parser {
         tokens,
@@ -86,6 +86,13 @@ fn tokenize(source: &str) -> Result<Vec<Token>, String> {
             ">=" => Some(">="),
             "&&" => Some("&&"),
             "||" => Some("||"),
+            "++" => Some("++"),
+            "--" => Some("--"),
+            "+=" => Some("+="),
+            "-=" => Some("-="),
+            "*=" => Some("*="),
+            "/=" => Some("/="),
+            "%=" => Some("%="),
             _ => None,
         } {
             tokens.push(Token::Op(op));
@@ -122,6 +129,10 @@ fn tokenize(source: &str) -> Result<Vec<Token>, String> {
                 tokens.push(Token::Op("%"));
                 pos += 1;
             }
+            '=' => {
+                tokens.push(Token::Op("="));
+                pos += 1;
+            }
             '<' => {
                 tokens.push(Token::Op("<"));
                 pos += 1;
@@ -145,7 +156,7 @@ fn tokenize(source: &str) -> Result<Vec<Token>, String> {
 struct Parser<'a> {
     tokens: Vec<Token>,
     pos: usize,
-    shell: &'a Shell,
+    shell: &'a mut Shell,
 }
 
 impl Parser<'_> {
@@ -160,6 +171,12 @@ impl Parser<'_> {
     }
 
     fn expression(&mut self, min_power: u8) -> Result<i64, String> {
+        if min_power == 0
+            && let Some(value) = self.assignment()?
+        {
+            return Ok(value);
+        }
+
         let mut left = self.unary()?;
 
         while let Token::Op(op) = *self.peek() {
@@ -189,8 +206,62 @@ impl Parser<'_> {
         Ok(left)
     }
 
+    fn assignment(&mut self) -> Result<Option<i64>, String> {
+        let Token::Name(name) = self.peek().clone() else {
+            return Ok(None);
+        };
+        let Some(Token::Op(operator)) = self.tokens.get(self.pos + 1).cloned() else {
+            return Ok(None);
+        };
+        if !matches!(operator, "=" | "+=" | "-=" | "*=" | "/=" | "%=") {
+            return Ok(None);
+        }
+
+        self.advance();
+        self.advance();
+        let right = self.expression(0)?;
+        let current = self.shell.var(&name).trim().parse::<i64>().unwrap_or(0);
+        let value = match operator {
+            "=" => right,
+            "+=" => current.wrapping_add(right),
+            "-=" => current.wrapping_sub(right),
+            "*=" => current.wrapping_mul(right),
+            "/=" => {
+                if right == 0 {
+                    return Err("division by zero".to_string());
+                }
+                current.wrapping_div(right)
+            }
+            "%=" => {
+                if right == 0 {
+                    return Err("division by zero".to_string());
+                }
+                current.wrapping_rem(right)
+            }
+            _ => unreachable!(),
+        };
+        self.shell.set_var(&name, value.to_string());
+        Ok(Some(value))
+    }
+
     fn unary(&mut self) -> Result<i64, String> {
         match self.peek().clone() {
+            Token::Op("++") | Token::Op("--") => {
+                let increment = self.peek() == &Token::Op("++");
+                self.advance();
+                let Token::Name(name) = self.peek().clone() else {
+                    return Err("increment needs a variable".to_string());
+                };
+                self.advance();
+                let current = self.shell.var(&name).trim().parse::<i64>().unwrap_or(0);
+                let value = if increment {
+                    current.wrapping_add(1)
+                } else {
+                    current.wrapping_sub(1)
+                };
+                self.shell.set_var(&name, value.to_string());
+                Ok(value)
+            }
             Token::Op("-") => {
                 self.advance();
                 Ok(-self.unary()?)
@@ -218,7 +289,19 @@ impl Parser<'_> {
             Token::Name(name) => {
                 self.advance();
                 let raw = self.shell.var(&name);
-                Ok(raw.trim().parse().unwrap_or(0))
+                let value: i64 = raw.trim().parse().unwrap_or(0);
+                if self.peek() == &Token::Op("++") || self.peek() == &Token::Op("--") {
+                    let increment = self.peek() == &Token::Op("++");
+                    self.advance();
+                    let next = if increment {
+                        value.wrapping_add(1)
+                    } else {
+                        value.wrapping_sub(1)
+                    };
+                    self.shell.set_var(&name, next.to_string());
+                    return Ok(value);
+                }
+                Ok(value)
             }
             other => Err(format!("unexpected {other:?} in arithmetic")),
         }

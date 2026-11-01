@@ -741,12 +741,6 @@ fn background_command_continues_inside_a_case_body() {
     assert_eq!(out.status.code(), Some(1));
 }
 
-#[test]
-fn case_fallthrough_is_a_syntax_error_not_a_panic() {
-    let out = sharky(&["-c", "case a in a) :;;& esac"]);
-    assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("syntax error"));
-}
 
 #[test]
 fn for_without_a_variable_is_a_syntax_error() {
@@ -755,12 +749,6 @@ fn for_without_a_variable_is_a_syntax_error() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("syntax error"));
 }
 
-#[test]
-fn c_style_for_is_rejected_cleanly() {
-    let out = sharky(&["-c", "for ((i=0;i<2;i++)); do :; done"]);
-    assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("syntax error"));
-}
 
 #[test]
 fn cd_without_arguments_uses_home() {
@@ -1345,4 +1333,73 @@ fn indexed_arrays_accept_arithmetic_indexes_and_unset_keys() {
         r#"declare -A a; a[k]=v; unset 'a[k]'; printf '%s' "${#a[@]}""#,
     ]);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "0");
+}
+
+
+#[test]
+fn c_style_for_runs_init_condition_and_step() {
+    let out = sharky(&[
+        "-c",
+        r#"for ((i = 0; i < 3; i++)); do printf '%s' "$i"; done"#,
+    ]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "012");
+
+    let out = sharky(&[
+        "-c",
+        r#"for ((i = 0; ; i++)); do ((i >= 2)) && break; printf '%s' "$i"; done"#,
+    ]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "01");
+}
+
+#[test]
+fn case_supports_fallthrough_terminators() {
+    let out = sharky(&["-c", r#"x=ab; case $x in a*) printf A;;& *b) printf B;; esac"#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "AB");
+
+    let out = sharky(&["-c", r#"x=ab; case $x in a*) printf A;& z*) printf B;; esac"#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "AB");
+
+    let out = sharky(&["-c", r#"x=ab; case $x in a*) printf A;;& z*) printf Z;; esac"#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "A");
+}
+
+#[test]
+fn extglob_matches_in_case_and_paths() {
+    let out = sharky(&["-c", r#"case foo in @(foo|bar)) printf yes;; esac"#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "yes");
+
+    let out = sharky(&["-c", r#"case baz in !(foo|bar)) printf yes;; esac"#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "yes");
+
+    let out = sharky(&["-c", r#"case foobar in +(foo|bar)) printf yes;; esac"#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "yes");
+
+    let out = sharky(&["-c", r#"case foo in ?(foo)) printf yes;; esac"#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "yes");
+
+    let dir = temp_dir();
+    std::fs::write(dir.join("a.txt"), "").unwrap();
+    std::fs::write(dir.join("b.txt"), "").unwrap();
+    std::fs::write(dir.join("c.md"), "").unwrap();
+    let out = sharky_in(&dir, &["-c", "printf '%s ' @(a|b).txt"]);
+    std::fs::remove_dir_all(&dir).ok();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let mut files: Vec<&str> = text.split_whitespace().collect();
+    files.sort();
+    assert_eq!(files, vec!["a.txt", "b.txt"]);
+}
+
+#[test]
+fn arithmetic_assigns_and_increments_variables() {
+    let cases = [
+        ("i=0; ((i = 3)); printf '%s' \"$i\"", "3"),
+        ("i=1; ((i += 4)); printf '%s' \"$i\"", "5"),
+        ("i=1; ((i++)); printf '%s' \"$i\"", "2"),
+        ("i=1; ((++i)); printf '%s' \"$i\"", "2"),
+        ("i=2; printf '%s' \"$((i--))\"; printf '%s' \"$i\"", "21"),
+    ];
+    for (script, expected) in cases {
+        let out = sharky(&["-c", script]);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{script}");
+    }
 }

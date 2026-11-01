@@ -11,8 +11,8 @@ use nix::unistd::{ForkResult, Pid, fork, getpid, getpgrp, pipe2, setpgid, tcsetp
 
 use sharky_config::{self as config, Config};
 use crate::ast::{
-    AndOr, Assignment, AssignmentValue, Command, List, Pipeline, Program, Redirect, RedirectOp,
-    Simple, literal,
+    AndOr, Assignment, AssignmentValue, CaseArm, CaseTerm, Command, List, Pipeline, Program,
+    Redirect, RedirectOp, Simple, literal,
 };
 use crate::arith;
 use crate::exec;
@@ -586,6 +586,12 @@ impl Shell {
                 else_body,
             } => self.run_if(branches, else_body.as_ref()),
             Command::For { name, words, body } => self.run_for(name, words, body),
+            Command::ForArith {
+                init,
+                condition,
+                step,
+                body,
+            } => self.run_for_arith(init, condition, step, body),
             Command::While {
                 condition,
                 body,
@@ -846,6 +852,45 @@ impl Shell {
         Flow::Status(status)
     }
 
+    fn run_for_arith(&mut self, init: &str, condition: &str, step: &str, body: &List) -> Flow {
+        if !init.is_empty()
+            && let Err(message) = arith::evaluate(init, self)
+        {
+            eprintln!("sharky: arithmetic: {message}");
+            return Flow::Status(2);
+        }
+
+        let mut status = 0;
+        loop {
+            if !condition.is_empty() {
+                match arith::evaluate(condition, self) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(message) => {
+                        eprintln!("sharky: arithmetic: {message}");
+                        return Flow::Status(2);
+                    }
+                }
+            }
+
+            match self.run_list(body) {
+                Flow::Status(code) => status = code,
+                Flow::Break => break,
+                Flow::Continue => {}
+                other => return other,
+            }
+
+            if !step.is_empty()
+                && let Err(message) = arith::evaluate(step, self)
+            {
+                eprintln!("sharky: arithmetic: {message}");
+                return Flow::Status(2);
+            }
+        }
+
+        Flow::Status(status)
+    }
+
     fn run_while(&mut self, condition: &List, body: &List, until: bool) -> Flow {
         let mut status = 0;
 
@@ -875,19 +920,54 @@ impl Shell {
         Flow::Status(status)
     }
 
-    fn run_case(&mut self, word: &Word, arms: &[(Vec<Word>, List)]) -> Flow {
+    fn run_case(&mut self, word: &Word, arms: &[CaseArm]) -> Flow {
         let value = self.expand_text_word(word);
+        let mut status = 0;
+        let mut index = 0;
+        let mut matched = false;
+        let mut run_next = false;
 
-        for (patterns, body) in arms {
-            for pattern in patterns {
-                let pattern = self.expand_text_word(pattern);
-                if glob_match(&pattern, &value) {
-                    return self.run_list(body);
+        while index < arms.len() {
+            let (patterns, body, terminator) = &arms[index];
+            let matches = if run_next {
+                true
+            } else if matched {
+                false
+            } else {
+                patterns.iter().any(|pattern| {
+                    let pattern = self.expand_text_word(pattern);
+                    glob_match(&pattern, &value)
+                })
+            };
+
+            if !matches {
+                index += 1;
+                continue;
+            }
+
+            match self.run_list(body) {
+                Flow::Status(code) => status = code,
+                Flow::Break => return Flow::Break,
+                Flow::Continue => return Flow::Continue,
+                other => return other,
+            }
+
+            match terminator {
+                CaseTerm::Break => break,
+                CaseTerm::Fallthrough => {
+                    matched = false;
+                    run_next = true;
+                    index += 1;
+                }
+                CaseTerm::Continue => {
+                    matched = false;
+                    run_next = false;
+                    index += 1;
                 }
             }
         }
 
-        Flow::Status(0)
+        Flow::Status(status)
     }
 
     fn prepare(&mut self, simple: &Simple) -> Result<Prepared, String> {
@@ -1287,7 +1367,7 @@ impl Shell {
         array[index] = value;
     }
 
-    fn set_var(&mut self, name: &str, value: String) {
+    pub(crate) fn set_var(&mut self, name: &str, value: String) {
         match self.env.iter_mut().find(|(key, _)| key == name) {
             Some(entry) => entry.1 = value,
             None => self.env.push((name.to_string(), value)),
@@ -2377,7 +2457,7 @@ impl Shell {
         let mut out = Vec::new();
 
         for (text, eligible) in fields {
-            if eligible && text.chars().any(|char| matches!(char, '*' | '?' | '[')) {
+            if eligible && has_glob(&text) {
                 let matches = glob(&text);
                 if !matches.is_empty() {
                     out.extend(matches);
@@ -2482,6 +2562,83 @@ fn lower_first(value: &str) -> String {
     out
 }
 
+type ExtGlob<'a> = (char, Vec<Vec<char>>, &'a [char]);
+
+fn split_extglob(pattern: &[char]) -> Option<ExtGlob<'_>> {
+    let operator = *pattern.first()?;
+    if !matches!(operator, '?' | '*' | '+' | '@' | '!') || pattern.get(1) != Some(&'(') {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    let mut end = None;
+    for (index, char) in pattern.iter().enumerate().skip(1) {
+        match char {
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    end = Some(index);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let end = end?;
+
+    let mut alternatives = Vec::new();
+    let mut current = Vec::new();
+    let mut depth = 0usize;
+    for char in &pattern[2..end] {
+        match char {
+            '(' => {
+                depth += 1;
+                current.push(*char);
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                current.push(*char);
+            }
+            '|' if depth == 0 => alternatives.push(std::mem::take(&mut current)),
+            _ => current.push(*char),
+        }
+    }
+    alternatives.push(current);
+
+    Some((operator, alternatives, &pattern[end + 1..]))
+}
+
+fn ext_matches(operator: char, alternatives: &[Vec<char>], text: &[char]) -> bool {
+    let exact = |text: &[char]| alternatives.iter().any(|alt| glob_chars(alt, text));
+    match operator {
+        '?' => text.is_empty() || exact(text),
+        '@' => exact(text),
+        '*' => text.is_empty() || ext_repeat(alternatives, text),
+        '+' => !text.is_empty() && ext_repeat(alternatives, text),
+        '!' => !exact(text),
+        _ => false,
+    }
+}
+
+fn ext_repeat(alternatives: &[Vec<char>], text: &[char]) -> bool {
+    let mut reachable = vec![false; text.len() + 1];
+    reachable[0] = true;
+    for end in 1..=text.len() {
+        for start in 0..end {
+            if reachable[start]
+                && alternatives
+                    .iter()
+                    .any(|alt| glob_chars(alt, &text[start..end]))
+            {
+                reachable[end] = true;
+                break;
+            }
+        }
+    }
+    reachable[text.len()]
+}
+
 fn describe_and_or(and_or: &AndOr) -> String {
     let mut text = describe_pipeline(&and_or.first);
     for (is_and, pipeline) in &and_or.rest {
@@ -2514,6 +2671,7 @@ fn describe_command(command: &Command) -> String {
         Command::Group(_) => "{ ...; }".to_string(),
         Command::If { .. } => "if ...".to_string(),
         Command::For { name, .. } => format!("for {name} ..."),
+        Command::ForArith { .. } => "for ((...))".to_string(),
         Command::While { until, .. } => {
             if *until {
                 "until ...".to_string()
@@ -2874,6 +3032,13 @@ impl Fields {
     }
 }
 
+fn has_glob(text: &str) -> bool {
+    text.chars().any(|char| matches!(char, '*' | '?' | '['))
+        || text.contains("@(")
+        || text.contains("+(")
+        || text.contains("!(")
+}
+
 fn glob(pattern: &str) -> Vec<String> {
     let (dir, base) = match pattern.rfind('/') {
         Some(index) => (&pattern[..index], &pattern[index + 1..]),
@@ -3084,6 +3249,17 @@ pub(crate) fn glob_match(pattern: &str, text: &str) -> bool {
 }
 
 fn glob_chars(pattern: &[char], text: &[char]) -> bool {
+    if let Some((operator, alternatives, rest)) = split_extglob(pattern) {
+        for consumed in 0..=text.len() {
+            if ext_matches(operator, &alternatives, &text[..consumed])
+                && glob_chars(rest, &text[consumed..])
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     let Some(&first) = pattern.first() else {
         return text.is_empty();
     };

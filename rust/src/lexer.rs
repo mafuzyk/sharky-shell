@@ -334,6 +334,11 @@ impl Lexer {
                 '"' => parts.push(Part::Double(self.scan_double()?)),
                 '\\' => self.scan_escape(&mut parts)?,
                 '$' => parts.push(self.scan_dollar()?),
+                '?' | '*' | '+' | '@' | '!' if self.peek() == Some('(') => {
+                    let start = self.pos;
+                    let text = self.scan_extglob(start)?;
+                    push_text(&mut parts, &text);
+                }
                 _ => {
                     push_literal(&mut parts, char);
                     self.pos += 1;
@@ -355,6 +360,11 @@ impl Lexer {
                 '"' => parts.push(Part::Double(self.scan_double()?)),
                 '\\' => self.scan_escape(&mut parts)?,
                 '$' => parts.push(self.scan_dollar()?),
+                '?' | '*' | '+' | '@' | '!' if self.peek() == Some('(') => {
+                    let start = self.pos;
+                    let text = self.scan_extglob(start)?;
+                    push_text(&mut parts, &text);
+                }
                 '~' if parts.is_empty() && matches!(self.peek(), None | Some('/')) =>
                 {
                     parts.push(Part::Tilde);
@@ -455,6 +465,32 @@ impl Lexer {
         }
         let value = u32::from_str_radix(&digits, 8).unwrap_or(0);
         char::from_u32(value).map(String::from).unwrap_or_default()
+    }
+
+    fn scan_extglob(&mut self, start: usize) -> Result<String, LexError> {
+        let mut text = String::new();
+        text.push(self.current().unwrap_or('?'));
+        self.pos += 1;
+        text.push('(');
+        self.pos += 1;
+        let mut depth = 1usize;
+
+        while let Some(char) = self.current() {
+            text.push(char);
+            self.pos += 1;
+            match char {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(text);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Err(LexError::new("unclosed extglob", start, true))
     }
 
     fn scan_single(&mut self) -> Result<String, LexError> {
@@ -1045,6 +1081,14 @@ fn word_text(word: &Word) -> String {
 
     walk(&word.parts, &mut text);
     text
+}
+
+fn push_text(parts: &mut Vec<Part>, text: &str) {
+    if let Some(Part::Literal(existing)) = parts.last_mut() {
+        existing.push_str(text);
+    } else {
+        parts.push(Part::Literal(text.to_string()));
+    }
 }
 
 fn push_literal(parts: &mut Vec<Part>, char: char) {

@@ -43,6 +43,7 @@ assert an exit status instead of waiting forever.
 - [x] Brace expansion, here-strings, `&>`, `${var/pat/repl}`
 - [x] Extended parameter expansion: substrings, case, indirect, `$'...'`
 - [x] Associative arrays, array slices and arithmetic indexes
+- [x] C-style `for`, `;;&`/`;&`, extglob and arithmetic assignment
 - [x] Indexed arrays: literals, `[@]`, index, `#`, `+=` and `a[i]=`
 - [x] `set -e/-u/-x`, `pipefail`, `set --`, `trap` EXIT, `read` and `shift`
 - [x] `[[ =~ ]]`, `-a`, `-L/-h`, integer coercion
