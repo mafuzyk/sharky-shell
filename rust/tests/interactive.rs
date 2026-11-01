@@ -1487,3 +1487,49 @@ fn a_full_width_line_does_not_move_the_cursor_up() {
     let _ = child.wait();
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn redraw_keeps_the_prompt_on_screen() {
+    let dir = std::env::temp_dir().join(format!("sharky-prompt-keep-{}", std::process::id()));
+    let config = dir.join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("config.sharky"),
+        "wave prompt \"PROMPT> \"\ntide greeting off\n",
+    )
+    .unwrap();
+
+    let pty = openpty(None, None).expect("pty");
+    let stdin = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stdout = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stderr = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .stdin(stdin)
+        .stdout(stdout)
+        .stderr(stderr)
+        .env("SHARKY_CONFIG", &config)
+        .env("TERM", "xterm-256color")
+        .env("HOME", "/tmp")
+        .spawn()
+        .expect("spawn sharky");
+
+    let fd = pty.master.as_raw_fd();
+    let mut writer = unsafe { std::fs::File::from_raw_fd(pty.master.try_clone().unwrap().into_raw_fd()) };
+    read_until(fd, "PROMPT> ", Duration::from_secs(5));
+    let _ = writer.write_all(b"x");
+    let seen = read_until(fd, "x", Duration::from_secs(5));
+    assert!(
+        seen.contains("\r\u{1b}[8C\u{1b}[J"),
+        "redraw did not clear after the prompt: {seen:?}"
+    );
+    assert!(
+        !seen.contains("\r\u{1b}[Jx"),
+        "redraw erased the prompt: {seen:?}"
+    );
+
+    let _ = writer.write_all(b"\x03");
+    let _ = read_until(fd, HISTORY_PROMPT_END, Duration::from_secs(5));
+    let _ = writer.write_all(b"exit\r");
+    let _ = child.wait();
+    std::fs::remove_dir_all(&dir).ok();
+}

@@ -480,17 +480,20 @@ impl Editor {
         let columns = term::width().max(1);
         let (cursor_row, cursor_column) = position(buffer, cursor, columns, prompt_width);
         let (end_row, _) = position(buffer, buffer.len(), columns, prompt_width);
+        let prompt_row = prompt_width / columns;
+        let start_column = prompt_width % columns;
 
         let mut out = String::new();
-        if cursor_row > 0 {
-            out.push_str(&format!("\x1b[{}A", cursor_row));
+        if cursor_row > prompt_row {
+            out.push_str(&format!("\x1b[{}A", cursor_row - prompt_row));
         }
         out.push('\r');
-        out.push_str("\x1b[J");
-        let start_column = prompt_width % columns;
         if start_column > 0 {
             out.push_str(&format!("\x1b[{start_column}C"));
         }
+        // Clear from the end of the prompt so the prompt and its icons survive
+        // the redraw; everything below it (input, menu, ghost) is replaced.
+        out.push_str("\x1b[J");
         for char in display.chars() {
             if char == '\n' {
                 out.push_str("\r\n");
