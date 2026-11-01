@@ -27,6 +27,7 @@ impl Editor {
 
         let mut buffer: Vec<char> = Vec::new();
         let mut cursor = 0;
+        let mut pasting = false;
         self.index = shell.history_entries().len();
         self.draft.clear();
 
@@ -37,7 +38,42 @@ impl Editor {
         loop {
             self.render_input(&buffer, cursor, prompt_width)?;
 
-            match term::read_key()? {
+            let key = term::read_key()?;
+
+            if pasting {
+                match key {
+                    Key::PasteEnd => pasting = false,
+                    Key::Enter => {
+                        buffer.insert(cursor, '\n');
+                        cursor += 1;
+                    }
+                    Key::Tab => {
+                        buffer.insert(cursor, '\t');
+                        cursor += 1;
+                    }
+                    Key::Backspace => {
+                        if cursor > 0 {
+                            buffer.remove(cursor - 1);
+                            cursor -= 1;
+                        }
+                    }
+                    Key::Delete => {
+                        if cursor < buffer.len() {
+                            buffer.remove(cursor);
+                        }
+                    }
+                    Key::Char(char) => {
+                        buffer.insert(cursor, char);
+                        cursor += 1;
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
+            match key {
+                Key::PasteStart => pasting = true,
+                Key::PasteEnd => {}
                 Key::Enter => {
                     expand_abbreviation(&mut buffer, &mut cursor, shell, "");
                     term::write_stdout("\r\n")?;
@@ -66,8 +102,8 @@ impl Editor {
                         return Ok(Line::Content(buffer.iter().collect()));
                     }
                 }
-                Key::Ctrl('a') | Key::Home => cursor = 0,
-                Key::Ctrl('e') | Key::End => cursor = buffer.len(),
+                Key::Ctrl('a') | Key::Home => cursor = line_start(&buffer, cursor),
+                Key::Ctrl('e') | Key::End => cursor = line_end(&buffer, cursor),
                 Key::Ctrl('u') => {
                     buffer.drain(..cursor);
                     cursor = 0;
@@ -97,8 +133,20 @@ impl Editor {
                         buffer.remove(cursor);
                     }
                 }
-                Key::Up => self.recall_newer(&mut buffer, &mut cursor, shell),
-                Key::Down => self.recall_older(&mut buffer, &mut cursor, shell),
+                Key::Up => {
+                    if buffer.contains(&'\n') {
+                        cursor = move_line(&buffer, cursor, true);
+                    } else {
+                        self.recall_newer(&mut buffer, &mut cursor, shell);
+                    }
+                }
+                Key::Down => {
+                    if buffer.contains(&'\n') {
+                        cursor = move_line(&buffer, cursor, false);
+                    } else {
+                        self.recall_older(&mut buffer, &mut cursor, shell);
+                    }
+                }
                 Key::Tab => complete(&mut buffer, &mut cursor, shell),
                 Key::Char(' ') => {
                     if !expand_abbreviation(&mut buffer, &mut cursor, shell, " ") {
@@ -146,29 +194,33 @@ impl Editor {
 
     fn render_input(&self, buffer: &[char], cursor: usize, prompt_width: usize) -> std::io::Result<()> {
         let columns = term::width().max(1);
-        let prompt_row = prompt_width / columns;
-        let cursor_row = (prompt_width + cursor) / columns;
+        let (cursor_row, cursor_column) = position(buffer, cursor, columns, prompt_width);
+        let (end_row, _) = position(buffer, buffer.len(), columns, prompt_width);
 
         let mut out = String::new();
-        if cursor_row > prompt_row {
-            out.push_str(&format!("\x1b[{}A", cursor_row - prompt_row));
+        if cursor_row > 0 {
+            out.push_str(&format!("\x1b[{}A", cursor_row));
         }
         out.push('\r');
-        let column = prompt_width % columns;
-        if column > 0 {
-            out.push_str(&format!("\x1b[{column}C"));
-        }
         out.push_str("\x1b[J");
-        out.extend(buffer.iter());
+        let start_column = prompt_width % columns;
+        if start_column > 0 {
+            out.push_str(&format!("\x1b[{start_column}C"));
+        }
+        for char in buffer {
+            if *char == '\n' {
+                out.push_str("\r\n");
+            } else {
+                out.push(*char);
+            }
+        }
 
-        let end_row = (prompt_width + buffer.len()) / columns;
-        let end_column = (prompt_width + cursor) % columns;
         if end_row > cursor_row {
             out.push_str(&format!("\x1b[{}A", end_row - cursor_row));
         }
         out.push('\r');
-        if end_column > 0 {
-            out.push_str(&format!("\x1b[{end_column}C"));
+        if cursor_column > 0 {
+            out.push_str(&format!("\x1b[{cursor_column}C"));
         }
 
         term::write_stdout(&out)
@@ -266,23 +318,86 @@ fn redraw_input(
     cursor: usize,
 ) -> std::io::Result<()> {
     let columns = term::width().max(1);
+    let (cursor_row, cursor_column) = position(buffer, cursor, columns, prompt_width);
+    let (end_row, _) = position(buffer, buffer.len(), columns, prompt_width);
+
     let mut out = String::from("\r\x1b[J");
     out.push_str(prompt_last);
-    out.extend(buffer.iter());
+    for char in buffer {
+        if *char == '\n' {
+            out.push_str("\r\n");
+        } else {
+            out.push(*char);
+        }
+    }
 
-    let end_row = (prompt_width + buffer.len()) / columns;
-    let cursor_row = (prompt_width + cursor) / columns;
     if end_row > cursor_row {
         out.push_str(&format!("\x1b[{}A", end_row - cursor_row));
     }
     out.push('\r');
-    let column = (prompt_width + cursor) % columns;
-    if column > 0 {
-        out.push_str(&format!("\x1b[{column}C"));
+    if cursor_column > 0 {
+        out.push_str(&format!("\x1b[{cursor_column}C"));
     }
     term::write_stdout(&out)
 }
 
+fn position(buffer: &[char], index: usize, columns: usize, prompt_width: usize) -> (usize, usize) {
+    let mut row = prompt_width / columns;
+    let mut column = prompt_width % columns;
+
+    for char in buffer.iter().take(index) {
+        if *char == '\n' {
+            row += 1;
+            column = 0;
+        } else {
+            column += 1;
+            if column >= columns {
+                row += 1;
+                column = 0;
+            }
+        }
+    }
+
+    (row, column)
+}
+
+fn line_start(buffer: &[char], cursor: usize) -> usize {
+    buffer[..cursor.min(buffer.len())]
+        .iter()
+        .rposition(|char| *char == '\n')
+        .map(|index| index + 1)
+        .unwrap_or(0)
+}
+
+fn line_end(buffer: &[char], cursor: usize) -> usize {
+    buffer[cursor.min(buffer.len())..]
+        .iter()
+        .position(|char| *char == '\n')
+        .map(|index| cursor.min(buffer.len()) + index)
+        .unwrap_or(buffer.len())
+}
+
+fn move_line(buffer: &[char], cursor: usize, up: bool) -> usize {
+    let start = line_start(buffer, cursor);
+    let end = line_end(buffer, cursor);
+    let column = cursor.saturating_sub(start);
+
+    if up {
+        if start == 0 {
+            return cursor;
+        }
+        let previous_end = start - 1;
+        let previous_start = line_start(buffer, previous_end);
+        previous_start + column.min(previous_end - previous_start)
+    } else {
+        if end >= buffer.len() {
+            return cursor;
+        }
+        let next_start = end + 1;
+        let next_end = line_end(buffer, next_start);
+        next_start + column.min(next_end - next_start)
+    }
+}
 fn find_history(entries: &[String], query: &str, offset: usize) -> Option<String> {
     entries
         .iter()
@@ -475,4 +590,43 @@ fn common_prefix(left: &str, right: &str) -> String {
         .take_while(|(a, b)| a == b)
         .map(|(a, _)| a)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{line_end, line_start, move_line, position};
+
+    fn buffer(text: &str) -> Vec<char> {
+        text.chars().collect()
+    }
+
+    #[test]
+    fn position_accounts_for_newlines_and_wrapping() {
+        let text = buffer("ab\ncd");
+        assert_eq!(position(&text, 0, 10, 4), (0, 4));
+        assert_eq!(position(&text, 2, 10, 4), (0, 6));
+        assert_eq!(position(&text, 3, 10, 4), (1, 0));
+        assert_eq!(position(&text, 5, 10, 4), (1, 2));
+
+        let wide = buffer("abcdefgh");
+        assert_eq!(position(&wide, 8, 4, 0), (2, 0));
+    }
+
+    #[test]
+    fn line_bounds_stay_inside_the_current_line() {
+        let text = buffer("one\ntwo\nthree");
+        assert_eq!(line_start(&text, 5), 4);
+        assert_eq!(line_end(&text, 5), 7);
+        assert_eq!(line_start(&text, 0), 0);
+        assert_eq!(line_end(&text, text.len()), text.len());
+    }
+
+    #[test]
+    fn move_line_keeps_the_column_and_clamps() {
+        let text = buffer("one\ntwo\nthree");
+        assert_eq!(move_line(&text, 8, true), 4);
+        assert_eq!(move_line(&text, 3, false), 7);
+        assert_eq!(move_line(&text, 1, true), 1);
+        assert_eq!(move_line(&text, text.len(), false), text.len());
+    }
 }

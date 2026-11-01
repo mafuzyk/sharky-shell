@@ -728,3 +728,113 @@ fn interactive_exec_failure_keeps_the_shell_alive() {
     assert!(out.contains('1'), "unexpected failure status: {out:?}");
     session.finish();
 }
+
+fn paste(writer: &mut std::fs::File, text: &str) {
+    let _ = writer.write_all(format!("\u{1b}[200~{text}\u{1b}[201~").as_bytes());
+}
+
+#[test]
+fn bracketed_paste_defers_execution_until_enter() {
+    let mut session = history_session();
+    paste(&mut session.writer, "printf 'PASTED-A'\nprintf 'PASTED-B'");
+    let seen = read_until(session.master.as_raw_fd(), "PASTED-B", Duration::from_secs(5));
+    assert!(seen.contains("PASTED-B"), "paste not rendered: {seen:?}");
+    assert!(!seen.contains("133;C"), "pasted text ran early: {seen:?}");
+
+    let _ = session.writer.write_all(b"\r");
+    let out = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    assert!(out.contains("PASTED-A"), "first line missing: {out:?}");
+    assert!(out.contains("PASTED-B"), "second line missing: {out:?}");
+    assert_eq!(out.matches("133;C").count(), 1, "not one command: {out:?}");
+    session.finish();
+}
+
+#[test]
+fn bracketed_paste_inserts_at_the_cursor() {
+    let mut session = history_session();
+    let _ = session.writer.write_all(b"echo pre");
+    read_until(session.master.as_raw_fd(), "echo pre", Duration::from_secs(5));
+    paste(&mut session.writer, " mid");
+    read_until(session.master.as_raw_fd(), "pre mid", Duration::from_secs(5));
+    let _ = session.writer.write_all(b"\r");
+    let out = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    assert!(out.contains("pre mid"), "paste at cursor failed: {out:?}");
+    session.finish();
+}
+
+#[test]
+fn bracketed_paste_runs_a_compound_block_once() {
+    let mut session = history_session();
+    paste(
+        &mut session.writer,
+        "if true; then\nprintf 'IFDONE'\nfi",
+    );
+    read_until(session.master.as_raw_fd(), "fi", Duration::from_secs(5));
+    let _ = session.writer.write_all(b"\r");
+    let out = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    assert!(out.contains("IFDONE"), "block did not run: {out:?}");
+    assert!(!out.contains("syntax error"), "parse error: {out:?}");
+    assert_eq!(out.matches("133;C").count(), 1, "not one block: {out:?}");
+    session.finish();
+}
+
+#[test]
+fn multiline_buffer_moves_by_line() {
+    let mut session = history_session();
+    paste(&mut session.writer, "echo one\necho two");
+    read_until(session.master.as_raw_fd(), "echo two", Duration::from_secs(5));
+    let _ = session.writer.write_all(b"\x1b[A");
+    let _ = session.writer.write_all(b"\x1b[F");
+    let _ = session.writer.write_all(b"X");
+    let _ = session.writer.write_all(b"\x1b[B");
+    let _ = session.writer.write_all(b"Y");
+    let _ = session.writer.write_all(b"\r");
+    let out = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    assert!(out.contains("oneX"), "end of first line: {out:?}");
+    assert!(out.contains("twoY"), "end of second line: {out:?}");
+    session.finish();
+}
+
+#[test]
+fn multiline_home_moves_to_the_line_start() {
+    let mut session = history_session();
+    paste(&mut session.writer, "echo one\necho two");
+    read_until(session.master.as_raw_fd(), "echo two", Duration::from_secs(5));
+    let _ = session.writer.write_all(b"\x1b[A");
+    let _ = session.writer.write_all(b"\x1b[H");
+    let _ = session.writer.write_all(b" ");
+    let _ = session.writer.write_all(b"\r");
+    let out = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    assert!(out.contains("one"), "first line did not run: {out:?}");
+    assert!(out.contains("two"), "second line did not run: {out:?}");
+    session.finish();
+}
+
+#[test]
+fn bracketed_paste_is_disabled_around_prompts() {
+    let mut session = history_session();
+    let seen = session.run("echo paste-toggle");
+    assert!(seen.contains("\u{1b}[?2004h"), "paste never enabled: {seen:?}");
+    assert!(seen.contains("\u{1b}[?2004l"), "paste never disabled: {seen:?}");
+    session.finish();
+}

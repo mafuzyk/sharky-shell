@@ -17,6 +17,8 @@ pub enum Key {
     Tab,
     Ctrl(char),
     Escape,
+    PasteStart,
+    PasteEnd,
     Unknown,
 }
 
@@ -40,6 +42,7 @@ impl RawMode {
             if libc::tcsetattr(0, libc::TCSADRAIN, &termios) != 0 {
                 return None;
             }
+            let _ = write_stdout("\x1b[?2004h");
             Some(RawMode { original })
         }
     }
@@ -47,6 +50,7 @@ impl RawMode {
 
 impl Drop for RawMode {
     fn drop(&mut self) {
+        let _ = write_stdout("\x1b[?2004l");
         // SAFETY: restoring the termios captured in enable().
         unsafe {
             libc::tcsetattr(0, libc::TCSADRAIN, &self.original);
@@ -155,6 +159,8 @@ fn read_escape() -> io::Result<Key> {
                 "1" | "7" => Key::Home,
                 "4" | "8" => Key::End,
                 "3" => Key::Delete,
+                "200" => Key::PasteStart,
+                "201" => Key::PasteEnd,
                 _ => Key::Unknown,
             }
         }

@@ -47,6 +47,7 @@ assert an exit status instead of waiting forever.
 - [x] Process substitution with reaped children and closed fds
 - [x] Interactive history expansion with `set -H`
 - [x] `exec` (with `-a` and persistent redirections) and `time`/`time -p`
+- [x] Bracketed paste and multiline editing with per-line motion
 - [x] Indexed arrays: literals, `[@]`, index, `#`, `+=` and `a[i]=`
 - [x] `set -e/-u/-x`, `pipefail`, `set --`, `trap` EXIT, `read` and `shift`
 - [x] `[[ =~ ]]`, `-a`, `-L/-h`, integer coercion

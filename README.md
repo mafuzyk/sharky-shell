@@ -93,6 +93,7 @@ The prompt, `-c` and script files share one grammar:
 | groups and subshells | `{ a; b; }`, `( a; b )` |
 | builtins | `type`, `alias`, `unalias`, `abbr`, `unabbr`, `history`, `pwd`, `read`, `shift`, `exec`, `time` |
 | history search | Ctrl-R, type to filter, Enter runs the match, Ctrl-G cancels |
+| paste and multiline | bracketed paste inserts text verbatim; Enter submits the whole buffer; Up/Down, Home/End work per line |
 | history expansion | `!!`, `!n`, `!-n`, `!prefix`, `!?text?`, `!$`, `!*`, `!^`, `^old^new^`; `set +H` disables |
 | job control | `cmd &`, `jobs`, `fg`, `bg`, Ctrl-Z |
 | scripts | `source lib.sh`, `sharky file.sh args` |
