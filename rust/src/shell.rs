@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
@@ -56,6 +56,7 @@ pub struct Shell {
     substitution_fds: Vec<i32>,
     substitution_pids: Vec<Pid>,
     substitution_paths: Vec<String>,
+    substitution_ready: Vec<i32>,
     json_exec: Option<(RawFd, Vec<(String, String)>)>,
     expansion_error: bool,
     pub exit_requested: Option<i32>,
@@ -147,6 +148,7 @@ impl Shell {
             substitution_fds: Vec::new(),
             substitution_pids: Vec::new(),
             substitution_paths: Vec::new(),
+            substitution_ready: Vec::new(),
             json_exec: None,
             expansion_error: false,
             exit_requested: None,
@@ -280,7 +282,6 @@ impl Shell {
         };
         let status = self.finish(status);
         self.close_substitutions_from(0);
-        cleanup_stale_fifos();
         status
     }
 
@@ -650,7 +651,6 @@ impl Shell {
         let command = describe_pipeline(pipeline);
         let pgid = leader.unwrap_or_else(getpgrp);
         let status = self.wait_pipeline(&pids, pgid, command);
-        cleanup_fifos_for(&pids);
         self.reap_substitutions();
         self.errexit_check(Flow::Status(status))
     }
@@ -1201,6 +1201,11 @@ impl Shell {
             }
         }
 
+        if self.expansion_error {
+            self.expansion_error = false;
+            return Err(String::new());
+        }
+
         Ok(Prepared {
             argv,
             actions,
@@ -1296,6 +1301,10 @@ impl Shell {
                     });
                 }
             }
+        }
+
+        if self.expansion_error {
+            return Err(String::new());
         }
 
         Ok(actions)
@@ -2832,7 +2841,10 @@ impl Shell {
                         value.as_ref().map(|value| (index as i64, value.clone()))
                     })
                     .collect();
-                let max_index = array.len().saturating_sub(1) as i64;
+                let max_index = array
+                    .iter()
+                    .rposition(|value| value.is_some())
+                    .unwrap_or(0) as i64;
                 let start = if offset < 0 {
                     let start = max_index + 1 + offset;
                     if start < 0 {
@@ -2922,6 +2934,8 @@ impl Shell {
         match unsafe { fork() } {
             Ok(ForkResult::Child) => {
                 reset_child_signals();
+                self.interactive = false;
+                self.job_pgid = None;
                 let keep = if input {
                     write.as_raw_fd()
                 } else {
@@ -2959,6 +2973,7 @@ impl Shell {
                 };
                 self.substitution_fds.push(fd);
                 self.substitution_paths.push(String::new());
+                self.substitution_ready.push(-1);
                 format!("/dev/fd/{fd}")
             }
             Err(_) => String::new(),
@@ -2986,15 +3001,26 @@ impl Shell {
             }
         };
         let path_text = path.to_string_lossy().into_owned();
+        let Ok((ready_read, ready_write)) = pipe2(OFlag::O_CLOEXEC) else {
+            let _ = std::fs::remove_file(&path);
+            return String::new();
+        };
 
         // SAFETY: the child opens the FIFO, runs shell code and exits.
         match unsafe { fork() } {
             Ok(ForkResult::Child) => {
                 reset_child_signals();
+                self.interactive = false;
+                self.job_pgid = None;
+                drop(ready_read);
                 let fd = match open_fifo_end(&path, input) {
                     Some(fd) => fd,
-                    None => unsafe { _exit(1) },
+                    None => {
+                        signal_fifo_ready(ready_write.as_raw_fd(), 0);
+                        unsafe { _exit(1) }
+                    }
                 };
+                signal_fifo_ready(ready_write.as_raw_fd(), 1);
                 let target = if input { 1 } else { 0 };
                 unsafe {
                     let _ = nix::libc::dup2(fd.as_raw_fd(), target);
@@ -3002,11 +3028,9 @@ impl Shell {
                         let _ = nix::libc::close(fd);
                     }
                 }
-                if input {
-                    // The consumer already opened its end; the name is no
-                    // longer needed and must not outlive this process.
-                    let _ = std::fs::remove_file(&path);
-                }
+                // Both ends are open now, so the name is no longer needed.
+                // Unlinking here avoids any global temp-directory sweep.
+                let _ = std::fs::remove_file(&path);
                 let status = match self.eval(source) {
                     Ok(code) => code,
                     Err(err) => {
@@ -3018,12 +3042,16 @@ impl Shell {
                 unsafe { _exit(status) }
             }
             Ok(ForkResult::Parent { child }) => {
+                drop(ready_write);
                 self.substitution_pids.push(child);
                 self.substitution_fds.push(-1);
                 self.substitution_paths.push(path_text.clone());
+                self.substitution_ready.push(ready_read.into_raw_fd());
                 path_text
             }
             Err(_) => {
+                drop(ready_read);
+                drop(ready_write);
                 let _ = std::fs::remove_file(&path);
                 String::new()
             }
@@ -3045,6 +3073,7 @@ impl Shell {
 
     pub fn close_substitutions_from(&mut self, start: usize) {
         while self.substitution_fds.len() > start {
+            let ready = self.substitution_ready.pop().unwrap_or(-1);
             if let Some(fd) = self.substitution_fds.pop()
                 && fd >= 0
             {
@@ -3053,7 +3082,24 @@ impl Shell {
             if let Some(path) = self.substitution_paths.pop()
                 && !path.is_empty()
             {
+                let wake = wake_fifo(&path);
+                if ready >= 0 {
+                    let mut byte = [0u8; 1];
+                    // SAFETY: the descriptor is the read end of the FIFO
+                    // readiness pipe created for this substitution.
+                    unsafe {
+                        let _ = nix::libc::read(
+                            ready,
+                            byte.as_mut_ptr() as *mut _,
+                            byte.len(),
+                        );
+                        let _ = nix::libc::close(ready);
+                    }
+                }
+                drop(wake);
                 let _ = std::fs::remove_file(path);
+            } else if ready >= 0 {
+                let _ = close(ready);
             }
         }
     }
@@ -3081,6 +3127,8 @@ impl Shell {
             }
             Ok(ForkResult::Child) => {
                 reset_child_signals();
+                self.interactive = false;
+                self.job_pgid = None;
                 let _ = move_fd(write.as_raw_fd(), 1);
                 unsafe {
                     nix::libc::close(read.as_raw_fd());
@@ -3110,89 +3158,46 @@ impl Shell {
                     continue;
                 }
             }
-            out.push(text);
+            out.push(strip_quoted_glob_markers(&text));
         }
 
         out
     }
 }
 
-fn cleanup_fifos_for(pids: &[Pid]) {
-    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(rest) = name.strip_prefix("sharky-psub-") else {
-            continue;
-        };
-        let Some(pid) = rest.split('-').next().and_then(|text| text.parse::<i32>().ok()) else {
-            continue;
-        };
-        if pids.iter().any(|candidate| candidate.as_raw() == pid) {
-            let _ = std::fs::remove_file(entry.path());
-        }
-    }
-}
-
-fn cleanup_stale_fifos() {
-    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(rest) = name.strip_prefix("sharky-psub-") else {
-            continue;
-        };
-        let Some(pid) = rest.split('-').next().and_then(|text| text.parse::<i32>().ok()) else {
-            continue;
-        };
-        // SAFETY: signal 0 only probes whether the process exists.
-        let alive = unsafe { nix::libc::kill(pid, 0) } == 0;
-        if !alive
-            && std::io::Error::last_os_error().raw_os_error() == Some(nix::libc::ESRCH)
-        {
-            let _ = std::fs::remove_file(entry.path());
-        }
-    }
-}
-
 fn open_fifo_end(path: &Path, write: bool) -> Option<std::os::fd::OwnedFd> {
-    use nix::fcntl::{FcntlArg, OFlag, fcntl, open};
+    use nix::fcntl::{OFlag, open};
     use nix::sys::stat::Mode;
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    if write {
-        loop {
-            match open(path, OFlag::O_WRONLY | OFlag::O_NONBLOCK, Mode::empty()) {
-                Ok(fd) => {
-                    let _ = fcntl(&fd, FcntlArg::F_SETFL(OFlag::empty()));
-                    return Some(fd);
-                }
-                Err(nix::errno::Errno::ENXIO) if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                Err(_) => return None,
-            }
-        }
-    }
+    let flags = if write {
+        OFlag::O_WRONLY
+    } else {
+        OFlag::O_RDONLY
+    };
+    open(path, flags, Mode::empty()).ok()
+}
 
-    let fd = open(path, OFlag::O_RDONLY | OFlag::O_NONBLOCK, Mode::empty()).ok()?;
-    loop {
-        let mut pollfd = nix::libc::pollfd {
-            fd: fd.as_raw_fd(),
-            events: nix::libc::POLLIN,
-            revents: 0,
-        };
-        // SAFETY: one valid pollfd for a FIFO opened above.
-        let ready = unsafe { nix::libc::poll(&mut pollfd, 1, 20) };
-        if ready > 0 && pollfd.revents & nix::libc::POLLIN != 0 {
-            let _ = fcntl(&fd, FcntlArg::F_SETFL(OFlag::empty()));
-            return Some(fd);
-        }
-        if std::time::Instant::now() >= deadline {
-            return None;
-        }
+fn wake_fifo(path: &str) -> Option<std::os::fd::OwnedFd> {
+    use nix::fcntl::{OFlag, open};
+    use nix::sys::stat::Mode;
+    use std::os::unix::fs::FileTypeExt;
+
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return None;
+    };
+    if !meta.file_type().is_fifo() {
+        return None;
+    }
+    open(Path::new(path), OFlag::O_RDWR | OFlag::O_NONBLOCK, Mode::empty()).ok()
+}
+
+fn signal_fifo_ready(fd: RawFd, status: u8) {
+    // A process-substitution child can be exec'd before the parent consumes
+    // this handshake pipe. Ignore SIGPIPE for the optional notification.
+    unsafe {
+        let previous = nix::libc::signal(nix::libc::SIGPIPE, nix::libc::SIG_IGN);
+        let _ = nix::libc::write(fd, &status as *const u8 as *const _, 1);
+        let _ = nix::libc::signal(nix::libc::SIGPIPE, previous);
     }
 }
 
@@ -3874,6 +3879,8 @@ fn apply_actions(actions: &[Action]) -> Result<(), String> {
 }
 
 
+const QUOTED_GLOB_MARKER: char = '\u{1}';
+
 struct Fields {
     done: Vec<(String, bool)>,
     current: String,
@@ -3893,8 +3900,7 @@ impl Fields {
 
     fn push(&mut self, text: &str, quoted: bool) {
         if quoted {
-            self.current.push_str(text);
-            self.started = true;
+            self.push_quoted(text);
             return;
         }
 
@@ -3906,8 +3912,24 @@ impl Fields {
             } else {
                 self.current.push(char);
                 self.started = true;
-                self.glob = true;
+                if matches!(char, '*' | '?' | '[' | '@' | '+' | '!' | '(') {
+                    self.glob = true;
+                }
             }
+        }
+    }
+
+    fn push_quoted(&mut self, text: &str) {
+        if text.is_empty() {
+            self.started = true;
+            return;
+        }
+        for char in text.chars() {
+            if is_glob_meta(char) {
+                self.current.push(QUOTED_GLOB_MARKER);
+            }
+            self.current.push(char);
+            self.started = true;
         }
     }
 
@@ -3919,14 +3941,17 @@ impl Fields {
             return;
         }
         if join {
-            self.current.push_str(&values.join(" "));
-            self.started = true;
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    self.current.push(' ');
+                }
+                self.push_quoted(value);
+            }
             return;
         }
         let last = values.len() - 1;
         for (index, value) in values.iter().enumerate() {
-            self.current.push_str(value);
-            self.started = true;
+            self.push_quoted(value);
             if index < last {
                 self.flush();
             }
@@ -3973,10 +3998,39 @@ impl Fields {
 }
 
 fn has_glob(text: &str) -> bool {
-    text.chars().any(|char| matches!(char, '*' | '?' | '['))
-        || text.contains("@(")
-        || text.contains("+(")
-        || text.contains("!(")
+    let chars: Vec<char> = text.chars().collect();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == QUOTED_GLOB_MARKER {
+            index += 2;
+            continue;
+        }
+        if matches!(chars[index], '*' | '?' | '[') {
+            return true;
+        }
+        if matches!(chars[index], '@' | '+' | '!') && chars.get(index + 1) == Some(&'(') {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+fn is_glob_meta(char: char) -> bool {
+    matches!(char, '*' | '?' | '[' | ']' | '@' | '+' | '!' | '(' | ')')
+}
+
+fn strip_quoted_glob_markers(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(char) = chars.next() {
+        if char != QUOTED_GLOB_MARKER {
+            out.push(char);
+        } else if let Some(literal) = chars.next() {
+            out.push(literal);
+        }
+    }
+    out
 }
 
 fn glob(pattern: &str) -> Vec<String> {

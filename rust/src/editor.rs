@@ -1312,7 +1312,11 @@ fn index_at_column(buffer: &[char], start: usize, end: usize, target: usize) -> 
     let mut column = 0;
     let mut index = start;
     while index < end {
-        let width = char_width(buffer[index]);
+        let width = if buffer[index] == '\t' {
+            8 - column % 8
+        } else {
+            char_width(buffer[index])
+        };
         if column + width > target {
             break;
         }

@@ -4,7 +4,9 @@ All notable changes to sharky are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project uses semantic
 versioning.
 
-## [Unreleased]
+## [3.5.3] - 2026-11-01
+
+> _Added more bugs to fix it later._
 
 ### Added
 
@@ -19,7 +21,7 @@ versioning.
   operators.
 - `unset 'a[i]'` leaves a hole instead of renumbering later elements.
 - Process-substitution descriptors survive function bodies, and substitution
-  children are reaped at prompt idle.
+  children are reaped at prompt idle without taking the terminal foreground.
 - Completion escapes file names and never opens a menu in a narrow terminal;
   the fuzzy pager uses the alternate screen.
 - Multiline redraw returns from the row it drew, wide characters count two
@@ -38,8 +40,32 @@ versioning.
   moving the cursor.
 - Ctrl-_ reaches undo, transpose follows readline, and `set -o` without a name
   reports active options.
-- Extglob handles quoted parentheses, nullable `+()` alternatives and globs in
-  directory components.
+- Extglob handles quoted parentheses, nullable `+()` alternatives, quoted
+  metacharacters and globs in directory components.
+- Empty quoted arguments keep their field (`set -- ""`, `pre"$@"post`,
+  `"${@}"`, `"${*}"`) and zero-element `[@]` expands to zero fields.
+- `set -e` ignores the status of a negated pipeline, as Bash does.
+- JSON `--json` reports the cwd and environment delta reached before `exec`,
+  including when `exec` comes from a login profile.
+- A login profile with a parse error stops at that file instead of running its
+  lines outside the broken structure; diagnostics carry the real line.
+- The FIFO fallback wakes and removes an unconsumed substitution when its
+  command ends, waits for slow consumers, reaps substitutions while the prompt
+  waits, and never deletes unrelated files from the temp directory.
+- Command completion escapes PATH executables, and pasted content ending in
+  ESC no longer loses the end marker.
+- Sparse array slices select by index, negative offsets follow the last
+  defined index, `unset 'a["key"]'` removes associative keys, and `${@:n}`
+  keeps one field per argument.
+- The process-substitution scanner accepts `case` lists and extglob patterns,
+  including cases nested in `if`/`for` and an empty `case ... in esac`.
+- Malformed arithmetic is a status-2 error instead of a lexer panic, and an
+  arithmetic expansion error fails the command before it applies redirections.
+- Quoted glob characters stay literal (`x"*"`), including inside quoted array
+  expansions.
+- Vertical movement preserves the display column with wide characters and
+  tabs, the menu closes on resize, SIGTERM leaves the fuzzy alternate screen,
+  and vi `r` leaves the cursor on the last replaced character.
 
 ## [3.5.2] - 2026-11-01
 

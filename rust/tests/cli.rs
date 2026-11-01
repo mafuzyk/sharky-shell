@@ -1,3 +1,4 @@
+use std::os::unix::fs::FileTypeExt;
 use std::process::{Command, Output};
 
 const NO_CONFIG: &str = "/nonexistent/sharky-test";
@@ -1268,6 +1269,23 @@ fn parameter_substrings_clamp_and_evaluate_offsets() {
 }
 
 #[test]
+fn expansion_error_does_not_apply_redirections() {
+    let dir = temp_dir();
+    std::fs::write(dir.join("out"), "KEEP").unwrap();
+    let out = sharky_in(
+        &dir,
+        &["-c", r#"printf BAD > "out$((1/0))"; printf AFTER"#],
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty(), "{out:?}");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("out")).unwrap(),
+        "KEEP"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn malformed_arithmetic_for_is_a_status_two_error() {
     let out = sharky(&["-c", "for ((i=0)); do printf BAD; break; done"]);
     assert_eq!(out.status.code(), Some(2));
@@ -1488,6 +1506,10 @@ fn sparse_array_slices_follow_indexes() {
         (r#"a[0]=zero; a[2]=two; a[5]=five; printf '<%s>' "${a[@]: -1}""#, "<five>"),
         (r#"a[0]=zero; a[2]=two; a[5]=five; printf '<%s>' "${a[@]: -6}""#, "<zero><two><five>"),
         (r#"a=(one two); printf '<%s>' "${a[@]: -3}""#, "<>"),
+        (
+            r#"a[2]=two; a[5]=five; unset "a[5]"; printf '<%s>' "${a[@]: -1}""#,
+            "<two>",
+        ),
         (r#"a=("" x); printf '<%s>' pre${a[@]}post"#, "<pre><xpost>"),
     ];
     for (script, expected) in cases {
@@ -1551,6 +1573,9 @@ fn empty_quoted_arguments_keep_their_field() {
 
     let out = sharky(&["-c", r#"f() { printf '%s' "$#"; }; set --; f "$@""#]);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "0");
+
+    let out = sharky(&["-c", r#"x=; y=value; printf '<%s>|<%s>' "$x" "$y""#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "<>|<value>");
 }
 
 #[test]
@@ -1616,6 +1641,41 @@ fn indexed_arrays_accept_arithmetic_indexes_and_unset_keys() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "0");
 }
 
+
+#[test]
+fn quoted_glob_characters_stay_literal() {
+    let dir = temp_dir();
+    std::fs::write(dir.join("x1"), "").unwrap();
+    std::fs::write(dir.join("x2"), "").unwrap();
+    let cases = [
+        (r#"printf '<%s>' x"*""#, "<x*>"),
+        (r#"printf '<%s>' x\*"#, "<x*>"),
+        (r#"a=("*"); printf '<%s>' x"${a[@]}""#, "<x*>"),
+        (r#"p="*"; printf '<%s>' x${p}"#, "<x1><x2>"),
+    ];
+    for (script, expected) in cases {
+        let out = sharky_in(&dir, &["-c", script]);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{script}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn mixed_quoted_glob_characters_keep_only_unquoted_parts_active() {
+    let dir = temp_dir();
+    std::fs::write(dir.join("alpha?"), "").unwrap();
+    std::fs::write(dir.join("alphaX"), "").unwrap();
+
+    let out = sharky_in(&dir, &["-c", r#"printf '<%s>' *"?""#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "<alpha?>");
+
+    let out = sharky_in(
+        &dir,
+        &["-c", r#"a=("?"); printf '<%s>' alpha"${a[@]}""#],
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "<alpha?>");
+    std::fs::remove_dir_all(&dir).ok();
+}
 
 #[test]
 fn extglob_keeps_quoted_metacharacters_literal() {
@@ -1736,6 +1796,9 @@ fn process_substitution_accepts_case_lists() {
         ("cat <(case x in x) case y in y) printf nested;; esac;; esac)", "nested"),
         (r#"cat <(case x in "x") printf q;; esac)"#, "q"),
         ("cat <(echo case in)", "case in\n"),
+        ("cat <(if true; then case x in x) printf A;; esac; fi)", "A"),
+        ("cat <(for i in 1; do case x in x) printf B;; esac; done)", "B"),
+        ("cat <(case x in esac)", ""),
     ];
     for (script, expected) in cases {
         let out = sharky(&["-c", script]);
@@ -1781,6 +1844,8 @@ fn process_substitution_fifo_fallback_works() {
 #[test]
 fn fifo_process_substitution_leaves_no_files() {
     let dir = temp_dir();
+    let user = dir.join("sharky-psub-2147483647-userdata");
+    std::fs::write(&user, "KEEP").unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
         .args([
             "-c",
@@ -1796,9 +1861,54 @@ fn fifo_process_substitution_leaves_no_files() {
     let leftovers: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
         .filter_map(Result::ok)
-        .filter(|entry| entry.file_name().to_string_lossy().starts_with("sharky-psub-"))
+        .filter(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            name.starts_with("sharky-psub-") && name != "sharky-psub-2147483647-userdata"
+        })
         .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
+    assert_eq!(std::fs::read_to_string(&user).unwrap(), "KEEP");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn fifo_cleanup_does_not_remove_unregistered_fifos() {
+    let dir = temp_dir();
+    let script = "/bin/sh -c 'mkfifo \"$TMPDIR/sharky-psub-$$-unregistered\"' | cat; printf DONE";
+    let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args(["-c", script])
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .env("TMPDIR", &dir)
+        .current_dir(&dir)
+        .output()
+        .expect("failed to run sharky");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "DONE");
+    let fifos: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_type()
+                .map(|kind| kind.is_fifo())
+                .unwrap_or(false)
+        })
+        .collect();
+    assert!(!fifos.is_empty(), "unregistered FIFO was removed: {out:?}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn fifo_process_substitution_waits_for_a_slow_consumer() {
+    let dir = temp_dir();
+    let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args(["-c", r#"f() { sleep 2.2; cat "$1"; }; f <(printf hi)"#])
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .env("SHARKY_PROCESS_SUBST_FIFO", "1")
+        .env("TMPDIR", &dir)
+        .output()
+        .expect("failed to run sharky");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi", "{out:?}");
+    assert_eq!(out.status.code(), Some(0));
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -2006,6 +2116,22 @@ fn json_capture_failure_does_not_run_the_command() {
 }
 
 #[test]
+fn json_exec_from_a_profile_keeps_the_state() {
+    let home = login_home("json-exec-profile");
+    std::fs::write(
+        home.join(".config/sharky/profile.sharky"),
+        "export AUDIT_PROFILE=changed\ncd /\nexec -a NAME /bin/echo PROFILE\n",
+    )
+    .unwrap();
+    let out = sharky_with_home(&home, &["-l", "--json", "-c", "true"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("\"stdout\":\"PROFILE\\n\""), "{text}");
+    assert!(text.contains("\"cwd\":\"/\""), "{text}");
+    assert!(text.contains("\"AUDIT_PROFILE\":\"changed\""), "{text}");
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
 fn login_profiles_stay_inside_the_json_envelope() {
     let home = login_home("json-envelope");
     std::fs::write(
@@ -2198,14 +2324,18 @@ fn login_profile_errors_report_file_and_line_and_stop_the_file() {
     let home = login_home("error");
     std::fs::write(
         home.join(".config/sharky/profile.sharky"),
-        ")\nLOGIN_OK=yes\n",
+        ")\nAUDIT_PROFILE_ONLY=yes\n",
     )
     .unwrap();
     std::fs::write(home.join(".bash_profile"), "PLAIN=value\n").unwrap();
 
     let out = sharky_with_home(
         &home,
-        &["-l", "-c", r#"printf '%s|%s' "$LOGIN_OK" "$PLAIN""#],
+        &[
+            "-l",
+            "-c",
+            r#"printf '%s|%s' "$AUDIT_PROFILE_ONLY" "$PLAIN""#,
+        ],
     );
     assert_eq!(String::from_utf8_lossy(&out.stdout), "|value");
     let stderr = String::from_utf8_lossy(&out.stderr);

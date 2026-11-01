@@ -161,8 +161,15 @@ pub fn read_key_timeout(millis: i32) -> io::Result<Option<Key>> {
 pub fn read_key() -> io::Result<Key> {
     let mut byte = [0u8; 1];
     let count = unsafe { libc::read(0, byte.as_mut_ptr() as *mut _, 1) };
-    if count <= 0 {
-        return Ok(Key::Escape);
+    if count == 0 {
+        return Ok(Key::Ctrl('d'));
+    }
+    if count < 0 {
+        let err = io::Error::last_os_error();
+        if err.kind() == io::ErrorKind::Interrupted {
+            return Ok(Key::Unknown);
+        }
+        return Err(err);
     }
 
     let key = match byte[0] {

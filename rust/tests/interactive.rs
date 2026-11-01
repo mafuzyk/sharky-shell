@@ -1579,6 +1579,53 @@ fn completion_menu_closes_on_resize() {
 }
 
 #[test]
+fn process_substitution_keeps_the_terminal_foreground() {
+    use std::os::unix::process::CommandExt;
+
+    let pty = openpty(None, None).expect("pty");
+    let stdin = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stdout = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stderr = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let mut command = Command::new(env!("CARGO_BIN_EXE_sharky"));
+    command
+        .stdin(stdin)
+        .stdout(stdout)
+        .stderr(stderr)
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .env("TERM", "xterm-256color")
+        .env("HOME", "/tmp");
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            libc::ioctl(0, libc::TIOCSCTTY, 0);
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().expect("spawn sharky");
+
+    let fd = pty.master.as_raw_fd();
+    let mut writer =
+        unsafe { std::fs::File::from_raw_fd(pty.master.try_clone().unwrap().into_raw_fd()) };
+    read_until(fd, "❯", Duration::from_secs(5));
+
+    let _ = writer.write_all(b"true <(sleep 0.15)\r");
+    std::thread::sleep(Duration::from_millis(400));
+    let foreground = unsafe { libc::tcgetpgrp(fd) };
+    assert_eq!(
+        foreground as u32,
+        child.id(),
+        "process substitution took the terminal"
+    );
+
+    let _ = writer.write_all(b"printf 'INPUT-%s' OK\r");
+    let seen = read_until(fd, "INPUT-OK", Duration::from_secs(5));
+    assert!(seen.contains("INPUT-OK"), "prompt stopped reading: {seen:?}");
+
+    let _ = writer.write_all(b"exit\r");
+    let _ = child.wait();
+}
+
+#[test]
 fn idle_reaps_finished_substitutions() {
     let mut session = history_session();
     session.run("true <(sleep 0.1)");

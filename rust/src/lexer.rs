@@ -1421,6 +1421,10 @@ fn flush_scan_word(
         return;
     }
     let phase = cases.last().copied();
+    let introducer = matches!(
+        word.as_str(),
+        "then" | "do" | "else" | "elif" | "if" | "while" | "until" | "!"
+    );
     match phase {
         None => {
             if *command_start {
@@ -1428,6 +1432,9 @@ fn flush_scan_word(
                     cases.push(CasePhase::Subject);
                 }
                 *command_start = false;
+            }
+            if introducer {
+                *command_start = true;
             }
         }
         Some(CasePhase::Subject) => {
@@ -1439,7 +1446,7 @@ fn flush_scan_word(
             }
         }
         Some(CasePhase::PatternStart) => {
-            if *arm_pending && word == "esac" {
+            if word == "esac" {
                 cases.pop();
                 *arm_pending = false;
                 *command_start = false;
@@ -1457,6 +1464,9 @@ fn flush_scan_word(
                     cases.push(CasePhase::Subject);
                 }
                 *command_start = false;
+            }
+            if introducer {
+                *command_start = true;
             }
         }
     }

@@ -215,10 +215,10 @@ fn run_json_command(shell: &mut Shell, source: &str, login: bool) -> i32 {
                 nix::libc::dup2(stdout_file.as_raw_fd(), 1);
                 nix::libc::dup2(stderr_file.as_raw_fd(), 2);
             }
+            shell.attach_json_exec(delta_file.as_raw_fd(), before.clone());
             if login {
                 crate::profiles::login(shell);
             }
-            shell.attach_json_exec(delta_file.as_raw_fd(), before.clone());
             let status = shell.run(source);
             write_delta(&delta_file, shell, &before);
             let _ = std::io::stdout().flush();
