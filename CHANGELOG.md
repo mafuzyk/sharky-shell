@@ -4,6 +4,45 @@ All notable changes to sharky are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project uses semantic
 versioning.
 
+## [3.5.0] - 2026-10-31
+
+### Added
+
+- Extended parameter expansion: substrings, case conversion, indirect
+  expansion (`${!x}`, `${!prefix*}`, `${!prefix@}`) and `${!a[@]}` indices.
+- ANSI-C quoting (`$'...'`) with `\n`, `\t`, `\xHH`, `\uHHHH`, octal and
+  the other Bash escapes.
+- Associative arrays (`declare -A`), array slices and arithmetic indexes.
+- C-style `for ((...))`, `case` fallthrough with `;;&` and `;&`, and extglob
+  patterns (`?(a|b)`, `*(a|b)`, `+(a|b)`, `@(a|b)`, `!(a|b)`).
+- Process substitution (`<(list)`, `>(list)`) with reaped children and closed
+  descriptors.
+- Interactive history expansion: `!!`, `!n`, `!-n`, `!prefix`, `!?text?`,
+  `!$`, `!*`, `!^`, `^old^new^`, controlled by `set -H`/`set +H`.
+- `exec` with `-a`, persistent redirections and interactive failure handling;
+  `time` and `time -p`.
+- Bracketed paste and multiline editing with per-line Up/Down and Home/End.
+- History autosuggest with ghost text and Right/End acceptance.
+- `wave`-driven syntax highlighting for commands, builtins, strings,
+  variables, operators, paths, comments and lexer errors.
+- `anchor` keybindings for the full action set, including
+  `accept_suggestion` and `fuzzy_files`; `ctrl+x`, `c+x`, `alt+x` and `m+x`
+  spellings.
+- Completion for commands, variables, files, `~` paths and git branches, with
+  an inline menu; Ctrl-T fuzzy file search.
+- Agent interface: `--json -c` with captured stdout/stderr, status, duration,
+  cwd and environment delta; `state --json [--env]`; `-i` to force the REPL.
+- Login shell (`-l`/`--login` or a leading `-` in `argv[0]`) reading sharky
+  profiles and importing only literal assignments from standard profiles.
+- Vi mode (`set -o vi`): insert/normal modes, `h l 0 $ w b e j k`, `x dd dw
+  d$ D cw C p P u r<char>` and count prefixes; `set +o vi` restores emacs.
+
+### Changed
+
+- Navigation keys are bindable through `anchor`; defaults match the previous
+  behaviour.
+- `set` reports `histexpand` and `vi` when they are enabled.
+
 ## [3.0.0] - 2026-10-31
 
 ### Added

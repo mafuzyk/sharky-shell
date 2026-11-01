@@ -113,6 +113,23 @@ assert an exit status instead of waiting forever.
 - **The differential suite grows with every feature.** A new feature lands with
   at least one `conformance/cases` file so the Ruby oracle keeps checking it.
 
+### 3.5 decisions
+
+- **extglob is always enabled.** There is no `shopt` in 3.5; the pattern
+  operators work everywhere, including `case` arms and pathname expansion.
+- **`exec` failure is interactive-friendly.** A failed `exec` keeps an
+  interactive shell alive with status 126/127 and exits a script with that
+  status. `exec` with only redirections applies them permanently.
+- **Login mode never executes bash or zsh code.** It runs sharky profiles and
+  imports only literal assignments from standard profiles; command substitution
+  and arbitrary shell code are skipped.
+- **Vi mode is a practical subset.** Insert/normal, motions, the listed
+  operators, counts and `r<char>` ship in 3.5; `/`, `?`, marks, registers,
+  macros and visual mode stay out.
+- **`env_delta` never includes `?`.** The Ruby reference exposes its `?`
+  status pseudo-variable in the delta; the Rust shell keeps status separate and
+  reports only real environment changes.
+
 ## Known shortcut
 
 All shell variables are exported to children. Bash only exports those marked

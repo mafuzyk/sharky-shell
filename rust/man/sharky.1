@@ -1,4 +1,4 @@
-.TH SHARKY 1 "2026-10-31" "sharky 3.0.0" "User Commands"
+.TH SHARKY 1 "2026-10-31" "sharky 3.5.0" "User Commands"
 .SH NAME
 sharky \- Unix-first interactive shell
 .SH SYNOPSIS
@@ -10,6 +10,10 @@ sharky \- Unix-first interactive shell
 .br
 .B sharky
 \fIFILE\fR [\fIARG\fR...]
+.br
+.B sharky
+.B state
+\fB\-\-json\fR [\fB\-\-env\fR]
 .SH DESCRIPTION
 .B sharky
 is an interactive POSIX-like shell written in Rust. Commands run as real Unix
@@ -22,6 +26,21 @@ With no arguments and no terminal it reads commands from standard input.
 .TP
 .B \-c \fICOMMAND\fR
 Run \fICOMMAND\fR and exit with its status.
+.TP
+.B \-i
+Force interactive mode; fails when standard input or output is not a terminal.
+.TP
+.B \-l, \-\-login
+Read login profiles before the command or system input.
+.TP
+.B \-\-json
+Print one JSON object for \fB\-c\fR or \fBstate\fR.
+.TP
+.B \-\-env
+Include the environment in \fBstate \-\-json\fR.
+.TP
+.B state
+Print schema version, cwd, last status and pid as JSON (requires \fB\-\-json\fR).
 .TP
 .B \-\-no\-config
 Do not read the configuration files.
@@ -36,18 +55,23 @@ The prompt, \fB\-c\fR and script files share one grammar:
 .IP \(bu 2
 single and double quotes, backslash escapes and \fB#\fR comments;
 .IP \(bu 2
-variables, positional parameters, \fB${NAME:\-default}\fR style operators and
-\fB$(...)\fR command substitution;
+variables, positional parameters, \fB${NAME:\-default}\fR operators,
+substrings, case conversion, indirect expansion and \fB$(...)\fR command
+substitution;
 .IP \(bu 2
-arithmetic expansion \fB$((...))\fR;
+indexed and associative arrays, including slices and quoted \fB"${a[@]}"\fR;
+.IP \(bu 2
+arithmetic expansion \fB$((...))\fR and C-style \fBfor ((...))\fR loops;
 .IP \(bu 2
 tilde expansion and glob patterns;
 .IP \(bu 2
 pipelines, redirections (\fB>\fR, \fB>>\fR, \fB<\fR, \fB2>&1\fR), \fB;\fR,
-\fB&&\fR and \fB||\fR lists;
+\fB&&\fR and \fB||\fR lists, process substitution (\fB<(list)\fR,
+\fB>(list)\fR), \fBexec\fR and \fBtime\fR;
 .IP \(bu 2
-\fBif\fR, \fBfor\fR, \fBwhile\fR, \fBuntil\fR, \fBcase\fR, shell functions,
-groups, subshells and \fB!\fR.
+\fBif\fR, \fBfor\fR, \fBwhile\fR, \fBuntil\fR, \fBcase\fR (including
+\fB;;&\fR and \fB;&\fR), shell functions, groups, subshells, extglob patterns
+and \fB!\fR.
 .PP
 This is a subset of Bash, not a replacement. Unsupported syntax fails with
 status 2 instead of falling back to another shell.
@@ -69,8 +93,9 @@ double-quoted values:
 .SS config.sharky
 .TP
 .B tide \fIkey value\fR
-Shell preferences: \fBgreeting\fR, \fBautosuggest\fR, \fBhighlight\fR
-(\fBon\fR or \fBoff\fR) and \fBhistory\fR (a number).
+Shell preferences: \fBgreeting\fR, \fBautosuggest\fR, \fBhighlight\fR,
+\fBstarship\fR and \fBprofile_paths\fR (\fBon\fR or \fBoff\fR) and
+\fBhistory\fR (a number).
 .TP
 .B pearl \fINAME value\fR
 Set an environment variable.
@@ -82,7 +107,13 @@ Prepend a directory to \fBPATH\fR.
 Define an alias.
 .TP
 .B anchor \fIkey action\fR
-Bind a key to an editor action.
+Bind a key to an editor action. Key names use \fBctrl+x\fR, \fBc+x\fR,
+\fBalt+x\fR or \fBm+x\fR, named keys such as \fBtab\fR, \fBshift-tab\fR,
+\fBhome\fR and \fBend\fR, or a single character. Actions include
+\fBaccept_line\fR, \fBabort\fR, \fBbackward_char\fR, \fBforward_char\fR,
+\fBbackward_word\fR, \fBforward_word\fR, \fBkill_line\fR, \fByank\fR,
+\fBundo\fR, \fBhistory_search\fR, \fBcomplete\fR,
+\fBaccept_suggestion\fR and \fBfuzzy_files\fR.
 .SS theme.sharky
 .TP
 .B coral \fIname #RRGGBB\fR
@@ -105,6 +136,13 @@ Colour palette and prompt styles.
 .TP
 .I ~/.local/share/sharky/history
 Command history, limited by \fBtide history\fR.
+.TP
+.I /etc/sharky/profile.sharky, ~/.config/sharky/profile.sharky
+Login profiles run by \fB\-l\fR.
+.TP
+.I /etc/profile, ~/.profile, ~/.bash_profile, ~/.zshprofile
+Login mode imports only literal \fINAME=value\fR and
+\fBexport \fINAME=value\fR lines from these files.
 .SH ENVIRONMENT
 .TP
 .B SHARKY_CONFIG
@@ -129,6 +167,9 @@ cannot be executed exits with 126.
 .nf
     sharky -c 'printf "a b\\n" | wc -w'
     sharky script.sh argument
+    sharky -l -c 'echo "$LOGIN_VAR"'
+    sharky --json -c 'printf hi'
+    sharky state --json --env
     sharky
 .fi
 .SH SEE ALSO
