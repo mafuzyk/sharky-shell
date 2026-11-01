@@ -30,7 +30,7 @@ pub fn parse(source: &str) -> Result<Program, ParseError> {
         .map(|(index, _)| index + 1)
         .collect();
     let tokens = lexer::tokenize(source).map_err(|err| {
-        let line = line_starts.partition_point(|start| *start <= err.pos);
+        let line = line_starts.partition_point(|start| *start <= err.pos) + 1;
         ParseError::new(format!("syntax error: {}", err.message), err.incomplete).with_line(line)
     })?;
     Parser {
@@ -57,7 +57,7 @@ impl Parser {
 
     fn current_line(&self) -> usize {
         let pos = self.tokens.get(self.pos).map(|token| token.pos).unwrap_or(0);
-        self.line_starts.partition_point(|start| *start <= pos)
+        self.line_starts.partition_point(|start| *start <= pos) + 1
     }
 
     fn error(&self, message: impl Into<String>, incomplete: bool) -> ParseError {

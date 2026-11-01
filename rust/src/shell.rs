@@ -56,6 +56,8 @@ pub struct Shell {
     substitution_fds: Vec<i32>,
     substitution_pids: Vec<Pid>,
     substitution_paths: Vec<String>,
+    json_exec: Option<(RawFd, Vec<(String, String)>)>,
+    expansion_error: bool,
     pub exit_requested: Option<i32>,
     jobs: Vec<Job>,
     next_job: usize,
@@ -145,6 +147,8 @@ impl Shell {
             substitution_fds: Vec::new(),
             substitution_pids: Vec::new(),
             substitution_paths: Vec::new(),
+            json_exec: None,
+            expansion_error: false,
             exit_requested: None,
             jobs: Vec::new(),
             next_job: 1,
@@ -155,6 +159,16 @@ impl Shell {
         };
         shell.set_var("PWD", cwd.display().to_string());
         shell
+    }
+
+    pub fn attach_json_exec(&mut self, fd: RawFd, before: Vec<(String, String)>) {
+        self.json_exec = Some((fd, before));
+    }
+
+    fn publish_json_exec(&self) {
+        if let Some((fd, before)) = &self.json_exec {
+            crate::cli::write_delta_fd(*fd, self, before);
+        }
     }
 
     pub fn load_config(&mut self, no_config: bool) {
@@ -266,6 +280,7 @@ impl Shell {
         };
         let status = self.finish(status);
         self.close_substitutions_from(0);
+        cleanup_stale_fifos();
         status
     }
 
@@ -373,7 +388,7 @@ impl Shell {
             ":", "true", "false", "cd", "exit", "export", "unset", "set", "source", ".",
             "break", "continue", "return", "jobs", "fg", "bg", "declare", "pwd", "type",
             "alias", "abbr", "unabbr", "unalias", "history", "wait", "kill", "z", "zi",
-            "reload", "trap", "read", "shift", "wake",
+            "reload", "trap", "read", "shift", "wake", "exec", "time",
         ]
         .iter()
         .map(|word| word.to_string())
@@ -524,9 +539,18 @@ impl Shell {
     }
 
     fn run_pipeline(&mut self, pipeline: &Pipeline) -> Flow {
+        let previous = self.errexit_suppressed;
+        if pipeline.negate {
+            self.errexit_suppressed = true;
+        }
+        let flow = self.run_pipeline_measured(pipeline);
+        self.errexit_suppressed = previous;
+        negate_flow(flow, pipeline.negate)
+    }
+
+    fn run_pipeline_measured(&mut self, pipeline: &Pipeline) -> Flow {
         let Some(posix) = pipeline.timed else {
-            let flow = self.run_pipeline_inner(pipeline);
-            return negate_flow(flow, pipeline.negate);
+            return self.run_pipeline_inner(pipeline);
         };
 
         let started = std::time::Instant::now();
@@ -539,7 +563,7 @@ impl Shell {
         let user = (self_user_after - self_user).max(0.0) + (child_user_after - child_user).max(0.0);
         let sys = (self_sys_after - self_sys).max(0.0) + (child_sys_after - child_sys).max(0.0);
         report_time(real, user, sys, posix);
-        negate_flow(flow, pipeline.negate)
+        flow
     }
 
     fn run_pipeline_inner(&mut self, pipeline: &Pipeline) -> Flow {
@@ -626,6 +650,7 @@ impl Shell {
         let command = describe_pipeline(pipeline);
         let pgid = leader.unwrap_or_else(getpgrp);
         let status = self.wait_pipeline(&pids, pgid, command);
+        cleanup_fifos_for(&pids);
         self.reap_substitutions();
         self.errexit_check(Flow::Status(status))
     }
@@ -705,14 +730,20 @@ impl Shell {
                 self.exit_requested = Some(1);
                 return Flow::Exit(1);
             }
+            if self.expansion_error {
+                self.expansion_error = false;
+                return self.expansion_failure();
+            }
             return Flow::Status(0);
         }
 
         let mut prepared = match self.prepare(simple) {
             Ok(prepared) => prepared,
             Err(message) => {
-                eprintln!("sharky: {message}");
-                return Flow::Status(1);
+                if !message.is_empty() {
+                    eprintln!("sharky: {message}");
+                }
+                return self.expansion_failure();
             }
         };
 
@@ -803,7 +834,9 @@ impl Shell {
         let prepared = match self.prepare(simple) {
             Ok(prepared) => prepared,
             Err(message) => {
-                eprintln!("sharky: {message}");
+                if !message.is_empty() {
+                    eprintln!("sharky: {message}");
+                }
                 return 1;
             }
         };
@@ -883,12 +916,21 @@ impl Shell {
         argv.push(name.unwrap_or_else(|| program.clone()));
         argv.extend_from_slice(rest);
 
+        self.publish_json_exec();
         match exec::exec_now(&path, &argv, env) {
             Ok(()) => Flow::Status(0),
             Err(err) => {
                 eprintln!("sharky: exec: {program}: {err}");
                 self.exec_failure(126)
             }
+        }
+    }
+
+    fn expansion_failure(&self) -> Flow {
+        if self.interactive {
+            Flow::Status(1)
+        } else {
+            Flow::Exit(1)
         }
     }
 
@@ -1090,7 +1132,7 @@ impl Shell {
                 false
             } else {
                 patterns.iter().any(|pattern| {
-                    let pattern = self.expand_text_word(pattern);
+                    let pattern = self.expand_pattern_word(pattern);
                     glob_match(&pattern, &value)
                 })
             };
@@ -1129,6 +1171,11 @@ impl Shell {
         let mut argv = Vec::new();
         for word in &simple.words {
             argv.extend(self.expand_word(word));
+        }
+
+        if self.expansion_error {
+            self.expansion_error = false;
+            return Err(String::new());
         }
 
         if self.xtrace && !argv.is_empty() {
@@ -1568,6 +1615,7 @@ impl Shell {
     fn unset(&mut self, args: &[String]) -> i32 {
         for name in args {
             if let Some((array, index)) = split_array_argument(name) {
+                let index = unquote_subscript(&index);
                 if let Some(assoc) = self.assoc.get_mut(&array) {
                     assoc.remove(&index);
                     continue;
@@ -2359,6 +2407,10 @@ impl Shell {
                     fields.push(&home, true);
                 }
                 Part::Double(inner) => {
+                    if inner.is_empty() {
+                        fields.touch();
+                        continue;
+                    }
                     for part in inner {
                         match part {
                             Part::Variable(name) if name == "@" => {
@@ -2411,6 +2463,7 @@ impl Shell {
                     Ok(value) => fields.push(&value.to_string(), false),
                     Err(message) => {
                         eprintln!("sharky: arithmetic: {message}");
+                        self.expansion_error = true;
                         fields.push("0", false);
                     }
                 },
@@ -2418,6 +2471,35 @@ impl Shell {
         }
 
         self.glob_fields(fields.finish())
+    }
+
+    fn expand_pattern_word(&mut self, word: &Word) -> String {
+        let mut out = String::new();
+        for part in &word.parts {
+            match part {
+                Part::Literal(text) => out.push_str(text),
+                Part::Single(text) | Part::Escaped(text) => quote_pattern(&mut out, text),
+                Part::Tilde => {
+                    let home = self.var("HOME");
+                    quote_pattern(&mut out, &home);
+                }
+                Part::Double(inner) => {
+                    let mut text = String::new();
+                    self.expand_parts(inner, &mut text);
+                    quote_pattern(&mut out, &text);
+                }
+                Part::ProcessSub(source, input) => {
+                    let path = self.process_substitution(source, *input);
+                    quote_pattern(&mut out, &path);
+                }
+                other => {
+                    let mut text = String::new();
+                    self.expand_parts(std::slice::from_ref(other), &mut text);
+                    out.push_str(&text);
+                }
+            }
+        }
+        out
     }
 
     fn expand_text_word(&mut self, word: &Word) -> String {
@@ -2446,7 +2528,10 @@ impl Shell {
                 Part::CmdSub(source) => out.push_str(&self.command_substitution(source)),
                 Part::Arithmetic(source) => match arith::evaluate(source, self) {
                     Ok(value) => out.push_str(&value.to_string()),
-                    Err(message) => eprintln!("sharky: arithmetic: {message}"),
+                    Err(message) => {
+                        eprintln!("sharky: arithmetic: {message}");
+                        self.expansion_error = true;
+                    }
                 },
                 Part::Tilde => out.push_str(&self.var("HOME")),
             }
@@ -2636,6 +2721,13 @@ impl Shell {
     }
 
     fn parameter_elements(&mut self, parameter: &Parameter) -> Option<Vec<String>> {
+        if parameter.index.is_none()
+            && parameter.operator.is_none()
+            && matches!(parameter.name.as_str(), "@" | "*")
+        {
+            return Some(self.positional.clone());
+        }
+
         match parameter.operator {
             Some(ParamOp::Keys) => {
                 if let Some(assoc) = self.assoc.get(&parameter.name) {
@@ -2727,26 +2819,59 @@ impl Shell {
             return None;
         }
 
-        let mut values = if let Some(assoc) = self.assoc.get(&parameter.name) {
-            assoc.values().cloned().collect::<Vec<_>>()
-        } else {
-            self.arrays
-                .get(&parameter.name)
-                .map(|values| values.iter().flatten().cloned().collect())
-                .unwrap_or_default()
-        };
-
         if parameter.operator == Some(ParamOp::Substring) {
             let argument = parameter.argument.as_deref().unwrap_or("");
             let Some((offset, length)) = self.slice_parts(argument) else {
                 return Some(Vec::new());
             };
+            if let Some(array) = self.arrays.get(&parameter.name) {
+                let entries: Vec<(i64, String)> = array
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, value)| {
+                        value.as_ref().map(|value| (index as i64, value.clone()))
+                    })
+                    .collect();
+                let max_index = array.len().saturating_sub(1) as i64;
+                let start = if offset < 0 {
+                    let start = max_index + 1 + offset;
+                    if start < 0 {
+                        return Some(Vec::new());
+                    }
+                    start
+                } else {
+                    offset
+                };
+                let selected: Vec<String> = entries
+                    .into_iter()
+                    .filter(|(index, _)| *index >= start)
+                    .map(|(_, value)| value)
+                    .collect();
+                return Some(apply_count(selected, length));
+            }
+            let mut values = self
+                .assoc
+                .get(&parameter.name)
+                .map(|assoc| assoc.values().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
             let Some((start, end)) = bound_slice(values.len(), offset, length) else {
                 return Some(Vec::new());
             };
             values = values[start..end].to_vec();
+            return Some(values);
         }
-        Some(values)
+
+        Some(
+            self.arrays
+                .get(&parameter.name)
+                .map(|values| values.iter().flatten().cloned().collect())
+                .or_else(|| {
+                    self.assoc
+                        .get(&parameter.name)
+                        .map(|assoc| assoc.values().cloned().collect())
+                })
+                .unwrap_or_default(),
+        )
     }
 
     fn arithmetic_index(&mut self, text: &str) -> Option<i64> {
@@ -2758,6 +2883,7 @@ impl Shell {
             Ok(value) => Some(value),
             Err(message) => {
                 eprintln!("sharky: arithmetic: {message}");
+                self.expansion_error = true;
                 None
             }
         }
@@ -2795,6 +2921,7 @@ impl Shell {
         // SAFETY: the child only dup2s pipe ends, runs shell code and exits.
         match unsafe { fork() } {
             Ok(ForkResult::Child) => {
+                reset_child_signals();
                 let keep = if input {
                     write.as_raw_fd()
                 } else {
@@ -2839,7 +2966,6 @@ impl Shell {
     }
 
     fn fifo_substitution(&mut self, source: &str, input: bool) -> String {
-        use nix::fcntl::open;
         use nix::sys::stat::Mode;
         use nix::unistd::mkfifo;
 
@@ -2864,14 +2990,10 @@ impl Shell {
         // SAFETY: the child opens the FIFO, runs shell code and exits.
         match unsafe { fork() } {
             Ok(ForkResult::Child) => {
-                let flags = if input {
-                    OFlag::O_WRONLY
-                } else {
-                    OFlag::O_RDONLY
-                };
-                let fd = match open(&path, flags, Mode::empty()) {
-                    Ok(fd) => fd,
-                    Err(_) => unsafe { _exit(1) },
+                reset_child_signals();
+                let fd = match open_fifo_end(&path, input) {
+                    Some(fd) => fd,
+                    None => unsafe { _exit(1) },
                 };
                 let target = if input { 1 } else { 0 };
                 unsafe {
@@ -2880,6 +3002,11 @@ impl Shell {
                         let _ = nix::libc::close(fd);
                     }
                 }
+                if input {
+                    // The consumer already opened its end; the name is no
+                    // longer needed and must not outlive this process.
+                    let _ = std::fs::remove_file(&path);
+                }
                 let status = match self.eval(source) {
                     Ok(code) => code,
                     Err(err) => {
@@ -2887,6 +3014,7 @@ impl Shell {
                         2
                     }
                 };
+                let _ = std::fs::remove_file(&path);
                 unsafe { _exit(status) }
             }
             Ok(ForkResult::Parent { child }) => {
@@ -2909,6 +3037,10 @@ impl Shell {
 
     pub fn reap_substitutions_idle(&mut self) {
         self.reap_substitutions();
+    }
+
+    pub fn has_substitutions(&self) -> bool {
+        !self.substitution_pids.is_empty()
     }
 
     pub fn close_substitutions_from(&mut self, start: usize) {
@@ -2985,11 +3117,140 @@ impl Shell {
     }
 }
 
+fn cleanup_fifos_for(pids: &[Pid]) {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(rest) = name.strip_prefix("sharky-psub-") else {
+            continue;
+        };
+        let Some(pid) = rest.split('-').next().and_then(|text| text.parse::<i32>().ok()) else {
+            continue;
+        };
+        if pids.iter().any(|candidate| candidate.as_raw() == pid) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+fn cleanup_stale_fifos() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(rest) = name.strip_prefix("sharky-psub-") else {
+            continue;
+        };
+        let Some(pid) = rest.split('-').next().and_then(|text| text.parse::<i32>().ok()) else {
+            continue;
+        };
+        // SAFETY: signal 0 only probes whether the process exists.
+        let alive = unsafe { nix::libc::kill(pid, 0) } == 0;
+        if !alive
+            && std::io::Error::last_os_error().raw_os_error() == Some(nix::libc::ESRCH)
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+fn open_fifo_end(path: &Path, write: bool) -> Option<std::os::fd::OwnedFd> {
+    use nix::fcntl::{FcntlArg, OFlag, fcntl, open};
+    use nix::sys::stat::Mode;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    if write {
+        loop {
+            match open(path, OFlag::O_WRONLY | OFlag::O_NONBLOCK, Mode::empty()) {
+                Ok(fd) => {
+                    let _ = fcntl(&fd, FcntlArg::F_SETFL(OFlag::empty()));
+                    return Some(fd);
+                }
+                Err(nix::errno::Errno::ENXIO) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(_) => return None,
+            }
+        }
+    }
+
+    let fd = open(path, OFlag::O_RDONLY | OFlag::O_NONBLOCK, Mode::empty()).ok()?;
+    loop {
+        let mut pollfd = nix::libc::pollfd {
+            fd: fd.as_raw_fd(),
+            events: nix::libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd for a FIFO opened above.
+        let ready = unsafe { nix::libc::poll(&mut pollfd, 1, 20) };
+        if ready > 0 && pollfd.revents & nix::libc::POLLIN != 0 {
+            let _ = fcntl(&fd, FcntlArg::F_SETFL(OFlag::empty()));
+            return Some(fd);
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+    }
+}
+
 fn joins_elements(parameter: &Parameter) -> bool {
     parameter.index.as_deref() == Some("*")
+        || (parameter.name == "*" && parameter.index.is_none() && parameter.operator.is_none())
         || (parameter.name == "*" && parameter.operator == Some(ParamOp::Substring))
         || (parameter.operator == Some(ParamOp::Names)
             && parameter.argument.as_deref() == Some("*"))
+}
+
+fn apply_count(values: Vec<String>, length: Option<i64>) -> Vec<String> {
+    match length {
+        Some(length) if length >= 0 => values.into_iter().take(length as usize).collect(),
+        Some(length) => {
+            let keep = values.len().saturating_sub((-length) as usize);
+            values.into_iter().take(keep).collect()
+        }
+        None => values,
+    }
+}
+
+fn unquote_subscript(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(char) = chars.next() {
+        match char {
+            '\\' => {
+                if let Some(next) = chars.next() {
+                    out.push(next);
+                }
+            }
+            '\'' => {
+                for next in chars.by_ref() {
+                    if next == '\'' {
+                        break;
+                    }
+                    out.push(next);
+                }
+            }
+            '"' => {
+                while let Some(next) = chars.next() {
+                    if next == '"' {
+                        break;
+                    }
+                    if next == '\\'
+                        && let Some(escaped) = chars.next()
+                    {
+                        out.push(escaped);
+                        continue;
+                    }
+                    out.push(next);
+                }
+            }
+            char => out.push(char),
+        }
+    }
+    out
 }
 
 fn bound_slice(len: usize, offset: i64, length: Option<i64>) -> Option<(usize, usize)> {
@@ -3080,24 +3341,36 @@ fn split_extglob(pattern: &[char]) -> Option<ExtGlob<'_>> {
     let mut depth = 0usize;
     let mut end = None;
     let mut quote = None;
-    for (index, char) in pattern.iter().enumerate().skip(1) {
+    let mut index = 1;
+    while index < pattern.len() {
+        let char = &pattern[index];
         if let Some(delimiter) = quote {
             if *char == delimiter {
                 quote = None;
             }
+            index += 1;
             continue;
         }
         match char {
-            '\'' | '"' => quote = Some(*char),
-            '(' => depth += 1,
+            '\u{1}' => index += 2,
+            '\\' => index += 2,
+            '\'' | '"' => {
+                quote = Some(*char);
+                index += 1;
+            }
+            '(' => {
+                depth += 1;
+                index += 1;
+            }
             ')' => {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
                     end = Some(index);
                     break;
                 }
+                index += 1;
             }
-            _ => {}
+            _ => index += 1,
         }
     }
     let end = end?;
@@ -3106,29 +3379,48 @@ fn split_extglob(pattern: &[char]) -> Option<ExtGlob<'_>> {
     let mut current = Vec::new();
     let mut depth = 0usize;
     let mut quote = None;
-    for char in &pattern[2..end] {
+    let mut index = 2;
+    while index < end {
+        let char = pattern[index];
         if let Some(delimiter) = quote {
-            current.push(*char);
-            if *char == delimiter {
+            current.push(char);
+            index += 1;
+            if char == delimiter {
                 quote = None;
             }
             continue;
         }
         match char {
+            '\u{1}' | '\\' => {
+                current.push(char);
+                if let Some(next) = pattern.get(index + 1) {
+                    current.push(*next);
+                }
+                index += 2;
+            }
             '\'' | '"' => {
-                quote = Some(*char);
-                current.push(*char);
+                quote = Some(char);
+                current.push(char);
+                index += 1;
             }
             '(' => {
                 depth += 1;
-                current.push(*char);
+                current.push(char);
+                index += 1;
             }
             ')' => {
                 depth = depth.saturating_sub(1);
-                current.push(*char);
+                current.push(char);
+                index += 1;
             }
-            '|' if depth == 0 => alternatives.push(std::mem::take(&mut current)),
-            _ => current.push(*char),
+            '|' if depth == 0 => {
+                alternatives.push(std::mem::take(&mut current));
+                index += 1;
+            }
+            _ => {
+                current.push(char);
+                index += 1;
+            }
         }
     }
     alternatives.push(current);
@@ -3139,7 +3431,7 @@ fn split_extglob(pattern: &[char]) -> Option<ExtGlob<'_>> {
 fn ext_matches(operator: char, alternatives: &[Vec<char>], text: &[char]) -> bool {
     let exact = |text: &[char]| {
         alternatives.iter().any(|alt| {
-            let alt = strip_pattern_quotes(alt);
+            let alt = normalize_pattern(alt);
             glob_chars(&alt, text)
         })
     };
@@ -3151,7 +3443,7 @@ fn ext_matches(operator: char, alternatives: &[Vec<char>], text: &[char]) -> boo
             ext_repeat(alternatives, text)
                 && (!text.is_empty()
                     || alternatives.iter().any(|alt| {
-                        let alt = strip_pattern_quotes(alt);
+                        let alt = normalize_pattern(alt);
                         glob_chars(&alt, &[])
                     }))
         }
@@ -3160,12 +3452,41 @@ fn ext_matches(operator: char, alternatives: &[Vec<char>], text: &[char]) -> boo
     }
 }
 
-fn strip_pattern_quotes(pattern: &[char]) -> Vec<char> {
-    pattern
-        .iter()
-        .copied()
-        .filter(|char| *char != '\'' && *char != '"')
-        .collect()
+fn quote_pattern(out: &mut String, text: &str) {
+    for char in text.chars() {
+        out.push('\u{1}');
+        out.push(char);
+    }
+}
+
+fn normalize_pattern(pattern: &[char]) -> Vec<char> {
+    let mut out = Vec::new();
+    let mut quote = None;
+    let mut escaped = false;
+    for &char in pattern {
+        if escaped {
+            out.push('\u{1}');
+            out.push(char);
+            escaped = false;
+            continue;
+        }
+        match quote {
+            Some(delimiter) => {
+                if char == delimiter {
+                    quote = None;
+                } else {
+                    out.push('\u{1}');
+                    out.push(char);
+                }
+            }
+            None => match char {
+                '\\' => escaped = true,
+                '\'' | '"' => quote = Some(char),
+                _ => out.push(char),
+            },
+        }
+    }
+    out
 }
 
 fn ext_repeat(alternatives: &[Vec<char>], text: &[char]) -> bool {
@@ -3177,7 +3498,7 @@ fn ext_repeat(alternatives: &[Vec<char>], text: &[char]) -> bool {
                 && alternatives
                     .iter()
                     .any(|alt| {
-                        let alt = strip_pattern_quotes(alt);
+                        let alt = normalize_pattern(alt);
                         glob_chars(&alt, &text[start..end])
                     })
             {
@@ -3301,6 +3622,7 @@ fn reset_child_signals() {
         let _ = signal(Signal::SIGTSTP, SigHandler::SigDfl);
         let _ = signal(Signal::SIGTTOU, SigHandler::SigDfl);
         let _ = signal(Signal::SIGTTIN, SigHandler::SigDfl);
+        let _ = signal(Signal::SIGPIPE, SigHandler::SigDfl);
     }
 }
 
@@ -3591,6 +3913,9 @@ impl Fields {
 
     fn field_quoted_multi(&mut self, values: &[String], join: bool) {
         if values.is_empty() {
+            if join {
+                self.started = true;
+            }
             return;
         }
         if join {
@@ -3625,7 +3950,14 @@ impl Fields {
         }
     }
 
+    fn touch(&mut self) {
+        self.started = true;
+    }
+
     fn flush(&mut self) {
+        if !self.started {
+            return;
+        }
         self.done
             .push((std::mem::take(&mut self.current), self.glob));
         self.started = false;
@@ -3878,6 +4210,12 @@ fn glob_chars(pattern: &[char], text: &[char]) -> bool {
     };
 
     match first {
+        '\u{1}' => {
+            let Some(&literal) = pattern.get(1) else {
+                return false;
+            };
+            !text.is_empty() && literal == text[0] && glob_chars(&pattern[2..], &text[1..])
+        }
         '*' => {
             let mut index = 0;
             loop {

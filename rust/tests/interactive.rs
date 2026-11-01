@@ -85,10 +85,10 @@ fn interactive_shell_keeps_running_after_a_failed_command() {
     let _ = writer.write_all(b"nosuchcommand_here\r");
     read_until(fd, "not found", Duration::from_secs(5));
 
-    let _ = writer.write_all(b"printf 'AFTER-FAIL'\r");
-    let seen = read_until(fd, "AFTER-FAIL", Duration::from_secs(5));
+    let _ = writer.write_all(b"printf 'AFTER-%s' 99\r");
+    let seen = read_until(fd, "AFTER-99", Duration::from_secs(5));
     assert!(
-        seen.contains("AFTER-FAIL"),
+        seen.contains("AFTER-99"),
         "shell died after a failure: {seen:?}"
     );
 
@@ -733,8 +733,8 @@ fn history_expansion_respects_quotes_and_reports_missing_events() {
 
     let out = session.run("!doesnotexist");
     assert!(out.contains("event not found"), "missing error: {out:?}");
-    let out = session.run("echo $?");
-    assert!(out.contains('1'), "missing event status: {out:?}");
+    let out = session.run("printf 'STATUS-%s' \"$?\"");
+    assert!(out.contains("STATUS-1"), "missing event status: {out:?}");
 
     session.run("set +H");
     let out = session.run("echo !!");
@@ -1473,6 +1473,152 @@ fn completion_appends_a_slash_to_directories() {
     );
     session.finish();
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn completion_escapes_path_executables() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut session = history_session();
+    let dir = completion_dir("inject");
+    let marker = dir.join("pwned");
+    let name = "zz;touch pwned";
+    let path = dir.join(name);
+    std::fs::write(&path, "#!/bin/sh\nprintf SAFE\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    session.run(&format!("cd {}", dir.display()));
+    session.run(&format!("PATH={}", dir.display()));
+    let _ = session.writer.write_all(b"zz");
+    let _ = session.writer.write_all(b"\t");
+    let _ = session.writer.write_all(b"\r");
+    let out = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    assert!(out.contains("SAFE"), "escaped command did not run: {out:?}");
+    assert!(
+        !marker.exists(),
+        "command completion injected shell code: {out:?}"
+    );
+    session.finish();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn completion_offers_exec_without_a_path() {
+    let mut session = history_session();
+    session.run("PATH=/nonexistent");
+    let _ = session.writer.write_all(b"ex");
+    let _ = session.writer.write_all(b"\t");
+    let seen = read_until(
+        session.master.as_raw_fd(),
+        "exec",
+        Duration::from_secs(5),
+    );
+    assert!(seen.contains("exec"), "exec missing from completion: {seen:?}");
+    let _ = session.writer.write_all(b"\x03");
+    let _ = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    session.finish();
+}
+
+#[test]
+fn paste_content_ending_in_escape_keeps_the_end_marker() {
+    let mut session = history_session();
+    let _ = session.writer.write_all(b"\x1b[200~echo END\x1b\x1b[201~");
+    std::thread::sleep(Duration::from_millis(60));
+    let _ = session.writer.write_all(b"\r");
+    let out = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    assert!(out.contains("END"), "paste never finished: {out:?}");
+    session.finish();
+}
+
+#[test]
+fn completion_menu_closes_on_resize() {
+    let dir = completion_dir("resize");
+    for index in 0..4 {
+        std::fs::write(dir.join(format!("aa{index}.txt")), "X").unwrap();
+    }
+    let mut session = history_session();
+    session.run(&format!("cd {}", dir.display()));
+    let _ = session.writer.write_all(b"cat aa\t");
+    let seen = read_until(
+        session.master.as_raw_fd(),
+        "aa0.txt",
+        Duration::from_secs(5),
+    );
+    assert!(seen.contains("aa0.txt"), "menu did not open: {seen:?}");
+
+    set_terminal_width(session.master.as_raw_fd(), 10);
+    let _ = session.writer.write_all(b"\t");
+    let seen = read_until(
+        session.master.as_raw_fd(),
+        "aa0.txt",
+        Duration::from_millis(500),
+    );
+    assert!(
+        !seen.contains("aa0.txt"),
+        "menu survived the resize: {seen:?}"
+    );
+    let _ = session.writer.write_all(b"\x03");
+    let _ = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    session.finish();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn idle_reaps_finished_substitutions() {
+    let mut session = history_session();
+    session.run("true <(sleep 0.1)");
+    std::thread::sleep(Duration::from_millis(900));
+    let shell = session.child.id();
+    let children = std::fs::read_to_string(format!("/proc/{shell}/task/{shell}/children"))
+        .unwrap_or_default();
+    for pid in children.split_whitespace() {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        let state = stat
+            .rsplit(')')
+            .next()
+            .unwrap_or("")
+            .split_whitespace()
+            .next()
+            .unwrap_or("");
+        assert_ne!(state, "Z", "child {pid} is still a zombie while idle");
+    }
+    session.finish();
+}
+
+#[test]
+fn sigterm_in_fuzzy_restores_the_screen() {
+    let mut session = history_session();
+    let _ = session.writer.write_all(b"\x14");
+    let seen = read_until(session.master.as_raw_fd(), "fuzzy>", Duration::from_secs(5));
+    assert!(seen.contains("fuzzy>"), "pager did not open: {seen:?}");
+    let pid = nix::unistd::Pid::from_raw(session.child.id() as i32);
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM).expect("signal");
+    let seen = read_until(
+        session.master.as_raw_fd(),
+        "\x1b[?1049l",
+        Duration::from_secs(5),
+    );
+    assert!(
+        seen.contains("\x1b[?1049l"),
+        "SIGTERM left the alternate screen: {seen:?}"
+    );
+    let _ = session.child.wait();
+    std::fs::remove_dir_all(&session.data).ok();
 }
 
 fn decode_url(text: &str) -> String {

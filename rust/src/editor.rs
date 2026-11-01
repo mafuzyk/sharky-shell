@@ -50,6 +50,9 @@ impl Editor {
         let mut last_row = prompt_width / term::width().max(1);
 
         loop {
+            if menu.is_some() && term::width() < 20 {
+                menu = None;
+            }
             let suggestion = if vi_normal {
                 None
             } else {
@@ -75,7 +78,17 @@ impl Editor {
                 last_row,
             )?;
 
-            let key = term::read_key()?;
+            let key = if shell.has_substitutions() {
+                match term::read_key_timeout(200)? {
+                    Some(key) => key,
+                    None => {
+                        shell.reap_substitutions_idle();
+                        continue;
+                    }
+                }
+            } else {
+                term::read_key()?
+            };
 
             if key == Key::PasteStart {
                 let bytes = term::read_paste()?;
@@ -224,9 +237,9 @@ impl Editor {
                         continue;
                     }
                     Outcome::FuzzyFiles => {
-                        term::write_stdout("\x1b[?1049h")?;
+                        term::enter_alternate_screen()?;
                         let selected = fuzzy_files(shell);
-                        term::write_stdout("\x1b[?1049l")?;
+                        term::leave_alternate_screen()?;
                         if let Some(path) = selected? {
                             push_undo(&mut undo, &buffer, cursor);
                             insert_text(&mut buffer, &mut cursor, &escape_completion(&path));
@@ -883,12 +896,13 @@ fn vi_command(
         if *cursor < buffer.len() {
             push_undo(undo, buffer, *cursor);
             let times = (*count).max(1);
-            for _ in 0..times {
-                if *cursor < buffer.len() {
-                    buffer[*cursor] = char;
-                    *cursor += 1;
+            let start = *cursor;
+            for offset in 0..times {
+                if start + offset < buffer.len() {
+                    buffer[start + offset] = char;
                 }
             }
+            *cursor = (start + times - 1).min(buffer.len() - 1);
         }
         *replace = false;
         *count = 0;
@@ -1201,18 +1215,28 @@ fn position(buffer: &[char], index: usize, columns: usize, prompt_width: usize) 
     let mut column = 0usize;
     let mut pending = false;
 
+    let advance = |width: usize, row: &mut usize, column: &mut usize, pending: &mut bool| {
+        if width == 0 {
+            return;
+        }
+        if *pending {
+            *row += 1;
+            *column = 0;
+            *pending = false;
+        }
+        if *column + width > columns {
+            *row += 1;
+            *column = 0;
+        }
+        *column += width;
+        if *column >= columns {
+            *column = columns - 1;
+            *pending = true;
+        }
+    };
+
     for _ in 0..prompt_width {
-        if pending {
-            row += 1;
-            column = 0;
-            pending = false;
-        }
-        if column + 1 >= columns {
-            column = columns - 1;
-            pending = true;
-        } else {
-            column += 1;
-        }
+        advance(1, &mut row, &mut column, &mut pending);
     }
 
     for char in buffer.iter().take(index) {
@@ -1228,19 +1252,7 @@ fn position(buffer: &[char], index: usize, columns: usize, prompt_width: usize) 
         } else {
             char_width(*char)
         };
-        for _ in 0..width {
-            if pending {
-                row += 1;
-                column = 0;
-                pending = false;
-            }
-            if column + 1 >= columns {
-                column = columns - 1;
-                pending = true;
-            } else {
-                column += 1;
-            }
-        }
+        advance(width, &mut row, &mut column, &mut pending);
     }
 
     (row, column)
@@ -1284,10 +1296,36 @@ fn line_end(buffer: &[char], cursor: usize) -> usize {
         .unwrap_or(buffer.len())
 }
 
+fn display_column(buffer: &[char], start: usize, end: usize) -> usize {
+    let mut column = 0;
+    for char in &buffer[start.min(buffer.len())..end.min(buffer.len())] {
+        if *char == '\t' {
+            column = (column / 8 + 1) * 8;
+        } else {
+            column += char_width(*char);
+        }
+    }
+    column
+}
+
+fn index_at_column(buffer: &[char], start: usize, end: usize, target: usize) -> usize {
+    let mut column = 0;
+    let mut index = start;
+    while index < end {
+        let width = char_width(buffer[index]);
+        if column + width > target {
+            break;
+        }
+        column += width;
+        index += 1;
+    }
+    index
+}
+
 fn move_line(buffer: &[char], cursor: usize, up: bool) -> usize {
     let start = line_start(buffer, cursor);
     let end = line_end(buffer, cursor);
-    let column = cursor.saturating_sub(start);
+    let column = display_column(buffer, start, cursor);
 
     if up {
         if start == 0 {
@@ -1295,14 +1333,14 @@ fn move_line(buffer: &[char], cursor: usize, up: bool) -> usize {
         }
         let previous_end = start - 1;
         let previous_start = line_start(buffer, previous_end);
-        previous_start + column.min(previous_end - previous_start)
+        index_at_column(buffer, previous_start, previous_end, column)
     } else {
         if end >= buffer.len() {
             return cursor;
         }
         let next_start = end + 1;
         let next_end = line_end(buffer, next_start);
-        next_start + column.min(next_end - next_start)
+        index_at_column(buffer, next_start, next_end, column)
     }
 }
 fn find_history(entries: &[String], query: &str, offset: usize) -> Option<String> {
@@ -1607,6 +1645,7 @@ fn complete_menu(buffer: &mut Vec<char>, cursor: &mut usize, shell: &Shell) -> O
         escape = true;
         file_candidates(&word, shell)
     } else {
+        escape = true;
         command_candidates(&word, shell)
     };
 
@@ -1663,6 +1702,18 @@ fn complete_menu(buffer: &mut Vec<char>, cursor: &mut usize, shell: &Shell) -> O
 }
 
 fn escape_completion(text: &str) -> String {
+    if text.contains('\n') || text.contains('\r') {
+        let mut out = String::from("'");
+        for char in text.chars() {
+            if char == '\'' {
+                out.push_str("'\\''");
+            } else {
+                out.push(char);
+            }
+        }
+        out.push('\'');
+        return out;
+    }
     let mut out = String::with_capacity(text.len());
     for (index, char) in text.chars().enumerate() {
         if index == 0 && char == '~' {
@@ -1955,6 +2006,18 @@ mod tests {
         assert_eq!(position(&wide, 4, 4, 0), (0, 3));
         assert_eq!(position(&wide, 5, 4, 0), (1, 1));
         assert_eq!(position(&wide, 8, 4, 0), (1, 3));
+
+        let glyph = buffer("界");
+        assert_eq!(position(&glyph, 1, 10, 4), (0, 6));
+
+        let combining = buffer("e\u{301}");
+        assert_eq!(position(&combining, 2, 10, 4), (0, 5));
+
+        let tab = buffer("\t");
+        assert_eq!(position(&tab, 1, 20, 0), (0, 8));
+
+        let edge = buffer("abcdefghi界");
+        assert_eq!(position(&edge, edge.len(), 10, 0), (1, 2));
     }
 
     #[test]
@@ -1973,6 +2036,9 @@ mod tests {
         assert_eq!(move_line(&text, 3, false), 7);
         assert_eq!(move_line(&text, 1, true), 1);
         assert_eq!(move_line(&text, text.len(), false), text.len());
+
+        let wide = buffer("界xyz\nabc");
+        assert_eq!(move_line(&wide, wide.len(), true), 2);
     }
 }
 

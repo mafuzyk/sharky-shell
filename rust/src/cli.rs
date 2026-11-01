@@ -218,6 +218,7 @@ fn run_json_command(shell: &mut Shell, source: &str, login: bool) -> i32 {
             if login {
                 crate::profiles::login(shell);
             }
+            shell.attach_json_exec(delta_file.as_raw_fd(), before.clone());
             let status = shell.run(source);
             write_delta(&delta_file, shell, &before);
             let _ = std::io::stdout().flush();
@@ -296,6 +297,20 @@ fn write_delta(file: &std::fs::File, shell: &Shell, before: &[(String, String)])
     let _ = file.seek(SeekFrom::Start(0));
     let _ = writeln!(file, "{}", json_string(&shell.cwd.to_string_lossy()));
     let _ = writeln!(file, "{}", env_delta(shell, before));
+}
+
+pub(crate) fn write_delta_fd(fd: std::os::fd::RawFd, shell: &Shell, before: &[(String, String)]) {
+    let text = format!(
+        "{}\n{}\n",
+        json_string(&shell.cwd.to_string_lossy()),
+        env_delta(shell, before)
+    );
+    // SAFETY: the descriptor belongs to the JSON capture child and points at
+    // the private delta file; a failed write only loses the delta fields.
+    unsafe {
+        nix::libc::lseek(fd, 0, nix::libc::SEEK_SET);
+        let _ = nix::libc::write(fd, text.as_ptr() as *const _, text.len());
+    }
 }
 
 fn read_delta(file: &std::fs::File) -> Option<(String, String)> {

@@ -29,6 +29,7 @@ pub struct RawMode {
 }
 
 static RAW_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static ALTERNATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static mut SAVED_TERMIOS: Option<libc::termios> = None;
 
 pub extern "C" fn restore_terminal_and_exit(signal: libc::c_int) {
@@ -42,6 +43,10 @@ pub extern "C" fn restore_terminal_and_exit(signal: libc::c_int) {
         }
         let clear = b"\x1b[?2004l";
         libc::write(1, clear.as_ptr() as *const _, clear.len());
+        if ALTERNATE.load(std::sync::atomic::Ordering::Relaxed) {
+            let leave = b"\x1b[?1049l";
+            libc::write(1, leave.as_ptr() as *const _, leave.len());
+        }
         libc::_exit(128 + signal);
     }
 }
@@ -98,39 +103,59 @@ pub fn width() -> usize {
 }
 
 pub fn read_paste() -> io::Result<Vec<u8>> {
+    const MARKER: &[u8] = b"\x1b[201~";
     let mut bytes = Vec::new();
+    let mut matched = 0;
     loop {
         let mut byte = [0u8; 1];
         let count = unsafe { libc::read(0, byte.as_mut_ptr() as *mut _, 1) };
         if count <= 0 {
+            bytes.extend(MARKER[..matched].iter());
             break;
         }
-        if byte[0] != 0x1b {
-            bytes.push(byte[0]);
+        let byte = byte[0];
+        if matched > 0 && byte == MARKER[matched] {
+            matched += 1;
+            if matched == MARKER.len() {
+                break;
+            }
             continue;
         }
-        let mut sequence = vec![0x1b];
-        let mut matched = true;
-        for expected in b"[201~" {
-            match read_byte_with_timeout(20)? {
-                Some(next) if next == *expected => sequence.push(next),
-                Some(next) => {
-                    matched = false;
-                    sequence.push(next);
-                    break;
-                }
-                None => {
-                    matched = false;
-                    break;
-                }
-            }
+        if matched > 0 {
+            bytes.extend(MARKER[..matched].iter());
+            matched = 0;
         }
-        if matched && sequence == b"\x1b[201~" {
-            break;
+        if byte == MARKER[0] {
+            matched = 1;
+        } else {
+            bytes.push(byte);
         }
-        bytes.extend(sequence);
     }
     Ok(bytes)
+}
+
+pub fn enter_alternate_screen() -> io::Result<()> {
+    ALTERNATE.store(true, std::sync::atomic::Ordering::Relaxed);
+    write_stdout("\x1b[?1049h")
+}
+
+pub fn leave_alternate_screen() -> io::Result<()> {
+    ALTERNATE.store(false, std::sync::atomic::Ordering::Relaxed);
+    write_stdout("\x1b[?1049l")
+}
+
+pub fn read_key_timeout(millis: i32) -> io::Result<Option<Key>> {
+    let mut pollfd = libc::pollfd {
+        fd: 0,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one valid pollfd for standard input.
+    let ready = unsafe { libc::poll(&mut pollfd, 1, millis) };
+    if ready <= 0 {
+        return Ok(None);
+    }
+    read_key().map(Some)
 }
 
 pub fn read_key() -> io::Result<Key> {

@@ -11,6 +11,7 @@ const MALFORMED: &[&str] = &[
     "for ((i=0;i<2;i++)); do :; done",
     "for ((i=0)); do :; done",
     "x=abc; printf '%s' \"${x:1:9223372036854775807}\"",
+    "printf $(( ) 1 ))",
     "x=abc; printf '%s' \"${x:1/0}\"",
     "for in a; do :; done",
     "while; do :; done",

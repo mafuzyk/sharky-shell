@@ -415,6 +415,10 @@ impl Lexer {
                     if escaped.starts_with('\0') {
                         while let Some(char) = self.current() {
                             self.pos += 1;
+                            if char == '\\' {
+                                self.pos += 1;
+                                continue;
+                            }
                             if char == '\'' {
                                 return Ok(Part::Single(text));
                             }
@@ -500,9 +504,11 @@ impl Lexer {
         let mut index = self.pos;
         let mut depth = 1;
         let mut state = Quote::Normal;
-        let mut case_depth = 0usize;
-        let mut case_pending = false;
-        let mut pattern = false;
+        let mut cases: Vec<CasePhase> = Vec::new();
+        let mut command_start = true;
+        let mut pattern_depth = 0usize;
+        let mut pattern_group = false;
+        let mut arm_pending = false;
         let mut word = String::new();
 
         while index < self.chars.len() {
@@ -522,63 +528,166 @@ impl Lexer {
                     }
                     _ => index += 1,
                 },
-                Quote::Normal => match char {
-                    '\\' => index += 2,
-                    '\'' => {
-                        flush_case_word(&mut word, &mut case_depth, &mut case_pending, &mut pattern);
-                        state = Quote::Single;
-                        index += 1;
-                    }
-                    '"' => {
-                        flush_case_word(&mut word, &mut case_depth, &mut case_pending, &mut pattern);
-                        state = Quote::Double;
-                        index += 1;
-                    }
-                    '(' => {
-                        flush_case_word(&mut word, &mut case_depth, &mut case_pending, &mut pattern);
-                        if pattern {
-                            pattern = false;
-                        } else {
-                            depth += 1;
-                        }
-                        index += 1;
-                    }
-                    ')' => {
-                        flush_case_word(&mut word, &mut case_depth, &mut case_pending, &mut pattern);
-                        if pattern {
-                            pattern = false;
+                Quote::Normal => {
+                    match char {
+                        '\\' => index += 2,
+                        '\'' => {
+                            flush_scan_word(
+                                &mut word,
+                                &mut cases,
+                                &mut command_start,
+                                &mut pattern_depth,
+                                &mut pattern_group,
+                                &mut arm_pending,
+                            );
+                            if cases.last() == Some(&CasePhase::PatternStart) {
+                                set_pattern(&mut cases, &mut pattern_depth, &mut pattern_group);
+                            }
+                            state = Quote::Single;
                             index += 1;
-                            continue;
                         }
-                        depth -= 1;
-                        if depth == 0 {
-                            let source: String = self.chars[content_start..index].iter().collect();
-                            self.pos = index + 1;
-                            return Ok(Part::ProcessSub(source, input));
+                        '"' => {
+                            flush_scan_word(
+                                &mut word,
+                                &mut cases,
+                                &mut command_start,
+                                &mut pattern_depth,
+                                &mut pattern_group,
+                                &mut arm_pending,
+                            );
+                            if cases.last() == Some(&CasePhase::PatternStart) {
+                                set_pattern(&mut cases, &mut pattern_depth, &mut pattern_group);
+                            }
+                            state = Quote::Double;
+                            index += 1;
                         }
-                        index += 1;
-                    }
-                    ';' => {
-                        flush_case_word(&mut word, &mut case_depth, &mut case_pending, &mut pattern);
-                        if self.chars.get(index + 1) == Some(&';') {
-                            pattern = true;
-                            index += 2;
-                            if self.chars.get(index) == Some(&'&') {
+                        '(' => {
+                            flush_scan_word(
+                                &mut word,
+                                &mut cases,
+                                &mut command_start,
+                                &mut pattern_depth,
+                                &mut pattern_group,
+                                &mut arm_pending,
+                            );
+                            match cases.last().copied() {
+                                Some(CasePhase::PatternStart) => {
+                                    let extglob = index > 0
+                                        && matches!(
+                                            self.chars[index - 1],
+                                            '?' | '*' | '+' | '@' | '!'
+                                        );
+                                    set_pattern(
+                                        &mut cases,
+                                        &mut pattern_depth,
+                                        &mut pattern_group,
+                                    );
+                                    pattern_depth = 1;
+                                    pattern_group = !extglob;
+                                }
+                                Some(CasePhase::Pattern) => pattern_depth += 1,
+                                _ => depth += 1,
+                            }
+                            index += 1;
+                        }
+                        ')' => {
+                            flush_scan_word(
+                                &mut word,
+                                &mut cases,
+                                &mut command_start,
+                                &mut pattern_depth,
+                                &mut pattern_group,
+                                &mut arm_pending,
+                            );
+                            if cases.last() == Some(&CasePhase::Pattern) {
+                                if pattern_depth > 0 {
+                                    pattern_depth -= 1;
+                                    if pattern_depth == 0 && pattern_group {
+                                        set_body(&mut cases);
+                                        pattern_group = false;
+                                    }
+                                } else {
+                                    set_body(&mut cases);
+                                }
+                                index += 1;
+                                continue;
+                            }
+                            depth -= 1;
+                            if depth == 0 {
+                                let source: String =
+                                    self.chars[content_start..index].iter().collect();
+                                self.pos = index + 1;
+                                return Ok(Part::ProcessSub(source, input));
+                            }
+                            index += 1;
+                        }
+                        ';' => {
+                            flush_scan_word(
+                                &mut word,
+                                &mut cases,
+                                &mut command_start,
+                                &mut pattern_depth,
+                                &mut pattern_group,
+                                &mut arm_pending,
+                            );
+                            if self.chars.get(index + 1) == Some(&';') {
+                                index += 2;
+                                if self.chars.get(index) == Some(&'&') {
+                                    index += 1;
+                                }
+                                set_pattern_start(&mut cases);
+                                arm_pending = true;
+                                command_start = true;
+                            } else if self.chars.get(index + 1) == Some(&'&') {
+                                index += 2;
+                                set_pattern_start(&mut cases);
+                                arm_pending = true;
+                                command_start = true;
+                            } else {
+                                command_start = true;
                                 index += 1;
                             }
-                        } else {
+                        }
+                        '&' | '|' | '\n' | '{' => {
+                            flush_scan_word(
+                                &mut word,
+                                &mut cases,
+                                &mut command_start,
+                                &mut pattern_depth,
+                                &mut pattern_group,
+                                &mut arm_pending,
+                            );
+                            command_start = true;
+                            index += 1;
+                        }
+                        char if char.is_alphanumeric() || char == '_' => {
+                            word.push(char);
+                            index += 1;
+                        }
+                        char if char.is_whitespace() => {
+                            flush_scan_word(
+                                &mut word,
+                                &mut cases,
+                                &mut command_start,
+                                &mut pattern_depth,
+                                &mut pattern_group,
+                                &mut arm_pending,
+                            );
+                            index += 1;
+                        }
+                        _ => {
+                            flush_scan_word(
+                                &mut word,
+                                &mut cases,
+                                &mut command_start,
+                                &mut pattern_depth,
+                                &mut pattern_group,
+                                &mut arm_pending,
+                            );
                             index += 1;
                         }
                     }
-                    char if char.is_alphanumeric() || char == '_' => {
-                        word.push(char);
-                        index += 1;
-                    }
-                    _ => {
-                        flush_case_word(&mut word, &mut case_depth, &mut case_pending, &mut pattern);
-                        index += 1;
-                    }
-                },
+                }
             }
         }
 
@@ -604,6 +713,14 @@ impl Lexer {
                 continue;
             }
             match char {
+                '\\' => {
+                    text.push(char);
+                    self.pos += 1;
+                    if let Some(next) = self.current() {
+                        text.push(next);
+                        self.pos += 1;
+                    }
+                }
                 '\'' | '"' => {
                     quote = Some(char);
                     text.push(char);
@@ -945,6 +1062,9 @@ impl Lexer {
                     self.pos += 2;
                     return Ok(Part::Arithmetic(source.trim().to_string()));
                 }
+                ')' if depth == 0 => {
+                    return Err(LexError::new("unexpected ')' in arithmetic", self.pos, false));
+                }
                 ')' => {
                     depth -= 1;
                     self.pos += 1;
@@ -1257,30 +1377,88 @@ fn is_name_char(char: char) -> bool {
     char.is_ascii_alphanumeric() || char == '_'
 }
 
-fn flush_case_word(
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CasePhase {
+    Subject,
+    PatternStart,
+    Pattern,
+    Body,
+}
+
+fn set_pattern(
+    cases: &mut [CasePhase],
+    pattern_depth: &mut usize,
+    pattern_group: &mut bool,
+) {
+    if let Some(phase) = cases.last_mut() {
+        *phase = CasePhase::Pattern;
+    }
+    *pattern_depth = 0;
+    *pattern_group = false;
+}
+
+fn set_pattern_start(cases: &mut [CasePhase]) {
+    if let Some(phase) = cases.last_mut() {
+        *phase = CasePhase::PatternStart;
+    }
+}
+
+fn set_body(cases: &mut [CasePhase]) {
+    if let Some(phase) = cases.last_mut() {
+        *phase = CasePhase::Body;
+    }
+}
+
+fn flush_scan_word(
     word: &mut String,
-    case_depth: &mut usize,
-    case_pending: &mut bool,
-    pattern: &mut bool,
+    cases: &mut Vec<CasePhase>,
+    command_start: &mut bool,
+    pattern_depth: &mut usize,
+    pattern_group: &mut bool,
+    arm_pending: &mut bool,
 ) {
     if word.is_empty() {
         return;
     }
-    match word.as_str() {
-        "case" => {
-            *case_depth += 1;
-            *case_pending = true;
+    let phase = cases.last().copied();
+    match phase {
+        None => {
+            if *command_start {
+                if word == "case" {
+                    cases.push(CasePhase::Subject);
+                }
+                *command_start = false;
+            }
         }
-        "in" if *case_pending => {
-            *pattern = true;
-            *case_pending = false;
+        Some(CasePhase::Subject) => {
+            if word == "in" {
+                cases.pop();
+                cases.push(CasePhase::PatternStart);
+                *command_start = true;
+                *arm_pending = false;
+            }
         }
-        "esac" => {
-            *case_depth = case_depth.saturating_sub(1);
-            *case_pending = false;
-            *pattern = false;
+        Some(CasePhase::PatternStart) => {
+            if *arm_pending && word == "esac" {
+                cases.pop();
+                *arm_pending = false;
+                *command_start = false;
+            } else {
+                set_pattern(cases, pattern_depth, pattern_group);
+                *arm_pending = false;
+            }
         }
-        _ => {}
+        Some(CasePhase::Pattern) => {}
+        Some(CasePhase::Body) => {
+            if *command_start {
+                if word == "esac" {
+                    cases.pop();
+                } else if word == "case" {
+                    cases.push(CasePhase::Subject);
+                }
+                *command_start = false;
+            }
+        }
     }
     word.clear();
 }

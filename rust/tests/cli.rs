@@ -1254,13 +1254,17 @@ fn parameter_substrings_clamp_and_evaluate_offsets() {
         ("x=abcdef; printf '%s' \"${x:1:2+1}\"", "bcd"),
         ("x=abc; printf '<%s>' \"${x: -4}\"", "<>"),
         ("x=abc; printf '%s' \"${x:1:9223372036854775807}\"", "bc"),
-        ("x=abc; printf '<%s>' \"${x:1/0}\"", "<>"),
         ("a=(one two); printf '<%s>' \"${a[@]: -3}\"", "<>"),
     ];
     for (script, expected) in cases {
         let out = sharky(&["-c", script]);
         assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{script}");
     }
+
+    let out = sharky(&["-c", r#"x=abc; printf '<%s>' "${x:1/0}"; printf AFTER"#]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty(), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("division by zero"));
 }
 
 #[test]
@@ -1350,6 +1354,10 @@ fn ansi_c_nul_truncates_the_string() {
         r#"x=$'abc\0def'; printf '%s|%s' "${#x}" "$x""#,
     ]);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "3|abc");
+
+    let out = sharky(&["-c", r#"printf '%s' $'abc\0\'def'"#]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "abc");
 }
 
 #[test]
@@ -1471,6 +1479,39 @@ fn array_fields_keep_prefixes_and_suffixes() {
 }
 
 #[test]
+fn sparse_array_slices_follow_indexes() {
+    let cases = [
+        (r#"a[2]=two; a[5]=five; printf '<%s>' "${a[@]:2:1}""#, "<two>"),
+        (r#"a[2]=two; a[5]=five; printf '<%s>' "${a[@]:0:1}""#, "<two>"),
+        (r#"a[0]=zero; a[2]=two; a[5]=five; printf '<%s>' "${a[@]:2:2}""#, "<two><five>"),
+        (r#"a[0]=zero; a[2]=two; a[5]=five; printf '<%s>' "${a[@]:3:1}""#, "<five>"),
+        (r#"a[0]=zero; a[2]=two; a[5]=five; printf '<%s>' "${a[@]: -1}""#, "<five>"),
+        (r#"a[0]=zero; a[2]=two; a[5]=five; printf '<%s>' "${a[@]: -6}""#, "<zero><two><five>"),
+        (r#"a=(one two); printf '<%s>' "${a[@]: -3}""#, "<>"),
+        (r#"a=("" x); printf '<%s>' pre${a[@]}post"#, "<pre><xpost>"),
+    ];
+    for (script, expected) in cases {
+        let out = sharky(&["-c", script]);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{script}");
+    }
+}
+
+#[test]
+fn unset_accepts_quoted_associative_subscripts() {
+    let out = sharky(&[
+        "-c",
+        r#"declare -A a; a["two words"]=v; unset 'a["two words"]'; printf '%s' "${#a[@]}""#,
+    ]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "0");
+
+    let out = sharky(&[
+        "-c",
+        r#"declare -A a; a["two words"]=v; k="two words"; unset "a[$k]"; printf '%s' "${#a[@]}""#,
+    ]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "0");
+}
+
+#[test]
 fn unset_leaves_a_hole_in_indexed_arrays() {
     let out = sharky(&[
         "-c",
@@ -1489,6 +1530,42 @@ fn unset_leaves_a_hole_in_indexed_arrays() {
         r#"a=(one two three); unset 'a[1]'; printf '<%s>' "${!a[@]}""#,
     ]);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "<0><2>");
+}
+
+#[test]
+fn empty_quoted_arguments_keep_their_field() {
+    let cases = [
+        (r#"set -- ""; printf '%s' "$#""#, "1"),
+        (r#"set -- "" a ""; printf '<%s>' pre"$@"post"#, "<pre><a><post>"),
+        (r#"set -- ""; printf '<%s>' pre"$@"post"#, "<prepost>"),
+        (r#"set --; printf '<%s>' pre"$@"post"#, "<prepost>"),
+        (r#"a=(); set -- "${a[*]}"; printf '%s' "$#""#, "1"),
+        (r#"a=("" x ""); printf '<%s>' ${a[@]}"#, "<x>"),
+        (r#"a=(); printf '<%s>' "${a[*]}""#, "<>"),
+        (r#"a=(); printf '<%s>' "${a[@]}""#, "<>"),
+    ];
+    for (script, expected) in cases {
+        let out = sharky(&["-c", script]);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{script}");
+    }
+
+    let out = sharky(&["-c", r#"f() { printf '%s' "$#"; }; set --; f "$@""#]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "0");
+}
+
+#[test]
+fn set_e_ignores_a_negated_pipeline_status() {
+    let out = sharky(&["-c", "set -e; ! false; printf ALIVE"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "ALIVE");
+    assert_eq!(out.status.code(), Some(0));
+
+    let out = sharky(&["-c", "set -e; ! true; printf ALIVE"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "ALIVE");
+    assert_eq!(out.status.code(), Some(0));
+
+    let out = sharky(&["-c", "set -e; false; printf AFTER"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty(), "{out:?}");
 }
 
 #[test]
@@ -1539,6 +1616,27 @@ fn indexed_arrays_accept_arithmetic_indexes_and_unset_keys() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "0");
 }
 
+
+#[test]
+fn extglob_keeps_quoted_metacharacters_literal() {
+    let out = sharky(&[
+        "-c",
+        r#"case x in @("*"|y)) printf BAD;; *) printf GOOD;; esac"#,
+    ]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "GOOD");
+
+    let out = sharky(&[
+        "-c",
+        r#"case "*" in @("*"|y)) printf GOOD;; *) printf BAD;; esac"#,
+    ]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "GOOD");
+
+    let out = sharky(&[
+        "-c",
+        r#"case ")" in @(\)|x)) printf HIT;; *) printf MISS;; esac"#,
+    ]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "HIT");
+}
 
 #[test]
 fn extglob_handles_nested_nullable_and_path_components() {
@@ -1631,9 +1729,19 @@ fn arithmetic_assigns_and_increments_variables() {
 
 #[test]
 fn process_substitution_accepts_case_lists() {
-    let out = sharky(&["-c", "cat <(case x in x) printf hi;; esac)"]);
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi");
-    assert_eq!(out.status.code(), Some(0));
+    let cases = [
+        ("cat <(case x in x) printf hi;; esac)", "hi"),
+        ("cat <(case a in @(a|b)) printf hit;; esac)", "hit"),
+        ("cat <(case x in (x) printf hi;; esac)", "hi"),
+        ("cat <(case x in x) case y in y) printf nested;; esac;; esac)", "nested"),
+        (r#"cat <(case x in "x") printf q;; esac)"#, "q"),
+        ("cat <(echo case in)", "case in\n"),
+    ];
+    for (script, expected) in cases {
+        let out = sharky(&["-c", script]);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{script}");
+        assert_eq!(out.status.code(), Some(0), "{script}");
+    }
 }
 
 #[test]
@@ -1663,6 +1771,34 @@ fn process_substitution_fifo_fallback_works() {
         dir = dir.display()
     ));
     assert_eq!(String::from_utf8_lossy(&out.stdout), "hello");
+    std::fs::remove_dir_all(&dir).ok();
+
+    let out = run("true <(printf hi); wait; printf DONE");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "DONE");
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn fifo_process_substitution_leaves_no_files() {
+    let dir = temp_dir();
+    let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args([
+            "-c",
+            "printf x | cat <(printf y); printf hello > in; printf x | tee >(cat > out) < in > /dev/null; wait; cat out",
+        ])
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .env("SHARKY_PROCESS_SUBST_FIFO", "1")
+        .env("TMPDIR", &dir)
+        .current_dir(&dir)
+        .output()
+        .expect("failed to run sharky");
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let leftovers: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("sharky-psub-"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -1819,6 +1955,21 @@ fn json_command_wraps_exec_in_the_envelope() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert_eq!(text.lines().count(), 1, "{text}");
     assert!(text.starts_with('{'), "{text}");
+    assert!(text.contains("\"stdout\":\"hi\\n\""), "{text}");
+}
+
+#[test]
+fn json_exec_publishes_the_state_before_the_process_replacement() {
+    let out = sharky(&[
+        "--json",
+        "-c",
+        "export AUDIT=changed; cd /; exec /bin/echo hi",
+    ]);
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(text.lines().count(), 1, "{text}");
+    assert!(text.contains("\"cwd\":\"/\""), "{text}");
+    assert!(text.contains("\"AUDIT\":\"changed\""), "{text}");
     assert!(text.contains("\"stdout\":\"hi\\n\""), "{text}");
 }
 
@@ -2027,16 +2178,36 @@ fn wake_is_a_builtin_and_profiles_can_register_it() {
 }
 
 #[test]
-fn login_profile_errors_report_file_and_line_and_continue() {
+fn login_profile_errors_report_the_real_line() {
+    let home = login_home("line");
+    std::fs::write(
+        home.join(".config/sharky/profile.sharky"),
+        "X=1\nY=2\n)\nprintf OK\n",
+    )
+    .unwrap();
+
+    let out = sharky_with_home(&home, &["-l", "-c", "printf COMMAND"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "COMMAND");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("profile.sharky:3:"), "{stderr}");
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn login_profile_errors_report_file_and_line_and_stop_the_file() {
     let home = login_home("error");
     std::fs::write(
         home.join(".config/sharky/profile.sharky"),
         ")\nLOGIN_OK=yes\n",
     )
     .unwrap();
+    std::fs::write(home.join(".bash_profile"), "PLAIN=value\n").unwrap();
 
-    let out = sharky_with_home(&home, &["-l", "-c", r#"printf '%s' "$LOGIN_OK""#]);
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "yes");
+    let out = sharky_with_home(
+        &home,
+        &["-l", "-c", r#"printf '%s|%s' "$LOGIN_OK" "$PLAIN""#],
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "|value");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("profile.sharky:1:"), "{stderr}");
     std::fs::remove_dir_all(&home).ok();

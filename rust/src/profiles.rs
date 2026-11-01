@@ -29,16 +29,6 @@ pub fn login(shell: &mut Shell) {
                 String::new()
             };
             eprintln!("sharky: {}{line}: {}", path.display(), err.message);
-            // A broken file still gets its independent lines a chance, so a
-            // single bad construct does not hide the rest of the profile.
-            for (index, line) in source.lines().enumerate() {
-                if line.trim().is_empty() || line.trim_start().starts_with('#') {
-                    continue;
-                }
-                if let Err(err) = shell.eval(line) {
-                    eprintln!("sharky: {}:{}: {}", path.display(), index + 1, err.message);
-                }
-            }
         }
     }
 
