@@ -1488,3 +1488,130 @@ fn time_reports_real_user_and_system_time() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "hi");
     assert!(String::from_utf8_lossy(&out.stderr).contains("real"));
 }
+
+#[test]
+fn json_command_reports_status_streams_and_schema() {
+    let out = sharky(&["--json", "-c", "printf hi"]);
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&out.stdout);
+    for expected in [
+        "\"schema_version\":1",
+        "\"status\":0",
+        "\"stdout\":\"hi\"",
+        "\"stderr\":\"\"",
+        "\"duration_ms\":",
+        "\"env_delta\":{}",
+    ] {
+        assert!(text.contains(expected), "missing {expected} in {text}");
+    }
+    assert!(!text.contains("133;"), "OSC marks in JSON: {text}");
+
+    let out = sharky(&["--json", "-c", "echo err >&2"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("\"stdout\":\"\""), "{text}");
+    assert!(text.contains("\"stderr\":\"err\\n\""), "{text}");
+
+    let out = sharky(&["--json", "-c", "exit 7"]);
+    assert_eq!(out.status.code(), Some(7));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("\"status\":7"));
+
+    let out = sharky(&["--json", "-c", "/bin/printf '\\377'"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains('\u{fffd}'), "non-UTF-8 not replaced: {text}");
+}
+
+#[test]
+fn json_command_reports_environment_delta_and_cwd() {
+    let out = sharky(&["--json", "-c", "export FOO=bar"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("\"FOO\":\"bar\""), "{text}");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args(["--no-config", "--json", "-c", "unset FOO"])
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .env("FOO", "initial")
+        .output()
+        .expect("failed to run sharky");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("\"FOO\":null"), "{text}");
+
+    let out = sharky(&["--json", "-c", "cd /tmp"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("\"cwd\":\"/tmp\""), "{text}");
+}
+
+#[test]
+fn state_json_reports_a_stable_shape() {
+    let out = sharky(&["--no-config", "state", "--json"]);
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&out.stdout);
+    for expected in [
+        "\"schema_version\":1",
+        "\"cwd\":",
+        "\"last_status\":0",
+        "\"pid\":",
+    ] {
+        assert!(text.contains(expected), "missing {expected} in {text}");
+    }
+    assert!(!text.contains("\"env\":"), "env without --env: {text}");
+
+    let out = sharky(&["--no-config", "state", "--json", "--env"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("\"env\":{"), "missing env: {text}");
+    assert!(text.contains("\"PATH\":"), "missing PATH: {text}");
+}
+
+#[test]
+fn cli_validates_agent_options() {
+    let cases = [
+        (vec!["state"], "state requires --json"),
+        (
+            vec!["--env", "-c", "true"],
+            "--env is only supported with state",
+        ),
+        (
+            vec!["--json", "missing-script.sh"],
+            "--json is only supported with -c or state",
+        ),
+        (vec!["--json"], "--json is only supported with -c or state"),
+        (
+            vec!["-c", "true", "missing-script.sh"],
+            "cannot use -c with a script",
+        ),
+        (
+            vec!["state", "--json", "-c", "true"],
+            "cannot use state with -c",
+        ),
+    ];
+    for (args, message) in cases {
+        let out = sharky(&args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(message),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    let out = sharky(&["-i"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("interactive mode requires a terminal")
+    );
+}
+
+#[test]
+fn state_json_does_not_create_history_or_z_files() {
+    let data = std::env::temp_dir().join(format!("sharky-state-{}", std::process::id()));
+    std::fs::create_dir_all(&data).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args(["--no-config", "state", "--json"])
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .env("XDG_DATA_HOME", &data)
+        .output()
+        .expect("failed to run sharky");
+    assert!(out.status.success());
+    assert!(!data.join("sharky/history").exists());
+    assert!(!data.join("sharky/z").exists());
+    std::fs::remove_dir_all(&data).ok();
+}

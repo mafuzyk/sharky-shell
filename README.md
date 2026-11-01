@@ -63,6 +63,18 @@ sharky script.sh argument   # runs a script through sharky's own parser
 echo 'printf hi' | sharky   # reads stdin when there is no terminal
 ```
 
+## Agent interface
+
+```sh
+sharky --json -c 'printf hi'   # one JSON object: status, stdout, stderr, duration, cwd, env_delta
+sharky state --json            # schema, cwd, last_status and pid
+sharky state --json --env      # adds the environment
+sharky -i                      # force the REPL; fails on a non-TTY
+```
+
+`env_delta` contains only variables changed by the command; unset variables are
+`null`. Unlike the Ruby reference it never includes the `?` status pseudo-variable.
+
 ## Shell language
 
 The prompt, `-c` and script files share one grammar:
