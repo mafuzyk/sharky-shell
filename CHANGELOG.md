@@ -4,6 +4,14 @@ All notable changes to sharky are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project uses semantic
 versioning.
 
+## [3.5.4] - 2026-11-02
+
+### Fixed
+
+- The autosuggest ghost never paints itself in the same style as typed text: a
+  theme without `wave suggestion` now gets dim ghost text instead of the
+  terminal's normal foreground.
+
 ## [3.5.3] - 2026-11-01
 
 > _Added more bugs to fix it later._

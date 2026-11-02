@@ -948,6 +948,31 @@ fn autosuggest_shows_a_ghost_and_right_accepts_it() {
 }
 
 #[test]
+fn autosuggest_uses_a_visible_fallback_when_theme_omits_suggestion_style() {
+    let config = "coral foam #E4F5F4\nwave prompt \"P> \"\nwave command @foam\ntide greeting off\n";
+    let mut session = history_session_with(Some(config));
+    session.run("echo suggested");
+    let _ = session.writer.write_all(b"echo sug");
+    let seen = read_until(
+        session.master.as_raw_fd(),
+        "\x1b[2mgested\x1b[0m",
+        Duration::from_secs(5),
+    );
+    assert!(
+        seen.contains("\x1b[2mgested\x1b[0m"),
+        "ghost is not visually distinguished without a suggestion style: {seen:?}"
+    );
+
+    let _ = session.writer.write_all(b"\x03");
+    let _ = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    session.finish();
+}
+
+#[test]
 fn autosuggest_off_shows_no_ghost() {
     let mut session = history_session_with(Some("tide autosuggest off\n"));
     session.run("echo suggested");

@@ -105,7 +105,17 @@ pub fn display_cwd(shell: &Shell) -> String {
 }
 
 pub(crate) fn painted(shell: &Shell, key: &str, text: &str) -> String {
-    if !shell.colour_enabled() || text.is_empty() {
+    if text.is_empty() || std::env::var_os("NO_COLOR").is_some() {
+        return text.to_string();
+    }
+
+    // Without a `suggestion` style the ghost would use the terminal's normal
+    // foreground, indistinguishable from the text the user typed.
+    if key == "suggestion" && shell.style(key).is_none() {
+        return format!("\x1b[2m{text}\x1b[0m");
+    }
+
+    if !shell.colour_enabled() {
         return text.to_string();
     }
 

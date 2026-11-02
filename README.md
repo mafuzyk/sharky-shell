@@ -242,7 +242,9 @@ wave suggestion @kelp
 wave selection @sea
 ```
 
-Set `NO_COLOR=1` to keep the prompt plain.
+`wave suggestion` colours the autosuggest ghost text. Leave it out and the ghost
+falls back to dim, so it never looks like text you typed. Set `NO_COLOR=1` to keep
+the prompt plain.
 
 ### Errors
 
