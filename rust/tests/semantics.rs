@@ -413,3 +413,19 @@ fn failing_assignment_under_errexit_aborts() {
     assert_eq!(stdout(&out), "");
     assert_eq!(status(&out), 1);
 }
+
+// The word of a default expansion keeps its internal whitespace.
+
+#[test]
+fn default_word_keeps_internal_whitespace() {
+    let out = sharky(r#"unset v; printf '[%s]' "${v:-a  b}""#);
+    assert_eq!(stdout(&out), "[a  b]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn default_word_keeps_leading_whitespace() {
+    let out = sharky(r#"unset v; printf '[%s]' "${v:- a  b}""#);
+    assert_eq!(stdout(&out), "[ a  b]");
+    assert_eq!(status(&out), 0);
+}

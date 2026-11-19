@@ -2958,14 +2958,21 @@ impl Shell {
             return text.to_string();
         };
 
+        // A parameter word is one word even when it contains unquoted blanks, so
+        // the text between two tokens is copied verbatim instead of being
+        // re-joined with a single space.
+        let chars: Vec<char> = text.chars().collect();
         let mut out = String::new();
-        for token in tokens {
-            if let TokenKind::Word(word) = token.kind {
-                if !out.is_empty() {
-                    out.push(' ');
-                }
-                out.push_str(&self.expand_text_word(&word));
+        for token in &tokens {
+            let TokenKind::Word(word) = &token.kind else {
+                continue;
+            };
+            let mut gap = token.pos;
+            while gap > 0 && chars.get(gap - 1).is_some_and(|char| char.is_whitespace()) {
+                gap -= 1;
             }
+            out.extend(chars.get(gap..token.pos).unwrap_or_default().iter());
+            out.push_str(&self.expand_text_word(word));
         }
         out
     }
