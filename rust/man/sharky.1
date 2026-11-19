@@ -24,6 +24,10 @@ sharky \- Unix-first interactive shell
 .br
 .B sharky
 .B doctor
+.br
+.B sharky
+.B help
+[\fITOPIC\fR [\fIWORD\fR...]]
 .SH DESCRIPTION
 .B sharky
 is an interactive POSIX-like shell written in Rust. Commands run as real Unix
@@ -104,6 +108,13 @@ Print the version and exit.
 .TP
 .B \-\-help
 Print a short usage summary and exit.
+.TP
+.B help \fI[TOPIC [WORD...]]\fR
+With no \fITOPIC\fR, print the same text as \fB\-\-help\fR. With one, join the
+words after \fBhelp\fR with spaces and print that topic. Topics are builtin
+names, command-line flags and subcommands, and the configuration topics of
+\fBconfig explain\fR. An unknown topic exits 1. Runs before the shell starts, so
+no configuration is read or created.
 .SH LANGUAGE
 The prompt, \fB\-c\fR and script files share one grammar:
 .IP \(bu 2
@@ -300,7 +311,8 @@ Searched for commands, extended by \fBcurrent\fR entries.
 The status of the last command, or the argument of \fBexit\fR. A syntax error
 exits with 2; a command that cannot be found exits with 127; a command that
 cannot be executed exits with 126. \fBstatus\fR always exits 0, \fBdoctor\fR
-exits 1 when a check fails, and malformed subcommand arguments exit 2.
+exits 1 when a check fails, and malformed subcommand arguments exit 2. An
+unknown \fBhelp\fR topic exits 1.
 .SH EXAMPLES
 .nf
     sharky -c 'printf "a b\\n" | wc -w'

@@ -118,6 +118,22 @@ TTY is reported but does not fail the check; history is inspected through
 metadata only, without opening it for append or taking a lock. There are no
 compile-time feature flags in this release, so `status` reports `features: none`.
 
+## Help
+
+```sh
+sharky help                 # same text as --help
+sharky help read            # help for one builtin, flag or subcommand
+sharky help tide history    # one configuration topic
+```
+
+`sharky help [TOPIC...]` and the shell `help` builtin share one registry. With
+no topic, both print exactly the text of `--help`. With a topic, they join every
+word after `help` with a single space and print one entry. Topics are builtin
+names, command-line flags and subcommands, plus the configuration-language
+topics listed under `config explain`. An unknown topic exits 1 with a message
+on stderr. The subcommand runs before the shell starts: it never loads or
+creates configuration and has no side effects.
+
 ## Login shell
 
 `sharky -l` (or an `argv[0]` beginning with `-`) reads
@@ -169,7 +185,7 @@ The prompt, `-c` and script files share one grammar:
 | case | `case $x in f*) ...;; *) ...;; esac`, `;;&`, `;&` |
 | functions | `greet() { printf 'hi %s\n' "$1"; }` |
 | groups and subshells | `{ a; b; }`, `( a; b )` |
-| builtins | `type`, `command`, `alias`, `unalias`, `abbr`, `unabbr`, `history`, `pwd`, `read`, `shift`, `exec`, `time` |
+| builtins | `type`, `command`, `help`, `alias`, `unalias`, `abbr`, `unabbr`, `history`, `pwd`, `read`, `shift`, `exec`, `time` |
 | history search | Ctrl-R, type to filter, Enter runs the match, Ctrl-G cancels |
 | paste and multiline | bracketed paste inserts text verbatim; Enter submits the whole buffer; Up/Down, Home/End work per line |
 | autosuggest | history suffix ghost text; Right/End accepts, `tide autosuggest off` disables |
@@ -347,7 +363,8 @@ space. Each parser directive has its own topic — `tide`, `pearl`, `current`,
 `files`, `theme` and `overwrite`. An unknown topic or an option mixed into the
 request exits 2 with a message on stderr. `config explain` runs before the shell
 starts: it reads no configuration, profiles or history and has no side effects.
-There is no top-level `sharky explain` alias.
+There is no top-level `sharky explain` alias. `help TOPIC` and the `help` builtin
+reuse these topics.
 
 ## Files
 

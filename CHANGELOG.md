@@ -69,6 +69,13 @@ rather than a separate preview track.
   dynamic scope: earlier bindings (scalar, indexed or associative) are saved
   and restored on return, and locals are visible to called functions. `local`
   outside a function, invalid names and unsupported options report failure.
+- `sharky help [TOPIC...]` and the `help` builtin share one static registry with
+  `--help`. With no topic they print the same index as `--help`; with a topic
+  they join every word with spaces and print one entry. Topics are builtin
+  names, command-line flags and subcommands, plus the configuration topics of
+  `config explain`. An unknown topic exits 1. The subcommand runs before the
+  shell starts: no configuration is loaded or created and there are no side
+  effects.
 
 ### Fixed
 
