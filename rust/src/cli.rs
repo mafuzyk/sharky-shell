@@ -20,9 +20,13 @@ pub fn run() -> i32 {
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect::<Vec<_>>();
 
-    // `config explain` is a static, text-only subcommand. Handle it before
-    // any config/theme loading so it never touches the filesystem.
+    // `config explain`, `status` and `doctor` are static, text-only
+    // subcommands. Handle them before any config/theme loading so they never
+    // build a Shell, load configuration or touch the filesystem.
     if let Some(code) = try_config_explain(&args) {
+        return code;
+    }
+    if let Some(code) = crate::diagnostics::try_run(&args) {
         return code;
     }
 

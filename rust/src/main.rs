@@ -1,6 +1,7 @@
 mod arith;
 mod ast;
 mod cli;
+mod diagnostics;
 mod editor;
 mod exec;
 mod highlight;

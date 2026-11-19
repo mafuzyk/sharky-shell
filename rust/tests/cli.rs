@@ -3114,3 +3114,182 @@ fn set_reports_and_toggles_vi_mode() {
     let out = sharky(&["-c", "set -o vi; set +o vi; set -o"]);
     assert!(!String::from_utf8_lossy(&out.stdout).contains("vi"));
 }
+
+#[test]
+fn status_reports_version_resolved_paths_and_feature_flags() {
+    let dir = temp_dir();
+    std::fs::write(dir.join("config.sharky"), "tide greeting off\n").unwrap();
+    let data = temp_dir();
+    let history = data.join("my-history");
+    std::fs::write(&history, "previous command\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .arg("status")
+        .env("SHARKY_CONFIG", &dir)
+        .env("SHARKY_HISTORY", &history)
+        .output()
+        .expect("failed to run sharky");
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&data).ok();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.stderr.is_empty(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains(&format!("sharky {}", env!("CARGO_PKG_VERSION"))),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "config: {} (exists)",
+            dir.join("config.sharky").display()
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "theme: {} (missing)",
+            dir.join("theme.sharky").display()
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("history: {} (exists)", history.display())),
+        "{text}"
+    );
+    assert!(text.contains("features: none"), "{text}");
+    assert!(!text.contains('{'), "status must be plain text: {text}");
+}
+
+#[test]
+fn status_honours_config_and_history_environment_precedence() {
+    let chosen = temp_dir();
+    let xdg_config = temp_dir();
+    let home = temp_dir();
+    let chosen_data = temp_dir();
+    let xdg_data = temp_dir();
+    let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .arg("status")
+        .env("SHARKY_CONFIG", &chosen)
+        .env("XDG_CONFIG_HOME", &xdg_config)
+        .env("HOME", &home)
+        .env("SHARKY_HISTORY", chosen_data.join("history"))
+        .env("XDG_DATA_HOME", &xdg_data)
+        .output()
+        .expect("failed to run sharky");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert_eq!(out.status.code(), Some(0), "{text}");
+    assert!(
+        text.contains(&format!("config: {}", chosen.join("config.sharky").display())),
+        "{text}"
+    );
+    assert!(!text.contains(&xdg_config.display().to_string()), "{text}");
+    assert!(
+        text.contains(&format!("history: {}", chosen_data.join("history").display())),
+        "{text}"
+    );
+    assert!(!text.contains(&xdg_data.display().to_string()), "{text}");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .arg("status")
+        .env_remove("SHARKY_CONFIG")
+        .env_remove("SHARKY_HISTORY")
+        .env("XDG_CONFIG_HOME", &xdg_config)
+        .env("XDG_DATA_HOME", &xdg_data)
+        .env("HOME", &home)
+        .output()
+        .expect("failed to run sharky");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert_eq!(out.status.code(), Some(0), "{text}");
+    assert!(
+        text.contains(&format!(
+            "config: {}",
+            xdg_config.join("sharky/config.sharky").display()
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "history: {}",
+            xdg_data.join("sharky/history").display()
+        )),
+        "{text}"
+    );
+    for dir in [chosen, xdg_config, home, chosen_data, xdg_data] {
+        std::fs::remove_dir_all(dir).ok();
+    }
+}
+
+#[test]
+fn status_never_prints_secret_values_or_pearl_directives() {
+    let dir = temp_dir();
+    std::fs::write(
+        dir.join("config.sharky"),
+        "pearl TOP_SECRET_STATUS_TOKEN \"s3cr3t-status-leak\"\nwake \"printf STATUS_LEAK\"\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .arg("status")
+        .env("SHARKY_CONFIG", &dir)
+        .env("SHARKY_SUPER_SECRET", "s3cr3t-env-leak")
+        .output()
+        .expect("failed to run sharky");
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(!text.contains("s3cr3t-status-leak"), "{text}");
+    assert!(!text.contains("TOP_SECRET_STATUS_TOKEN"), "{text}");
+    assert!(!text.contains("s3cr3t-env-leak"), "{text}");
+    assert!(!text.contains("SHARKY_SUPER_SECRET"), "{text}");
+    assert!(!text.contains("STATUS_LEAK"), "{text}");
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("s3cr3t"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn status_creates_no_config_history_or_z_file() {
+    let dir = temp_dir();
+    let data = temp_dir();
+    let home = temp_dir();
+    let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .arg("status")
+        .env("SHARKY_CONFIG", &dir)
+        .env("XDG_DATA_HOME", &data)
+        .env("HOME", &home)
+        .output()
+        .expect("failed to run sharky");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!dir.join("config.sharky").exists());
+    assert!(!dir.join("theme.sharky").exists());
+    assert!(!dir.join("profile.sharky").exists());
+    assert!(!data.join("sharky/history").exists());
+    assert!(!data.join("sharky/z.jsonl").exists());
+    assert!(!home.join(".local/share/sharky/history").exists());
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&data).ok();
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn status_rejects_options_and_extra_arguments() {
+    for args in [vec!["status", "--json"], vec!["status", "extra"]] {
+        let out = sharky(&args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("status:"),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
