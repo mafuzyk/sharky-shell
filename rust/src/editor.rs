@@ -1811,18 +1811,21 @@ fn variable_candidates(word: &str, shell: &Shell) -> Vec<String> {
     names.sort();
     names.dedup();
 
-    match word.strip_prefix("${") {
+    // Only the segment after the last `$` is a variable; earlier text is a prefix.
+    let (head, segment) = word.split_at(word.rfind('$').unwrap_or(0));
+
+    match segment.strip_prefix("${") {
         Some(prefix) => names
             .into_iter()
             .filter(|name| name.starts_with(prefix))
-            .map(|name| format!("${{{name}}}"))
+            .map(|name| format!("{head}${{{name}}}"))
             .collect(),
         None => {
-            let prefix = word.trim_start_matches('$');
+            let prefix = segment.trim_start_matches('$');
             names
                 .into_iter()
                 .filter(|name| name.starts_with(prefix))
-                .map(|name| format!("${name}"))
+                .map(|name| format!("{head}${name}"))
                 .collect()
         }
     }
