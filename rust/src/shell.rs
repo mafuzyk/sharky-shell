@@ -1550,11 +1550,15 @@ impl Shell {
         }
     }
 
-    fn ifs_first_char(&self) -> char {
+    fn ifs_first_char(&self) -> Option<char> {
         match self.env.iter().find(|(key, _)| key == "IFS") {
-            Some((_, value)) => value.chars().next().unwrap_or(' '),
-            None => ' ',
+            Some((_, value)) => value.chars().next(),
+            None => Some(' '),
         }
+    }
+
+    fn ifs_join_separator(&self) -> String {
+        self.ifs_first_char().map(String::from).unwrap_or_default()
     }
 
     pub fn var(&self, name: &str) -> String {
@@ -1584,7 +1588,7 @@ impl Shell {
                     .unwrap_or_default();
             }
             "@" => return self.positional.join(" "),
-            "*" => return self.positional.join(&self.ifs_first_char().to_string()),
+            "*" => return self.positional.join(&self.ifs_join_separator()),
             _ => {}
         }
 
@@ -2791,11 +2795,14 @@ impl Shell {
                     for part in inner {
                         match part {
                             Part::Variable(name) if name == "@" => {
-                                fields.field_quoted_multi(&self.positional, false);
+                                fields.field_quoted_multi(&self.positional, None);
                             }
                             Part::Parameter(parameter) => {
                                 if let Some(values) = self.parameter_elements(parameter) {
-                                    fields.field_quoted_multi(&values, joins_elements(parameter));
+                                    let join = joins_elements(parameter)
+                                        .then(|| self.ifs_first_char())
+                                        .flatten();
+                                    fields.field_quoted_multi(&values, join);
                                 } else {
                                     let mut text = String::new();
                                     self.expand_parts(std::slice::from_ref(part), &mut text);
@@ -2811,7 +2818,7 @@ impl Shell {
                     }
                 }
                 Part::Variable(name) if name == "@" => {
-                    fields.field_multi(&self.positional, false);
+                    fields.field_multi(&self.positional, None);
                 }
                 Part::Variable(name) if name == "*" => {
                     let value = self.var("*");
@@ -2827,7 +2834,10 @@ impl Shell {
                 }
                 Part::Parameter(parameter) => {
                     if let Some(values) = self.parameter_elements(parameter) {
-                        fields.field_multi(&values, joins_elements(parameter));
+                        let join = joins_elements(parameter)
+                            .then(|| self.ifs_first_char())
+                            .flatten();
+                        fields.field_multi(&values, join);
                     } else {
                         let value = self.parameter_value(parameter);
                         fields.push(&value, false);
@@ -2990,9 +3000,14 @@ impl Shell {
                     | ParamOp::ErrorUnset
             )
         );
+        let ifs_separator = self.ifs_join_separator();
         let value = if let Some(assoc) = self.assoc.get(&parameter.name) {
             match lookup {
-                Some("@") | Some("*") => assoc.values().cloned().collect::<Vec<_>>().join(" "),
+                Some("@") | Some("*") => assoc
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(&ifs_separator),
                 Some(key) => assoc.get(key).cloned().unwrap_or_default(),
                 None => assoc.get("0").cloned().unwrap_or_default(),
             }
@@ -3003,7 +3018,7 @@ impl Shell {
                     .flatten()
                     .cloned()
                     .collect::<Vec<_>>()
-                    .join(" "),
+                    .join(&ifs_separator),
                 Some(_) => array
                     .get(numeric_index)
                     .cloned()
@@ -4545,17 +4560,17 @@ impl Fields {
         }
     }
 
-    fn field_quoted_multi(&mut self, values: &[String], join: bool) {
+    fn field_quoted_multi(&mut self, values: &[String], join: Option<char>) {
         if values.is_empty() {
-            if join {
+            if join.is_some() {
                 self.started = true;
             }
             return;
         }
-        if join {
+        if let Some(separator) = join {
             for (index, value) in values.iter().enumerate() {
                 if index > 0 {
-                    self.current.push(' ');
+                    self.current.push(separator);
                 }
                 self.push_quoted(value);
             }
@@ -4570,12 +4585,13 @@ impl Fields {
         }
     }
 
-    fn field_multi(&mut self, values: &[String], join: bool) {
+    fn field_multi(&mut self, values: &[String], join: Option<char>) {
         if values.is_empty() {
             return;
         }
-        if join {
-            self.push(&values.join(" "), false);
+        if let Some(separator) = join {
+            let joined = values.join(&separator.to_string());
+            self.push(&joined, false);
             return;
         }
         let last = values.len() - 1;
