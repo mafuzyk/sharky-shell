@@ -1810,6 +1810,44 @@ fn command_big_v_describes_a_builtin() {
     assert_eq!(status(&out), 0);
 }
 
+// When -v and -V are both given, the last one wins, in a cluster or across
+// words.
+
+#[test]
+fn command_clustered_big_v_then_v_reports_the_name() {
+    let out = sharky("command -Vv cd");
+    assert_eq!(stdout(&out), "cd\n");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn command_clustered_v_then_big_v_reports_the_description() {
+    let out = sharky("command -vV cd");
+    assert_eq!(stdout(&out), "cd is a shell builtin\n");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn command_separate_big_v_then_v_reports_the_name() {
+    let out = sharky("command -V -v cd");
+    assert_eq!(stdout(&out), "cd\n");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn command_separate_v_then_big_v_reports_the_description() {
+    let out = sharky("command -v -V cd");
+    assert_eq!(stdout(&out), "cd is a shell builtin\n");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn command_function_follows_the_last_flag() {
+    let out = sharky("probe() { :; }; command -Vv probe");
+    assert_eq!(stdout(&out), "probe\n");
+    assert_eq!(status(&out), 0);
+}
+
 #[test]
 fn command_big_v_describes_a_function() {
     let out = sharky("probe() { :; }; command -V probe");

@@ -2684,9 +2684,10 @@ impl Shell {
     // `command` runs a name without function lookup, and -v/-V only report how
     // the shell would resolve it. -p searches the default PATH instead of the
     // environment PATH, and it never changes what runs or its environment.
+    // The last of -v and -V wins, so the two forms can be mixed in one word or
+    // across words.
     fn command_builtin(&mut self, args: &[String], env: &[(String, String)]) -> Flow {
-        let mut short = false;
-        let mut verbose = false;
+        let mut mode: Option<char> = None;
         let mut default_path = false;
         let mut index = 0;
 
@@ -2700,8 +2701,7 @@ impl Shell {
             }
             for flag in argument.chars().skip(1) {
                 match flag {
-                    'v' => short = true,
-                    'V' => verbose = true,
+                    'v' | 'V' => mode = Some(flag),
                     'p' => default_path = true,
                     _ => {
                         eprintln!("sharky: command: -{flag}: invalid option");
@@ -2715,7 +2715,8 @@ impl Shell {
 
         let words = &args[index..];
 
-        if short || verbose {
+        if mode.is_some() {
+            let verbose = mode == Some('V');
             let path = default_path.then_some(exec::DEFAULT_PATH);
             let mut found_any = false;
             for name in words {
