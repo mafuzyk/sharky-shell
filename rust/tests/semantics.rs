@@ -328,3 +328,20 @@ fn local_without_a_value_trips_nounset() {
     assert_eq!(status(&out), 1);
     assert!(String::from_utf8_lossy(&out.stderr).contains("unbound"));
 }
+
+// With no positional parameters, "$@" and "$*" are unset for the operators
+// without a colon.
+
+#[test]
+fn empty_positional_parameters_are_unset_for_alternate_operators() {
+    let out = sharky(r#"printf '[%s][%s][%s][%s]' "${@+set}" "${@-fallback}" "${*+set}" "${*-fallback}""#);
+    assert_eq!(stdout(&out), "[][fallback][][fallback]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn colon_operators_still_see_empty_positional_parameters_as_null() {
+    let out = sharky(r#"printf '[%s][%s]' "${@:-colon}" "${@:+colon}""#);
+    assert_eq!(stdout(&out), "[colon][]");
+    assert_eq!(status(&out), 0);
+}
