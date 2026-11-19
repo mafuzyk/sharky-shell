@@ -111,6 +111,43 @@ fn background_job_runs_and_reports_done() {
 }
 
 #[test]
+fn scoped_stdin_redirect_keeps_the_child_foreground() {
+    let base = std::env::temp_dir().join(format!("sharky-fg-{}", std::process::id()));
+    let foreground = base.with_extension("foreground");
+    let background = base.with_extension("background");
+    let _ = std::fs::remove_file(&foreground);
+    let _ = std::fs::remove_file(&background);
+
+    let mut session = Session::start();
+    let prompt = session.read_until("❯", Duration::from_secs(5));
+    assert!(prompt.contains('❯'), "no prompt: {prompt:?}");
+
+    session.send(&format!(
+        "f() {{ /bin/sh -c 'read -r st < /proc/$$/stat; set -- $st; [ \"$5\" = \"$8\" ] && : > {} || : > {}'; }}\r",
+        foreground.display(),
+        background.display()
+    ));
+    session.read_until("❯", Duration::from_secs(5));
+
+    session.send("f < /dev/null\r");
+    let seen = session.read_until("❯", Duration::from_secs(5));
+    assert!(seen.contains('❯'), "no prompt after the command: {seen:?}");
+
+    let had_foreground = foreground.exists();
+    let had_background = background.exists();
+    let _ = std::fs::remove_file(&foreground);
+    let _ = std::fs::remove_file(&background);
+
+    assert!(
+        had_foreground && !had_background,
+        "the child ran outside the terminal's foreground group (foreground={had_foreground}, background={had_background})"
+    );
+
+    session.send("exit\r");
+    assert_eq!(session.exit_status(), 0);
+}
+
+#[test]
 fn ctrl_z_stops_a_job_and_fg_resumes_it() {
     let mut session = Session::start();
     session.read_until("❯", Duration::from_secs(5));
