@@ -29,6 +29,22 @@ paru -S sharky-shell-git       # builds the latest main locally
 on the GitHub release. `sharky-shell-git` tracks `main` and needs a Rust
 toolchain.
 
+### Nix (flake)
+
+```sh
+nix profile install github:mafuzyk/sharky-shell
+nix run github:mafuzyk/sharky-shell#sharky-bin -- --version
+```
+
+The flake installs the official prebuilt static binary for `x86_64-linux`,
+pinned to the verified v3.5.4 release tarball and checked against its published
+SHA256. It also installs the man page and the example `config.sharky` and
+`theme.sharky` under `share/sharky`. There is no source build or wrapper script.
+
+`default` and `sharky-bin` serve the same derivation. When a newer release
+artifact is verified, the version and hash in the root `flake.nix` are updated
+in place, so both names pick up the new version.
+
 ### Prebuilt binary (GitHub)
 
 ```sh

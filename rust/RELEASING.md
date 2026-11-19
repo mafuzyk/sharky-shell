@@ -61,6 +61,19 @@ usr/share/sharky/theme.sharky
 usr/share/licenses/<pkgname>/LICENSE
 ```
 
+The root `flake.nix` installs the same tarball for `x86_64-linux`. Once the new
+release asset exists, bump its `version` and derive the replacement `hash` from
+the digest published in the asset's `.sha256` file:
+
+```sh
+nix hash to-sri --type sha256 <sha256-hex-from-the-release-asset>
+nix build .#default --rebuild
+./result/bin/sharky --version
+```
+
+Both `default` and `sharky-bin` resolve to that one derivation, so updating the
+pin updates both names. There are no placeholder outputs or other architectures.
+
 ## 4. AUR
 
 There are two independent AUR repositories:
