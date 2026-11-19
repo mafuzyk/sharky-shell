@@ -438,7 +438,7 @@ impl Shell {
             "break", "continue", "return", "jobs", "fg", "bg", "declare", "local", "pwd", "type",
             "alias", "abbr", "unabbr", "unalias", "history", "wait", "kill", "z", "zi",
             "reload", "trap", "read", "shift", "wake", "exec", "time", "shopt",
-            "mapfile", "readarray", "command",
+            "mapfile", "readarray", "command", "help",
         ]
         .iter()
         .map(|word| word.to_string())
@@ -1643,6 +1643,7 @@ impl Shell {
             }
             "type" => Some(Flow::Status(self.type_builtin(&words[1..]))),
             "command" => Some(self.command_builtin(&words[1..], env)),
+            "help" => Some(Flow::Status(crate::help::builtin(&words[1..]))),
             "alias" => Some(Flow::Status(self.alias(&words[1..]))),
             "abbr" => Some(Flow::Status(self.abbr(&words[1..]))),
             "unabbr" => Some(Flow::Status(self.unabbr(&words[1..]))),
@@ -4778,6 +4779,7 @@ fn is_builtin_name(name: &str) -> bool {
             | "typeset"
             | "shopt"
             | "command"
+            | "help"
     )
 }
 

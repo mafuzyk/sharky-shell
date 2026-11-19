@@ -29,6 +29,9 @@ pub fn run() -> i32 {
     if let Some(code) = crate::diagnostics::try_run(&args) {
         return code;
     }
+    if let Some(code) = crate::help::try_cli(&args) {
+        return code;
+    }
 
     let mut args = args.into_iter();
     let mut login = login_arg0;
@@ -511,24 +514,5 @@ fn json_string(value: &str) -> String {
 }
 
 fn print_help() {
-    println!("Usage: sharky [OPTIONS] [FILE]");
-    println!("       sharky state --json [--env] [--no-config]");
-    println!("       sharky status");
-    println!("       sharky doctor");
-    println!();
-    println!("  -c COMMAND   run COMMAND and exit");
-    println!("  --check      check top-level syntax only: no execution, config, profiles or history");
-    println!("               requires -c or a file; reports line info and exits 2 on errors");
-    println!("  -i           force interactive mode");
-    println!("  -l, --login  read login profiles before the command");
-    println!("  -P, --private  keep no history file: read and write nothing");
-    println!("  --json       print one JSON object for -c or state");
-    println!("  --env        include the environment in state JSON");
-    println!("  state        print shell state as JSON (requires --json)");
-    println!("  status       print version, resolved paths and active feature flags");
-    println!("  doctor       run read-only local checks; exit 1 if any check fails");
-    println!("  config explain [TOPIC]  print the configuration guide (or one topic)");
-    println!("  --no-config  do not load the configuration file");
-    println!("  --version    print the version");
-    println!("  --help       print this help");
+    print_text(&crate::help::index());
 }

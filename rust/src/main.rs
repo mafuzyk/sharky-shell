@@ -4,6 +4,7 @@ mod cli;
 mod diagnostics;
 mod editor;
 mod exec;
+mod help;
 mod highlight;
 mod histexpand;
 mod history;
