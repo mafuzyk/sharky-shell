@@ -188,6 +188,28 @@ fn file_text(path: &std::path::Path) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|err| panic!("reading {}: {err}", path.display()))
 }
 
+fn sharky_in_with_stdin(dir: &std::path::Path, args: &[&str], input: &str) -> Output {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args(args)
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .current_dir(dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to run sharky");
+    child
+        .stdin
+        .take()
+        .expect("sharky stdin")
+        .write_all(input.as_bytes())
+        .expect("failed to write sharky stdin");
+    child.wait_with_output().expect("failed to collect output")
+}
+
 #[test]
 fn pipeline_connects_stdout_to_stdin() {
     let out = sharky(&["-c", r"printf 'a\nb\n' | wc -l"]);
@@ -2202,6 +2224,131 @@ fn failed_redirection_skips_the_builtin_and_keeps_streams() {
         lines.next(),
         Some("after"),
         "stdout was not restored after the failed redirection: {stdout:?}"
+    );
+}
+
+// The first redirect was already applied when the second one fails, so the
+// shell must roll the first back instead of keeping its own stdout on it.
+#[test]
+fn failed_redirection_after_a_successful_one_keeps_the_shell_streams() {
+    let dir = temp_dir();
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    let out = sharky_in(
+        &dir,
+        &[
+            "-c",
+            "cd sub > good 2> /nonexistent/sharky-redirect/bad; printf 'status=%s\\n' \"$?\"; pwd; printf 'after\\n'",
+        ],
+    );
+    let good = file_text(&dir.join("good"));
+    let stray = dir.join("sub/good").exists();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert!(
+        stderr.contains("/nonexistent/sharky-redirect/bad"),
+        "no diagnostic for the failed redirection: {stderr:?}"
+    );
+    let mut lines = stdout.lines();
+    assert_eq!(lines.next(), Some("status=1"), "stdout: {stdout:?}");
+    assert!(
+        lines.next().is_some_and(|line| !line.ends_with("/sub")),
+        "cd ran despite the failed redirection: {stdout:?}"
+    );
+    assert_eq!(
+        lines.next(),
+        Some("after"),
+        "the shell stdout stayed on the partially applied target: {stdout:?}"
+    );
+    assert_eq!(good, "", "the applied redirect captured the shell output");
+    assert!(
+        !stray,
+        "the target must be opened before cd changes directory"
+    );
+}
+
+// A target fd that was closed before the command must be closed again after it.
+#[test]
+fn redirected_builtin_restores_a_previously_closed_fd() {
+    let dir = temp_dir();
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    let out = sharky_in(
+        &dir,
+        &[
+            "-c",
+            "printf 'p' 2>/dev/null >&9; printf 'pre=<%s>\\n' \"$?\"; cd sub 9> out9; pwd; printf 'q' 2>/dev/null >&9; printf 'post=<%s>\\n' \"$?\"",
+        ],
+    );
+    let target = file_text(&dir.join("out9"));
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    std::fs::remove_dir_all(&dir).ok();
+
+    let mut lines = stdout.lines();
+    assert_eq!(
+        lines.next(),
+        Some("pre=<1>"),
+        "fd 9 was open before the redirection, so this case cannot observe it: {stdout:?}"
+    );
+    assert!(
+        lines.next().is_some_and(|line| line.ends_with("/sub")),
+        "cd did not change the shell directory: {stdout:?}"
+    );
+    assert_eq!(
+        lines.next(),
+        Some("post=<1>"),
+        "fd 9 stayed open after the redirection: {stdout:?}"
+    );
+    assert_eq!(target, "");
+}
+
+// The inner call redirects the same descriptor the outer call redirected; the
+// restore must return to the enclosing target, not to the shell's original one.
+#[test]
+fn nested_redirected_function_restores_the_enclosing_target() {
+    let dir = temp_dir();
+    let out = sharky_in(
+        &dir,
+        &[
+            "-c",
+            "f() { printf body; }; g() { f > inner; printf g; }; g > outer; printf 'end\\n'",
+        ],
+    );
+    let outer = file_text(&dir.join("outer"));
+    let inner = file_text(&dir.join("inner"));
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "end\n",
+        "stdout was not restored after the nested redirections (stderr: {})",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(outer, "g", "the inner restore lost the outer target");
+    assert_eq!(inner, "body", "the inner redirect did not capture its call");
+}
+
+// The temporary stdin redirect covers one read; the next one must reach the
+// shell's own stdin again.
+#[test]
+fn redirected_read_restores_the_shell_stdin() {
+    let dir = temp_dir();
+    std::fs::write(dir.join("data"), "one\n").unwrap();
+    let out = sharky_in_with_stdin(
+        &dir,
+        &[
+            "-c",
+            "read first < data; read second; printf '<%s|%s>' \"$first\" \"$second\"",
+        ],
+        "two\n",
+    );
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "<one|two>",
+        "stdin was not restored after the temporary redirect (stderr: {})",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 
