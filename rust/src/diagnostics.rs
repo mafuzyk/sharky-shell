@@ -2,12 +2,14 @@
 //!
 //! `sharky status` prints facts about the shell and its resolved paths.
 //! `sharky doctor` runs local checks and reports their outcome. Both are
-//! dispatched from `cli::run` before the shell is constructed, so neither builds
-//! a Shell, applies `pearl` or evaluates profiles. `doctor` parses
-//! `config.sharky` and `theme.sharky` read-only through the configuration
-//! parser as its checks; it never writes files and never prints environment or
-//! configuration values. `status` inspects paths by metadata only and reports
-//! paths, counts, statuses and fixed tool names.
+//! dispatched from `cli::run` before the normal shell startup path, so neither
+//! loads configuration into a shell, applies `pearl`, evaluates profiles,
+//! writes files or prints configuration values; `doctor` builds a bare `Shell`
+//! only to resolve tool names. `doctor` parses `config.sharky` and
+//! `theme.sharky` read-only through the configuration parser as its checks; it
+//! never writes files and never prints environment or configuration values.
+//! `status` inspects paths by metadata only and reports paths, counts, statuses
+//! and fixed tool names.
 
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;

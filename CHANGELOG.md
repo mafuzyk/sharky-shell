@@ -16,17 +16,20 @@ rather than a separate preview track.
   the config and theme paths resolved through `SHARKY_CONFIG`, `XDG_CONFIG_HOME`
   and `HOME` with existence markers, the history path resolved through
   `SHARKY_HISTORY`, `XDG_DATA_HOME` and `HOME` with an existence marker, and the
-  active compile-time feature flags (`none` in this release). It always exits 0.
+  active compile-time feature flags (`none` in this release). Both subcommands
+  exit 2 on malformed arguments; `status` exits 0 otherwise, and `doctor` exits
+  0 when all checks pass and 1 when any fails.
 - `sharky doctor` runs read-only local checks: stdin/stdout descriptor validity,
   config parsing through `config::load` with a separate check for files that
   load would silently skip, theme parsing, history permissions and writability
   by metadata only, and resolution of `sh`, `ls` and `cat` through
   `exec::resolve`. It prints one `OK`/`FAIL` line per check, exits 0 when all
-  pass and 1 when any fails, and performs no fstab checks. Both subcommands run
-  before the shell starts, so neither applies `pearl`, evaluates profiles,
-  writes files or prints environment or configuration values. `status` reads no
-  configuration files; `doctor` parses `config.sharky` and `theme.sharky`
-  read-only through the configuration parser.
+  pass and 1 when any fails, and performs no fstab checks. Both subcommands are
+  dispatched from `cli::run` before the normal shell startup path, so neither
+  applies `pearl`, evaluates profiles, writes files or prints environment or
+  configuration values; `doctor` builds a bare `Shell` only to resolve tool
+  names. `status` reads no configuration files; `doctor` parses `config.sharky`
+  and `theme.sharky` read-only through the configuration parser.
 - Durable command history: each evaluated command is appended to one shared file
   under a lock, with failed writes kept only in memory and torn tails dropped on
   the next append. Sessions keep their own view until `history merge`, and
