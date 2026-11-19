@@ -2947,6 +2947,17 @@ impl Shell {
         out
     }
 
+    fn fail_parameter_expansion(&mut self, name: &str, argument: &str) {
+        let word = self.expand_string(argument);
+        let message = if word.is_empty() {
+            "parameter null or not set".to_string()
+        } else {
+            word
+        };
+        eprintln!("sharky: {name}: {message}");
+        self.expansion_error = true;
+    }
+
     fn parameter_value(&mut self, parameter: &Parameter) -> String {
         let index = parameter.index.as_deref();
         let multiple = matches!(index, Some("@") | Some("*"));
@@ -3118,15 +3129,13 @@ impl Shell {
             }
             Some(ParamOp::Error) => {
                 if value.is_empty() {
-                    eprintln!("sharky: {}: {}", parameter.name, argument);
-                    self.expansion_error = true;
+                    self.fail_parameter_expansion(&parameter.name, &argument);
                 }
                 value
             }
             Some(ParamOp::ErrorUnset) => {
                 if !defined {
-                    eprintln!("sharky: {}: {}", parameter.name, argument);
-                    self.expansion_error = true;
+                    self.fail_parameter_expansion(&parameter.name, &argument);
                 }
                 value
             }

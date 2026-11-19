@@ -345,3 +345,23 @@ fn colon_operators_still_see_empty_positional_parameters_as_null() {
     assert_eq!(stdout(&out), "[colon][]");
     assert_eq!(status(&out), 0);
 }
+
+// ${v?word} expands its word before failing and reports it in the message.
+
+#[test]
+fn error_expansion_expands_its_word_before_failing() {
+    let out = sharky(r#"unset v; printf '[%s]' "${v?$(echo boom)}"; printf after"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("v: boom"), "{stderr:?}");
+}
+
+#[test]
+fn empty_error_word_uses_the_null_parameter_message() {
+    let out = sharky(r#"unset v; printf '[%s]' "${v?}"; printf after"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("v: parameter null or not set"), "{stderr:?}");
+}
