@@ -36,18 +36,25 @@ Only three observable channels are part of the contract:
 stderr is explicitly **not** compared. Shells differ in diagnostic wording, and
 raw stderr parity is not a compatibility goal here; the harness discards it.
 
-## Isolation
+## Isolation and bounds
 
-Every invocation runs in a fresh `mktemp -d` cwd with a cleared environment:
+Every invocation runs in a fresh `mktemp -d` cwd with a cleared environment,
+under a timeout that kills the whole process group (fixture children included):
 
 ```
-env -i PATH=/usr/bin:/bin LC_ALL=C.UTF-8 DIFF_X='a  b' HOME=<isolated-cwd> \
-    <reference-shell> [-c | --noprofile --norc -c] <source>
+env -i PATH=<controlled-tool-path> LC_ALL=C.UTF-8 DIFF_X='a  b' HOME=<isolated-cwd> \
+    <shell> [-c | --noprofile --norc -c] <source>
 ```
 
-The candidate is invoked the same way but with `CANDIDATE_ARGS` (default
-`--no-config -c`) appended before the source, matching the Sharky CLI used by
-`rust/tests/differential.rs`. No fixture writes outside its isolated cwd.
+The PATH is auto-resolved from the current locations of `printf`, `timeout` and
+`bash` (plus existing `/usr/bin`, `/bin`) and is the same for references and the
+candidate; `COMPAT_PATH` overrides it. `timeout --kill-after=2s <TIMEOUT_SECS>s`
+(default 5s) bounds every run. The candidate is invoked the same way but with
+`CANDIDATE_ARGS` (default `--no-config -c`) appended before the source, matching
+the Sharky CLI used by `rust/tests/differential.rs`. No fixture writes outside
+its isolated cwd. `check` refuses to run unless a preflight proves the candidate
+can execute `printf` (status 0, stdout `ok`), so a missing tool cannot masquerade
+as a compatibility result.
 
 ## Baseline layout
 
@@ -57,17 +64,21 @@ side-effect files (an empty directory means "no files created").
 
 ## Commands
 
+There is no implicit Nix-store dash discovery. If `dash` is not in PATH, set
+`DASH_BIN` explicitly before any command that runs portable cases.
+
 ```sh
-# Regenerate the baseline from references (dash path auto-discovered in /nix/store).
-cd compatibility && ./run.sh record
+# Regenerate the baseline from references.
+cd compatibility && DASH_BIN=/path/to/dash ./run.sh record
 
 # Sanity-check that references still reproduce the frozen baseline (no sharky build needed).
-cd compatibility && ./run.sh verify-refs
+cd compatibility && DASH_BIN=/path/to/dash ./run.sh verify-refs
 
-# Compare a built Sharky binary; requires a binary produced by someone else.
+# Compare an already-built Sharky binary; this unit never compiles one.
 cd compatibility && ./run.sh check /path/to/sharky
 ```
 
-`DASH_BIN` and `BASH_BIN` override reference paths; `CANDIDATE_ARGS` overrides
-the candidate invocation. `check` requires a Sharky binary that this unit did
-not build and did not verify.
+`DASH_BIN` and `BASH_BIN` select reference paths; `COMPAT_PATH`, `TIMEOUT_SECS`,
+`TIMEOUT_BIN` and `CANDIDATE_ARGS` control the isolated run. `check` PASS/FAIL
+lines name the candidate, not the reference. `check` requires a Sharky binary
+that this unit did not build and did not verify.

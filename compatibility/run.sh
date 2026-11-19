@@ -8,12 +8,20 @@
 #
 # Method (deliberately narrow):
 #   * Each fixture runs in a fresh isolated cwd with a cleared environment.
+#   * Every run is bounded by a timeout that kills the whole process group
+#     (including children spawned by the fixture).
 #   * Only stdout, exit status and controlled file side effects are compared.
 #   * stderr is captured to /dev/null and NEVER compared between shells.
 #   * Portable fixtures use dash; bash-only fixtures use bash.
 #
-# Override references with DASH_BIN / BASH_BIN. Override the candidate
-# invocation with CANDIDATE_ARGS (default: --no-config -c).
+# Explicit configuration (no implicit tool discovery on missing references):
+#   DASH_BIN        dash binary for portable cases; required when dash is not in PATH.
+#   BASH_BIN        bash binary for bash-only cases (default: bash in PATH).
+#   COMPAT_PATH     PATH used inside every isolated run; auto-resolved from the
+#                   current tool locations when unset (always includes printf).
+#   TIMEOUT_SECS    per-case timeout in seconds (default: 5; SIGKILL 2s later).
+#   TIMEOUT_BIN     timeout binary (default: timeout in PATH).
+#   CANDIDATE_ARGS  candidate invocation (default: --no-config -c).
 
 set -u
 
@@ -22,21 +30,47 @@ FIXTURES="$ROOT/fixtures"
 BASELINE="$ROOT/baseline"
 MANIFEST="$ROOT/manifest.tsv"
 
-# Resolve reference shells.
-if [[ -z "${DASH_BIN:-}" ]]; then
-  if command -v dash >/dev/null 2>&1; then
-    DASH_BIN="$(command -v dash)"
-  else
-    for p in /nix/store/*-dash-*/bin/dash; do
-      if [[ -x "$p" ]]; then DASH_BIN="$p"; break; fi
-    done
-  fi
-fi
-BASH_BIN="${BASH_BIN:-$(command -v bash)}"
+TIMEOUT_SECS="${TIMEOUT_SECS:-5}"
 CANDIDATE_ARGS="${CANDIDATE_ARGS:---no-config -c}"
 
+# Resolve the timeout tool: no run is allowed to be unbounded.
+TIMEOUT_BIN="${TIMEOUT_BIN:-$(command -v timeout 2>/dev/null || true)}"
+[[ -n "$TIMEOUT_BIN" && -x "$TIMEOUT_BIN" ]] || {
+  echo "timeout is required; set TIMEOUT_BIN to a GNU/coreutils timeout binary" >&2
+  exit 1
+}
+
+# Resolve reference shells. Never glob the Nix store: absence needs an explicit override.
+if [[ -z "${DASH_BIN:-}" ]] && command -v dash >/dev/null 2>&1; then
+  DASH_BIN="$(command -v dash)"
+fi
+BASH_BIN="${BASH_BIN:-$(command -v bash)}"
+
+# Controlled PATH shared by references and candidate: directories of the tools
+# the isolated runs actually need, derived from this environment and overridable.
+resolve_tool_path() {
+  local tool p dir added=""
+  local -a dirs=()
+  for tool in printf timeout bash; do
+    p="$(type -P "$tool" 2>/dev/null || true)"
+    [[ -n "$p" ]] || continue
+    dir="$(dirname "$p")"
+    [[ "|$added|" == *"|$dir|"* ]] && continue
+    dirs+=("$dir"); added="$added|$dir"
+  done
+  for dir in /usr/bin /bin; do
+    [[ -d "$dir" ]] || continue
+    [[ "|$added|" == *"|$dir|"* ]] && continue
+    dirs+=("$dir"); added="$added|$dir"
+  done
+  local IFS=:
+  printf '%s' "${dirs[*]}"
+}
+TOOL_PATH="${COMPAT_PATH:-$(resolve_tool_path)}"
+[[ -n "$TOOL_PATH" ]] || { echo "empty TOOL_PATH; set COMPAT_PATH" >&2; exit 1; }
+
 # Fixed environment for every invocation. HOME is set per run to the isolated cwd.
-ENV_ARGS=(-i PATH=/usr/bin:/bin LC_ALL=C.UTF-8 DIFF_X='a  b')
+ENV_ARGS=(-i "PATH=$TOOL_PATH" LC_ALL=C.UTF-8 DIFF_X='a  b')
 
 declare -a NAMES CLASSES REFS
 load_manifest() {
@@ -62,21 +96,26 @@ run_case() {
   if [[ "$runner" == ref ]]; then
     case "$class" in
       portable)
-        [[ -n "${DASH_BIN:-}" ]] || { echo "no dash found; set DASH_BIN" >&2; CASE_STATUS=127; }
-        if [[ -n "${DASH_BIN:-}" ]]; then
-          ( cd "$cwd" && env "${ENV_ARGS[@]}" HOME="$cwd" "$DASH_BIN" -c "$src" ) >"$out" 2>/dev/null
+        if [[ -z "${DASH_BIN:-}" ]]; then
+          echo "no dash available; set DASH_BIN explicitly" >&2
+          CASE_STATUS=127
+        else
+          ( cd "$cwd" && "$TIMEOUT_BIN" --kill-after=2s "${TIMEOUT_SECS}s" \
+              env "${ENV_ARGS[@]}" HOME="$cwd" "$DASH_BIN" -c "$src" ) >"$out" 2>/dev/null
           CASE_STATUS=$?
         fi
         ;;
       bash)
-        ( cd "$cwd" && env "${ENV_ARGS[@]}" HOME="$cwd" "$BASH_BIN" --noprofile --norc -c "$src" ) >"$out" 2>/dev/null
+        ( cd "$cwd" && "$TIMEOUT_BIN" --kill-after=2s "${TIMEOUT_SECS}s" \
+            env "${ENV_ARGS[@]}" HOME="$cwd" "$BASH_BIN" --noprofile --norc -c "$src" ) >"$out" 2>/dev/null
         CASE_STATUS=$?
         ;;
       *) CASE_STATUS=2 ;;
     esac
   else
     # shellcheck disable=SC2086
-    ( cd "$cwd" && env "${ENV_ARGS[@]}" HOME="$cwd" "$candidate" $CANDIDATE_ARGS "$src" ) >"$out" 2>/dev/null
+    ( cd "$cwd" && "$TIMEOUT_BIN" --kill-after=2s "${TIMEOUT_SECS}s" \
+        env "${ENV_ARGS[@]}" HOME="$cwd" "$candidate" $CANDIDATE_ARGS "$src" ) >"$out" 2>/dev/null
     CASE_STATUS=$?
   fi
   set -e
@@ -97,8 +136,13 @@ cleanup_case() {
   rm -rf -- "${CASE_CWD:-}" "${CASE_SNAP:-}" "${CASE_OUT:-}"
 }
 
+# In check mode the label must identify the candidate, never the reference.
 describe_runner() {
-  local class="$1" candidate="${2:-}"
+  local mode="$1" class="$2" candidate="${3:-}"
+  if [[ "$mode" == check ]]; then
+    printf '%s %s <source>' "$candidate" "$CANDIDATE_ARGS"
+    return
+  fi
   case "$class" in
     portable) printf '%s -c <source>' "${DASH_BIN:-dash}" ;;
     bash) printf '%s --noprofile --norc -c <source>' "$BASH_BIN" ;;
@@ -106,13 +150,28 @@ describe_runner() {
   esac
 }
 
+# Preflight: the candidate must actually be able to run printf before results mean anything.
+preflight_candidate() {
+  local candidate="$1"
+  run_case candidate bash "printf 'ok\n'" "$candidate"
+  local out
+  out="$(cat "$CASE_OUT")"
+  if [[ "$CASE_STATUS" -ne 0 || "$out" != "ok" ]]; then
+    echo "candidate cannot run printf (status=$CASE_STATUS stdout='$out'); check COMPAT_PATH / candidate invocation" >&2
+    cleanup_case
+    return 1
+  fi
+  cleanup_case
+}
+
 cmd_record() {
-  [[ -n "${DASH_BIN:-}" ]] || { echo "no dash found; set DASH_BIN" >&2; exit 1; }
+  [[ -n "${DASH_BIN:-}" ]] || { echo "no dash available; set DASH_BIN explicitly" >&2; exit 1; }
   load_manifest
   mkdir -p "$BASELINE"
   echo "dash:  ${DASH_BIN}"
   echo "bash:  ${BASH_BIN}"
-  echo "env:   env -i PATH=/usr/bin:/bin LC_ALL=C.UTF-8 DIFF_X='a  b' HOME=<isolated-cwd>"
+  echo "env:   env -i PATH='$TOOL_PATH' LC_ALL=C.UTF-8 DIFF_X='a  b' HOME=<isolated-cwd>"
+  echo "timeout: ${TIMEOUT_BIN} --kill-after=2s ${TIMEOUT_SECS}s"
   echo "recording ${#NAMES[@]} cases"
   local i name class src
   for i in "${!NAMES[@]}"; do
@@ -134,7 +193,7 @@ cmd_record() {
 }
 
 compare_case() {
-  local name="$1" candidate="${2:-}" fail=0
+  local name="$1" fail=0
   local expected_status actual_status expected_files cmp_files
   expected_status="$(cat "$BASELINE/$name.status")"
   actual_status="$CASE_STATUS"
@@ -166,6 +225,9 @@ cmd_check() {
   if [[ "$mode" == check && -z "$candidate" ]]; then
     echo "usage: $0 check <candidate-binary>" >&2; exit 2
   fi
+  if [[ "$mode" == check ]]; then
+    preflight_candidate "$candidate" || exit 2
+  fi
   load_manifest
   local i name class src fails=0
   echo "mode: $mode${candidate:+ (candidate: $candidate)}"
@@ -177,8 +239,8 @@ cmd_check() {
     else
       run_case candidate "$class" "$src" "$candidate"
     fi
-    if compare_case "$name" "$candidate"; then
-      printf '  PASS %-22s %s\n' "$name" "$(describe_runner "$class" "$candidate")"
+    if compare_case "$name"; then
+      printf '  PASS %-22s %s\n' "$name" "$(describe_runner "$mode" "$class" "$candidate")"
     else
       fails=$((fails + 1))
     fi
