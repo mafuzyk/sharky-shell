@@ -1350,6 +1350,45 @@ fn completion_expands_variables() {
 }
 
 #[test]
+fn completion_completes_the_last_segment_of_a_repeated_dollar_word() {
+    let mut session = history_session();
+    session.run("SHARKY_COMPLETION_TEST_TARGET=value");
+    let _ = session
+        .writer
+        .write_all(b"echo $$SHARKY_COMPLETION_TEST_TAR\t\r");
+    let out = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    assert!(
+        out.contains("cmdline_url=echo%20%24%24SHARKY_COMPLETION_TEST_TARGET"),
+        "repeated-dollar word not completed: {out:?}"
+    );
+    session.finish();
+}
+
+#[test]
+fn completing_an_exact_repeated_dollar_word_does_not_panic() {
+    let mut session = history_session();
+    session.run("SHARKY_COMPLETION_TEST_TARGET=value");
+    let _ = session
+        .writer
+        .write_all(b"echo $$SHARKY_COMPLETION_TEST_TARGET\t\r");
+    let out = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    assert!(!out.contains("panicked"), "completion panicked: {out:?}");
+    assert!(
+        out.contains("cmdline_url=echo%20%24%24SHARKY_COMPLETION_TEST_TARGET"),
+        "exact repeated-dollar word changed: {out:?}"
+    );
+    session.finish();
+}
+
+#[test]
 fn completion_reads_git_branches_without_a_subprocess() {
     let dir = completion_dir("git");
     std::fs::create_dir_all(dir.join(".git/refs/heads")).unwrap();
