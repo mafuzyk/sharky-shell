@@ -152,8 +152,8 @@ pub fn topic(id: &str) -> Option<String> {
              A non-numeric value is rejected when config.sharky is parsed: `tide {key} many` \
              reports `tide {key} expects a number, found 'many'` and the shell keeps its \
              defaults.\n\
-             Entries are stored in one shared file under \
-             ${{XDG_DATA_HOME:-~/.local/share}}/sharky/history unless SHARKY_HISTORY overrides it.",
+             Entries are stored in one shared file at $XDG_DATA_HOME/sharky/history, or \
+             ~/.local/share/sharky/history when that is unset, unless SHARKY_HISTORY overrides it.",
             key = TIDE_NUMBER
         )),
         "anchor" => Some(format!(
