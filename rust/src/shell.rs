@@ -3552,6 +3552,9 @@ impl Shell {
                     | ParamOp::AssignUnset
                     | ParamOp::AlternateUnset
                     | ParamOp::ErrorUnset
+                    // The indirect form reports its own failure for an unset
+                    // name, which bash keeps at status 1.
+                    | ParamOp::Indirect
             )
         );
         // Without word splitting the at form joins its elements with a space,
@@ -3707,6 +3710,17 @@ impl Shell {
                     String::new()
                 } else if !is_indirect_name(&value) {
                     self.fail_indirect(&value, "invalid variable name");
+                    String::new()
+                } else if self.nounset
+                    && !is_special_name(&value)
+                    && !self.arrays.contains_key(&value)
+                    && !self.env.iter().any(|(key, _)| key == &value)
+                {
+                    // Bash blames the indirect parameter itself, and treats the
+                    // failure as a nounset violation rather than an invalid
+                    // indirection.
+                    eprintln!("sharky: !{}: unbound variable", parameter.name);
+                    self.nounset_failed = true;
                     String::new()
                 } else {
                     self.var(&value)

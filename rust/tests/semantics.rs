@@ -1048,6 +1048,73 @@ fn indirect_of_a_value_that_is_not_a_name_fails() {
     assert!(stderr.contains("a b: invalid variable name"), "{stderr:?}");
 }
 
+// Under set -u, bash reports the indirect form's own errors: an unset name is
+// an invalid indirect expansion at status 1, and a name whose target is unset
+// is a nounset violation blamed on the !name form.
+
+#[test]
+fn nounset_indirect_of_an_unset_name_reports_only_the_indirect_error() {
+    let out = sharky(r#"set -u; unset n; printf '%s' "${!n}""#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("n: invalid indirect expansion"), "{stderr:?}");
+    assert!(!stderr.contains("unbound variable"), "{stderr:?}");
+}
+
+#[test]
+fn nounset_indirect_of_an_invalid_name_reports_the_name_error() {
+    let out = sharky(r#"set -u; n='a b'; printf '%s' "${!n}""#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("a b: invalid variable name"), "{stderr:?}");
+    assert!(!stderr.contains("unbound variable"), "{stderr:?}");
+}
+
+#[test]
+fn nounset_indirect_of_an_unset_target_uses_127() {
+    let out = sharky(r#"set -u; n=target; printf '%s' "${!n}""#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 127);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("!n: unbound variable"));
+}
+
+#[test]
+fn script_nounset_indirect_of_an_unset_name_uses_1() {
+    let out = sharky_script(r#"set -u; unset n; printf '%s' "${!n}""#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("n: invalid indirect expansion"));
+}
+
+#[test]
+fn stdin_nounset_indirect_of_an_unset_name_uses_1() {
+    let out = sharky_stdin(r#"set -u; unset n; printf '%s' "${!n}""#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("n: invalid indirect expansion"));
+}
+
+#[test]
+fn interactive_shell_survives_a_nounset_indirect_error() {
+    let seen = run_interactive(
+        &[
+            "set +H",
+            "set -u",
+            r#"unset n; printf '%s' "${!n}""#,
+            r#"printf 'AFTER-IND-%s' 99"#,
+        ],
+        "AFTER-IND-99",
+    );
+    assert!(
+        seen.contains("n: invalid indirect expansion"),
+        "missing error: {seen:?}"
+    );
+    assert!(!seen.contains("n: unbound variable"), "{seen:?}");
+    assert!(seen.contains("AFTER-IND-99"), "shell died: {seen:?}");
+}
+
 #[test]
 fn indirect_key_list_forms_stay_key_lists() {
     let out =
