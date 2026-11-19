@@ -1726,6 +1726,11 @@ impl Shell {
             _ => {}
         }
 
+        if let Some(map) = self.assoc.get(name) {
+            // A bare name of an associative array is its element under key 0.
+            return map.get("0").cloned().unwrap_or_default();
+        }
+
         if let Some(values) = self.arrays.get(name) {
             return values.first().cloned().flatten().unwrap_or_default();
         }
@@ -1825,7 +1830,12 @@ impl Shell {
             })
             .collect();
         if !append {
+            self.take_scalar(name);
             self.arrays.insert(name.to_string(), Vec::new());
+        } else if !self.arrays.contains_key(name)
+            && let Some(previous) = self.take_scalar(name)
+        {
+            self.arrays.insert(name.to_string(), vec![Some(previous)]);
         }
         let values = self.arrays.entry(name.to_string()).or_default();
         let mut next = values.len();
@@ -1913,7 +1923,7 @@ impl Shell {
                     if local && !fresh {
                         self.env.retain(|(key, _)| key != name);
                     }
-                    let previous = self.arrays.remove(name).unwrap_or_default();
+                    self.arrays.remove(name);
                     let entries = match literal.map(|declaration| &declaration.value) {
                         Some(AssignmentValue::Array(elements)) => {
                             Some(self.expand_array_entries(elements))
@@ -1921,18 +1931,24 @@ impl Shell {
                         _ => None,
                     };
                     let append = literal.is_some_and(|declaration| declaration.append);
+                    let scalar = self.take_scalar(name);
                     let map = self.assoc.entry(name.to_string()).or_default();
-                    for value in previous.into_iter().flatten() {
-                        if let Some((key, value)) = assoc_literal(&value) {
-                            map.insert(key, value);
+                    match entries {
+                        Some(entries) => {
+                            if !append {
+                                map.clear();
+                            }
+                            for (key, value) in assoc_entries(&entries) {
+                                map.insert(key, value);
+                            }
                         }
-                    }
-                    if let Some(entries) = entries {
-                        if !append {
-                            map.clear();
-                        }
-                        for (key, value) in assoc_entries(&entries) {
-                            map.insert(key, value);
+                        None => {
+                            if let Some(value) = value {
+                                map.insert("0".to_string(), value);
+                            } else if let Some(scalar) = scalar {
+                                // A scalar becomes the element under key 0.
+                                map.insert("0".to_string(), scalar);
+                            }
                         }
                     }
                 }
@@ -1941,31 +1957,38 @@ impl Shell {
                         self.env.retain(|(key, _)| key != name);
                     }
                     self.assoc.remove(name);
-                    self.arrays.entry(name.to_string()).or_default();
+                    let had_array = self.arrays.contains_key(name);
                     match literal.map(|declaration| (&declaration.value, declaration.append)) {
                         Some((AssignmentValue::Array(elements), append)) => {
                             let entries = self.expand_array_entries(elements);
+                            if append
+                                && !had_array
+                                && let Some(previous) = self.take_scalar(name)
+                            {
+                                self.arrays.insert(name.to_string(), vec![Some(previous)]);
+                            }
                             self.assign_array_entries(name, &entries, append);
                         }
                         _ => {
                             if let Some(value) = value {
                                 self.set_array_element(name, "0", value);
+                            } else if !had_array {
+                                match self.take_scalar(name) {
+                                    Some(previous) => {
+                                        self.arrays
+                                            .insert(name.to_string(), vec![Some(previous)]);
+                                    }
+                                    None => {
+                                        self.arrays.entry(name.to_string()).or_default();
+                                    }
+                                }
                             }
                         }
                     }
                 }
                 None => {
                     if let Some(value) = value {
-                        if self.assoc.contains_key(name) {
-                            self.assoc
-                                .entry(name.to_string())
-                                .or_default()
-                                .insert("0".to_string(), value);
-                        } else if self.arrays.contains_key(name) {
-                            self.set_array_element(name, "0", value);
-                        } else {
-                            self.set_var(name, value);
-                        }
+                        self.set_var(name, value);
                     }
                 }
             }
@@ -2020,15 +2043,23 @@ impl Shell {
     }
 
     fn set_array(&mut self, name: &str, values: Vec<String>, append: bool) {
-        if append {
-            self.arrays
-                .entry(name.to_string())
-                .or_default()
-                .extend(values.into_iter().map(Some));
-        } else {
+        if !append {
+            // Replacing the array also drops a scalar of the same name, which
+            // bash no longer exports once the name is an array.
+            self.take_scalar(name);
             self.arrays
                 .insert(name.to_string(), values.into_iter().map(Some).collect());
+            return;
         }
+        if !self.arrays.contains_key(name)
+            && let Some(previous) = self.take_scalar(name)
+        {
+            self.arrays.insert(name.to_string(), vec![Some(previous)]);
+        }
+        self.arrays
+            .entry(name.to_string())
+            .or_default()
+            .extend(values.into_iter().map(Some));
     }
 
     fn resolve_array_index(&mut self, text: &str) -> usize {
@@ -2039,6 +2070,15 @@ impl Shell {
     }
 
     fn set_array_element(&mut self, name: &str, index: &str, value: String) {
+        // A subscript on a scalar name turns it into an array, keeping the old
+        // value at index 0.
+        if !self.arrays.contains_key(name)
+            && !self.assoc.contains_key(name)
+            && let Some(previous) = self.take_scalar(name)
+        {
+            self.arrays
+                .insert(name.to_string(), vec![Some(previous)]);
+        }
         let index = self.resolve_array_index(index);
         let array = self.arrays.entry(name.to_string()).or_default();
         while array.len() <= index {
@@ -2048,10 +2088,30 @@ impl Shell {
     }
 
     pub(crate) fn set_var(&mut self, name: &str, value: String) {
+        // A name is either a scalar or an array. Writing a scalar to an array
+        // name stores it in element 0, the way bash keeps the array type.
+        if self.assoc.contains_key(name) {
+            self.assoc
+                .entry(name.to_string())
+                .or_default()
+                .insert("0".to_string(), value);
+            return;
+        }
+        if self.arrays.contains_key(name) {
+            self.set_array_element(name, "0", value);
+            return;
+        }
         match self.env.iter_mut().find(|(key, _)| key == name) {
             Some(entry) => entry.1 = value,
             None => self.env.push((name.to_string(), value)),
         }
+    }
+
+    // Removes a scalar binding so a name that became an array is no longer
+    // exported with a stale value.
+    fn take_scalar(&mut self, name: &str) -> Option<String> {
+        let position = self.env.iter().position(|(key, _)| key == name)?;
+        Some(self.env.remove(position).1)
     }
 
     fn export(&mut self, args: &[String]) -> i32 {

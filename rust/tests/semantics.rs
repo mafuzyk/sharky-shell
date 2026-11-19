@@ -1137,3 +1137,63 @@ fn failing_assignment_redirection_aborts_under_errexit() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+// A name is either a scalar or an array. A scalar write to an array name lands
+// in element 0, a subscript on a scalar turns it into an array, and a name that
+// became an array stops being exported as a scalar.
+
+#[test]
+fn scalar_assignment_to_an_array_name_writes_element_zero() {
+    let out = sharky(r#"a=(1 2); a=3; printf '[%s][%s][%s]' "$a" "${#a[@]}" "${a[1]}""#);
+    assert_eq!(stdout(&out), "[3][2][2]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn loop_and_read_writes_to_an_array_name_write_element_zero() {
+    let out = sharky(r#"a=(1 2); for a in x y; do :; done; printf '[%s][%s]' "$a" "${#a[@]}""#);
+    assert_eq!(stdout(&out), "[y][2]");
+    let out = sharky(r#"a=(1 2); read -r a <<< hi; printf '[%s][%s]' "$a" "${#a[@]}""#);
+    assert_eq!(stdout(&out), "[hi][2]");
+}
+
+#[test]
+fn subscript_on_a_scalar_name_moves_it_into_the_array() {
+    let out = sharky(r#"x=old; x[1]=new; printf '[%s][%s][%s]' "${x[0]}" "${x[1]}" "${#x[@]}""#);
+    assert_eq!(stdout(&out), "[old][new][2]");
+}
+
+#[test]
+fn indexed_declaration_over_a_scalar_keeps_it_as_element_zero() {
+    let out = sharky(r#"x=old; declare -a x; printf '[%s][%s]' "$x" "${#x[@]}""#);
+    assert_eq!(stdout(&out), "[old][1]");
+}
+
+#[test]
+fn associative_declaration_over_a_scalar_keeps_it_under_key_zero() {
+    let out = sharky(r#"x=old; declare -A x; printf '[%s][%s]' "${x[0]}" "${#x[@]}""#);
+    assert_eq!(stdout(&out), "[old][1]");
+}
+
+#[test]
+fn array_declaration_stops_exporting_a_stale_scalar() {
+    let out = sharky(
+        r#"SHARKY_D=old; declare -a SHARKY_D=(a b); printf '[%s]' "${SHARKY_D[0]}"; sh -c 'printf "<%s>" "$SHARKY_D"'"#,
+    );
+    assert_eq!(stdout(&out), "[a]<>");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn mapfile_stops_exporting_a_stale_scalar() {
+    let dir = temp_dir();
+    let file = dir.join("lines");
+    std::fs::write(&file, "a\nb\n").unwrap();
+    let out = sharky(&format!(
+        "SHARKY_M=old; mapfile -t SHARKY_M < {path}; printf '[%s][%s]' \"${{SHARKY_M[0]}}\" \"${{SHARKY_M[1]}}\"; sh -c 'printf \"<%s>\" \"$SHARKY_M\"'",
+        path = file.display()
+    ));
+    assert_eq!(stdout(&out), "[a][b]<>");
+    assert_eq!(status(&out), 0);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
