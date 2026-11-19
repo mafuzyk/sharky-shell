@@ -2,9 +2,32 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
 
+pub mod guide;
+
 pub const INSTRUCTIONS: &[&str] = &[
     "tide", "pearl", "current", "reef", "shoal", "anchor", "coral", "wave", "wake",
 ];
+
+/// `tide` keys that take `on` or `off`.
+pub const TIDE_FLAGS: &[&str] = &[
+    "greeting",
+    "autosuggest",
+    "highlight",
+    "starship",
+    "profile_paths",
+];
+
+/// `tide` key that takes a number.
+pub const TIDE_NUMBER: &str = "history";
+
+/// Named keys accepted by `anchor` without a modifier prefix.
+pub const NAMED_KEYS: &[&str] = &[
+    "tab", "shift-tab", "enter", "escape", "up", "down", "left", "right", "home", "end",
+    "delete", "backspace",
+];
+
+/// Modifier prefixes accepted by `anchor`, each followed by one character.
+pub const KEY_PREFIXES: &[&str] = &["ctrl-", "ctrl+", "c-", "c+", "alt-", "alt+", "m-", "m+"];
 
 pub const ACTIONS: &[&str] = &[
     "history_search",
@@ -33,14 +56,12 @@ pub const ACTIONS: &[&str] = &[
 
 pub fn valid_key(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    match lower.as_str() {
-        "tab" | "shift-tab" | "enter" | "escape" | "up" | "down" | "left" | "right" | "home"
-        | "end" | "delete" | "backspace" => return true,
-        _ => {}
+    if NAMED_KEYS.contains(&lower.as_str()) {
+        return true;
     }
 
-    for prefix in ["ctrl-", "ctrl+", "c-", "c+", "alt-", "alt+", "m-", "m+"] {
-        if let Some(rest) = lower.strip_prefix(prefix) {
+    for prefix in KEY_PREFIXES {
+        if let Some(rest) = lower.strip_prefix(*prefix) {
             return rest.chars().count() == 1 && !rest.chars().any(char::is_whitespace);
         }
     }
@@ -138,24 +159,20 @@ fn validate(config: &Config, file: &str) -> Result<(), ConfigError> {
     }
 
     for (key, value) in &config.settings {
-        match key.as_str() {
-            "greeting" | "autosuggest" | "highlight" | "starship" | "profile_paths" => {
-                if !matches!(value.as_str(), "on" | "off") {
-                    return Err(ConfigError {
-                        file: file.to_string(),
-                        line: 0,
-                        message: format!("tide {key} expects on or off, found '{value}'"),
-                    });
-                }
-            }
-            "history" if value.parse::<usize>().is_err() => {
+        if TIDE_FLAGS.contains(&key.as_str()) {
+            if !matches!(value.as_str(), "on" | "off") {
                 return Err(ConfigError {
                     file: file.to_string(),
                     line: 0,
-                    message: format!("tide history expects a number, found '{value}'"),
+                    message: format!("tide {key} expects on or off, found '{value}'"),
                 });
             }
-            _ => {}
+        } else if key.as_str() == TIDE_NUMBER && value.parse::<usize>().is_err() {
+            return Err(ConfigError {
+                file: file.to_string(),
+                line: 0,
+                message: format!("tide {key} expects a number, found '{value}'"),
+            });
         }
     }
 
