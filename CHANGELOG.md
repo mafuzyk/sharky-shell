@@ -43,6 +43,36 @@ rather than a separate preview track.
   (`tide`, `pearl`, `current`, `reef`, `shoal`, `anchor`, `coral`, `wave`, `wake`)
   alongside `tide history`, `files`, `theme` and `overwrite`. Unknown topics and
   mixed options exit 2, and there is no top-level `sharky explain` alias.
+- Unset-only parameter operators `${name-word}`, `${name=word}`, `${name+word}`
+  and `${name?word}` act only on unset parameters, leaving the colon forms
+  (`${name:-word}`, `${name:=word}`, `${name:+word}`, `${name:?word}`) to treat
+  unset and null alike. `${name?word}` expands its word before reporting it,
+  and an empty `$@`/`$*` counts as unset for `+` and `-`.
+- Unquoted expansions are split on `IFS` (space, tab and newline by default):
+  repeated delimiters keep empty fields, leading and trailing ones are dropped,
+  and an empty `IFS` disables splitting. Literals and quoted expansions stay
+  unsplit.
+- The `local` builtin declares variables in the current function frame with
+  dynamic scope: earlier bindings (scalar, indexed or associative) are saved
+  and restored on return, and locals are visible to called functions. `local`
+  outside a function, invalid names and unsupported options report failure.
+
+### Fixed
+
+- `"$*"` and `"${a[*]}"` join their elements with the first character of `IFS`
+  (nothing when `IFS` is empty) instead of a literal space.
+- `set` accepts clustered short options such as `-euo`, long names under
+  `-o`/`+o` (`errexit`, `nounset`, `xtrace`, `histexpand`, `pipefail`, `vi`),
+  and keeps reading letters after `o` so `set -oe pipefail` enables both.
+  `set +o` without a name lists the active options as reusable `set` commands.
+- Array literals parse after `local`, `readonly` and `typeset`, so declarations
+  such as `local a=(one two)` no longer fail.
+- An assignment-only simple command takes the status of its last command
+  substitution, so a failing substitution now trips `errexit` instead of
+  reporting success.
+- `set -e` and `set -u` no longer exit the interactive shell: errexit failures,
+  unbound variables and failing `if` conditions report a status and return to
+  the prompt.
 
 ## [3.5.4] - 2026-11-02
 
