@@ -617,7 +617,9 @@ impl Parser {
                         .words
                         .first()
                         .and_then(literal)
-                        .is_some_and(|word| word == "declare")
+                        .is_some_and(|word| {
+                            matches!(word.as_str(), "declare" | "local" | "readonly" | "typeset")
+                        })
                         && let Some(mut assignment) = as_assignment(&word)
                         && matches!(self.kind(), TokenKind::LParen)
                     {
