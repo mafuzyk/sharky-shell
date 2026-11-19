@@ -407,6 +407,7 @@ impl Shell {
             "break", "continue", "return", "jobs", "fg", "bg", "declare", "pwd", "type",
             "alias", "abbr", "unabbr", "unalias", "history", "wait", "kill", "z", "zi",
             "reload", "trap", "read", "shift", "wake", "exec", "time", "shopt",
+            "mapfile", "readarray",
         ]
         .iter()
         .map(|word| word.to_string())
@@ -1506,6 +1507,7 @@ impl Shell {
             "reload" => Some(Flow::Status(self.reload())),
             "trap" => Some(Flow::Status(self.trap(&words[1..]))),
             "read" => Some(Flow::Status(self.read(&words[1..]))),
+            "mapfile" | "readarray" => Some(Flow::Status(self.mapfile(&words[1..]))),
             "shift" => Some(Flow::Status(self.shift(&words[1..]))),
             "fg" => Some(Flow::Status(self.fg(&words[1..]))),
             "bg" => Some(Flow::Status(self.bg(&words[1..]))),
@@ -2367,6 +2369,55 @@ impl Shell {
             self.set_var(name, value);
         }
         if ended { 0 } else { 1 }
+    }
+
+    fn mapfile(&mut self, args: &[String]) -> i32 {
+        let mut strip = false;
+        let mut index = 0;
+        while index < args.len() {
+            let arg = args[index].as_str();
+            if arg == "--" {
+                index += 1;
+                break;
+            }
+            let Some(option) = arg.strip_prefix('-') else {
+                break;
+            };
+            if option.is_empty() {
+                break;
+            }
+            if option == "t" {
+                strip = true;
+                index += 1;
+                continue;
+            }
+            eprintln!("sharky: mapfile: {arg}: invalid option");
+            eprintln!("sharky: mapfile: usage: mapfile [-t] [array]");
+            return 2;
+        }
+
+        let name = args
+            .get(index)
+            .cloned()
+            .unwrap_or_else(|| "MAPFILE".to_string());
+        if self.assoc.contains_key(&name) {
+            eprintln!("sharky: mapfile: {name}: not an indexed array");
+            return 1;
+        }
+        if !is_valid_array_name(&name) {
+            eprintln!("sharky: mapfile: {name}: invalid identifier");
+            return 1;
+        }
+
+        let mut values = Vec::new();
+        while let Some(mut line) = read_stdin_line() {
+            if strip && line.ends_with('\n') {
+                line.pop();
+            }
+            values.push(line);
+        }
+        self.set_array(&name, values, false);
+        0
     }
 
     fn shift(&mut self, args: &[String]) -> i32 {
@@ -3854,6 +3905,8 @@ fn is_builtin_name(name: &str) -> bool {
             | "unalias"
             | "trap"
             | "read"
+            | "mapfile"
+            | "readarray"
             | "history"
             | "wake"
             | "wait"
@@ -3870,6 +3923,15 @@ fn is_builtin_name(name: &str) -> bool {
 fn is_special_name(name: &str) -> bool {
     matches!(name, "?" | "#" | "@" | "*" | "!" | "$" | "-")
         || (!name.is_empty() && name.chars().all(|char| char.is_ascii_digit()))
+}
+
+fn is_valid_array_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|char| char.is_ascii_alphanumeric() || char == '_')
 }
 
 fn normalize_signal(name: &str) -> Option<&'static str> {
