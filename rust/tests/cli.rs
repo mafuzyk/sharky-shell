@@ -1248,7 +1248,8 @@ fn discovers_path_additions_from_shell_profiles() {
     let bin = dir.join(".spicetify");
     std::fs::create_dir_all(&bin).unwrap();
     let tool = bin.join("spicetify");
-    std::fs::write(&tool, "#!/bin/sh\nprintf 'spicetify-test'\n").unwrap();
+    let sh = common::resolve("sh");
+    std::fs::write(&tool, format!("#!{}\nprintf 'spicetify-test'\n", sh.display())).unwrap();
     std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::write(
         dir.join(".bashrc"),
@@ -1949,9 +1950,13 @@ fn fifo_process_substitution_leaves_no_files() {
 #[test]
 fn fifo_cleanup_does_not_remove_unregistered_fifos() {
     let dir = temp_dir();
-    let script = "/bin/sh -c 'mkfifo \"$TMPDIR/sharky-psub-$$-unregistered\"' | cat; printf DONE";
+    let sh = common::resolve("sh");
+    let script = format!(
+        "{} -c 'mkfifo \"$TMPDIR/sharky-psub-$$-unregistered\"' | cat; printf DONE",
+        sh.display()
+    );
     let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
-        .args(["-c", script])
+        .args(["-c", &script])
         .env("SHARKY_CONFIG", NO_CONFIG)
         .env("TMPDIR", &dir)
         .current_dir(&dir)
@@ -2037,7 +2042,11 @@ fn exec_replaces_the_shell() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\n");
     assert_eq!(out.status.code(), Some(0));
 
-    let out = sharky(&["-c", "exec -a custom /bin/sh -c 'printf \"%s\" \"$0\"'"]);
+    let sh = common::resolve("sh");
+    let out = sharky(&[
+        "-c",
+        &format!("exec -a custom {} -c 'printf \"%s\" \"$0\"'", sh.display()),
+    ]);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "custom");
 
     let out = sharky(&["-c", "exec"]);
@@ -2360,13 +2369,12 @@ fn redirected_function_uses_the_fd_the_target_opened() {
 #[test]
 fn redirected_external_uses_the_fd_the_target_opened() {
     let dir = temp_dir();
-    let out = sharky_in(
-        &dir,
-        &[
-            "-c",
-            "/bin/sh -c 'printf x >/dev/fd/3' 3> out; printf '<%s>' \"$?\"; cat out",
-        ],
+    let sh = common::resolve("sh");
+    let script = format!(
+        "{} -c 'printf x >/dev/fd/3' 3> out; printf '<%s>' \"$?\"; cat out",
+        sh.display()
     );
+    let out = sharky_in(&dir, &["-c", &script]);
     let target = file_text(&dir.join("out"));
     std::fs::remove_dir_all(&dir).ok();
 
@@ -2619,9 +2627,14 @@ fn json_exec_from_a_profile_keeps_the_state() {
     // `exec -a NAME <echo>` alone would be seen as an unknown applet. Run echo
     // through a tiny wrapper to keep the `exec -a` semantics under test while
     // preserving echo's observable output.
+    let sh = common::resolve("sh");
     let echo = common::resolve("echo");
     let wrapper = home.join("profile-echo");
-    std::fs::write(&wrapper, format!("#!/bin/sh\nexec {} \"$@\"\n", echo.display())).unwrap();
+    std::fs::write(
+        &wrapper,
+        format!("#!{}\nexec {} \"$@\"\n", sh.display(), echo.display()),
+    )
+    .unwrap();
     std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::write(
         home.join(".config/sharky/profile.sharky"),
