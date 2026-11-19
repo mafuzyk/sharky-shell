@@ -13,7 +13,7 @@ use nix::unistd::{
 
 use sharky_config::{self as config, Config};
 use crate::ast::{
-    AndOr, Assignment, AssignmentValue, CaseArm, CaseTerm, Command, List, Pipeline, Program,
+    AndOr, Assignment, AssignmentValue, CaseArm, CaseTerm, Command, Entry, List, Pipeline, Program,
     Redirect, RedirectOp, Simple, literal,
 };
 use crate::arith;
@@ -2749,7 +2749,12 @@ impl Shell {
                         println!("{name} is aliased to `{value}'");
                     }
                     Resolution::Alias(value) => println!("alias {name}='{value}'"),
-                    Resolution::Function if verbose => println!("{name} is a function"),
+                    Resolution::Function if verbose => {
+                        println!("{name} is a function");
+                        if let Some(body) = self.funcs.get(name) {
+                            print!("{}", format_function_definition(name, body));
+                        }
+                    }
                     Resolution::Function => println!("{name}"),
                     Resolution::Builtin if verbose => println!("{name} is a shell builtin"),
                     Resolution::Builtin => println!("{name}"),
@@ -4732,6 +4737,374 @@ fn describe_command(command: &Command) -> String {
         Command::Test(_) => "[[ ... ]]".to_string(),
         Command::Arithmetic(_) => "(( ... ))".to_string(),
     }
+}
+
+// bash prints a function definition in the same layout `declare -f` uses: the
+// name followed by an empty parameter list, then the body in braces with one
+// statement per line. `command -V` reports it after the description.
+fn format_function_definition(name: &str, body: &List) -> String {
+    let mut text = format!("{name} () \n{{ \n");
+    text.push_str(&format_statements(body, 4, false));
+    text.push_str("}\n");
+    text
+}
+
+// bash ends every statement of a block closed by `}` with a semicolon except
+// the last one; the bodies of `then`, `else` and `do` keep the semicolon on
+// every statement.
+fn format_statements(list: &List, indent: usize, always_semicolon: bool) -> String {
+    let pad = " ".repeat(indent);
+    let mut text = String::new();
+
+    for (index, entry) in list.entries.iter().enumerate() {
+        let last = index + 1 == list.entries.len();
+        text.push_str(&pad);
+        text.push_str(&format_entry(entry, indent));
+        if !entry.background && (always_semicolon || !last) {
+            text.push(';');
+        }
+        text.push('\n');
+    }
+
+    text
+}
+
+// A condition list prints its statements one per line, the way bash keeps them
+// in the parse tree, so the keyword that follows goes after the last one.
+fn format_condition(list: &List, indent: usize) -> String {
+    let pad = " ".repeat(indent);
+    let separator = format!(";\n{pad}");
+    list.entries
+        .iter()
+        .map(|entry| format_entry(entry, indent))
+        .collect::<Vec<_>>()
+        .join(&separator)
+}
+
+fn format_entry(entry: &Entry, indent: usize) -> String {
+    let mut text = format_and_or(&entry.and_or, indent);
+    if entry.background {
+        text.push_str(" &");
+    }
+    text
+}
+
+fn format_and_or(and_or: &AndOr, indent: usize) -> String {
+    let mut text = format_pipeline(&and_or.first, indent);
+    for (is_and, pipeline) in &and_or.rest {
+        text.push_str(if *is_and { " && " } else { " || " });
+        text.push_str(&format_pipeline(pipeline, indent));
+    }
+    text
+}
+
+fn format_pipeline(pipeline: &Pipeline, indent: usize) -> String {
+    let mut text = String::new();
+    if pipeline.timed.is_some() {
+        text.push_str("time ");
+    }
+    if pipeline.negate {
+        text.push_str("! ");
+    }
+    text.push_str(
+        &pipeline
+            .commands
+            .iter()
+            .map(|command| format_command(command, indent))
+            .collect::<Vec<_>>()
+            .join(" | "),
+    );
+    text
+}
+
+fn format_command(command: &Command, indent: usize) -> String {
+    let pad = " ".repeat(indent);
+
+    match command {
+        Command::Simple(simple) => {
+            let mut words: Vec<String> = Vec::new();
+            for assignment in &simple.assignments {
+                words.push(format_assignment(assignment));
+            }
+            for word in &simple.words {
+                words.push(format_word(word));
+            }
+            let mut text = words.join(" ");
+            for redirect in &simple.redirects {
+                if !text.is_empty() {
+                    text.push(' ');
+                }
+                text.push_str(&format_redirect(redirect));
+            }
+            text
+        }
+        Command::Not(inner) => format!("! {}", format_command(inner, indent)),
+        // bash keeps the statements of a subshell on the line that opens it and
+        // continues at the same indentation.
+        Command::Subshell(list) => {
+            let separator = format!(";\n{pad}");
+            let body = list
+                .entries
+                .iter()
+                .map(|entry| format_entry(entry, indent))
+                .collect::<Vec<_>>()
+                .join(&separator);
+            format!("( {body} )")
+        }
+        Command::Group(list) => {
+            let mut text = String::from("{ \n");
+            text.push_str(&format_statements(list, indent + 4, false));
+            text.push_str(&pad);
+            text.push('}');
+            text
+        }
+        Command::If {
+            branches,
+            else_body,
+        } => format_if(branches, else_body.as_ref(), indent),
+        Command::For { name, words, body } => {
+            let words = if words.is_empty() {
+                "\"$@\"".to_string()
+            } else {
+                words
+                    .iter()
+                    .map(format_word)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            let mut text = format!("for {name} in {words};\n{pad}do\n");
+            text.push_str(&format_statements(body, indent + 4, true));
+            text.push_str(&pad);
+            text.push_str("done");
+            text
+        }
+        Command::ForArith {
+            init,
+            condition,
+            step,
+            body,
+        } => {
+            let mut text = format!("for (({init}; {condition}; {step}))\n{pad}do\n");
+            text.push_str(&format_statements(body, indent + 4, true));
+            text.push_str(&pad);
+            text.push_str("done");
+            text
+        }
+        Command::While {
+            condition,
+            body,
+            until,
+        } => {
+            let mut text = format!("{} ", if *until { "until" } else { "while" });
+            text.push_str(&format_condition(condition, indent));
+            text.push_str("; do\n");
+            text.push_str(&format_statements(body, indent + 4, true));
+            text.push_str(&pad);
+            text.push_str("done");
+            text
+        }
+        Command::Case { word, arms } => {
+            let mut text = format!("case {} in \n", format_word(word));
+            let arm_pad = " ".repeat(indent + 4);
+            for (patterns, body, term) in arms {
+                let patterns = patterns
+                    .iter()
+                    .map(format_word)
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                text.push_str(&arm_pad);
+                text.push_str(&patterns);
+                text.push_str(")\n");
+                text.push_str(&format_statements(body, indent + 8, false));
+                text.push_str(&arm_pad);
+                text.push_str(match term {
+                    CaseTerm::Break => ";;",
+                    CaseTerm::Fallthrough => ";&",
+                    CaseTerm::Continue => ";;&",
+                });
+                text.push('\n');
+            }
+            text.push_str(&pad);
+            text.push_str("esac");
+            text
+        }
+        Command::Function { name, body } => {
+            let mut text = format!("{name} () \n{pad}{{ \n");
+            text.push_str(&format_statements(body, indent + 4, false));
+            text.push_str(&pad);
+            text.push('}');
+            text
+        }
+        Command::Test(words) => format!(
+            "[[ {} ]]",
+            words
+                .iter()
+                .map(format_word)
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+        Command::Arithmetic(source) => format!("(( {source} ))"),
+        Command::Redirected {
+            command,
+            redirects,
+        } => {
+            let mut text = format_command(command, indent);
+            for redirect in redirects {
+                text.push(' ');
+                text.push_str(&format_redirect(redirect));
+            }
+            text
+        }
+    }
+}
+
+// bash flattens `elif` into an `else` that holds a nested `if`, and keeps the
+// semicolon on the nested one because it ends a statement of the else body.
+fn format_if(branches: &[(List, List)], else_body: Option<&List>, indent: usize) -> String {
+    let pad = " ".repeat(indent);
+    let mut text = String::new();
+
+    let Some(((condition, body), rest)) = branches.split_first() else {
+        return text;
+    };
+    text.push_str("if ");
+    text.push_str(&format_condition(condition, indent));
+    text.push_str("; then\n");
+    text.push_str(&format_statements(body, indent + 4, true));
+
+    if rest.is_empty() {
+        if let Some(else_body) = else_body {
+            text.push_str(&pad);
+            text.push_str("else\n");
+            text.push_str(&format_statements(else_body, indent + 4, true));
+        }
+    } else {
+        text.push_str(&pad);
+        text.push_str("else\n");
+        text.push_str(&" ".repeat(indent + 4));
+        text.push_str(&format_if(rest, else_body, indent + 4));
+        text.push_str(";\n");
+    }
+
+    text.push_str(&pad);
+    text.push_str("fi");
+    text
+}
+
+fn format_assignment(assignment: &Assignment) -> String {
+    let mut text = assignment.name.clone();
+    if let Some(index) = &assignment.index {
+        text.push('[');
+        text.push_str(&format_word(index));
+        text.push(']');
+    }
+    if assignment.append {
+        text.push('+');
+    }
+    text.push('=');
+    match &assignment.value {
+        AssignmentValue::Word(word) => text.push_str(&format_word(word)),
+        AssignmentValue::Array(words) => {
+            text.push('(');
+            text.push_str(&words.iter().map(format_word).collect::<Vec<_>>().join(" "));
+            text.push(')');
+        }
+    }
+    text
+}
+
+fn format_redirect(redirect: &Redirect) -> String {
+    let fd = |number: i32, default: i32| {
+        if number == default {
+            String::new()
+        } else {
+            number.to_string()
+        }
+    };
+    let target = redirect
+        .target
+        .as_ref()
+        .map(format_word)
+        .unwrap_or_default();
+
+    match &redirect.op {
+        RedirectOp::Out => format!("{}> {target}", fd(redirect.fd, 1)),
+        RedirectOp::Append => format!("{}>> {target}", fd(redirect.fd, 1)),
+        RedirectOp::In => format!("{}< {target}", fd(redirect.fd, 0)),
+        RedirectOp::Dup(other) => format!("{}>&{other}", fd(redirect.fd, 1)),
+        RedirectOp::Here { body, .. } => format!("{}<< {body}", fd(redirect.fd, 0)),
+        RedirectOp::HereString => format!("{}<<< {target}", fd(redirect.fd, 0)),
+        RedirectOp::Both { append } => {
+            let arrows = if *append { "&>>" } else { "&>" };
+            format!("{arrows} {target}")
+        }
+    }
+}
+
+fn format_word(word: &Word) -> String {
+    word.parts.iter().map(format_part).collect()
+}
+
+fn format_part(part: &Part) -> String {
+    match part {
+        Part::Literal(value) => value.clone(),
+        Part::Single(value) => format!("'{value}'"),
+        Part::Escaped(value) => format!("\\{value}"),
+        Part::Double(inner) => {
+            let inner: String = inner.iter().map(format_part).collect();
+            format!("\"{inner}\"")
+        }
+        Part::Variable(name) => format!("${name}"),
+        Part::Parameter(parameter) => format!("${{{}}}", format_parameter(parameter)),
+        Part::CmdSub(source) => format!("$({source})"),
+        Part::ProcessSub(source, input) => {
+            format!("{}({source})", if *input { '<' } else { '>' })
+        }
+        Part::Arithmetic(source) => format!("$(({source}))"),
+        Part::Tilde => "~".to_string(),
+    }
+}
+
+fn format_parameter(parameter: &Parameter) -> String {
+    let index = parameter
+        .index
+        .as_ref()
+        .map(|index| format!("[{index}]"))
+        .unwrap_or_default();
+
+    let symbol = match parameter.operator {
+        None => return format!("{}{index}", parameter.name),
+        Some(ParamOp::Length) => return format!("#{}{index}", parameter.name),
+        Some(ParamOp::Indirect | ParamOp::Keys) => {
+            return format!("!{}{index}", parameter.name);
+        }
+        Some(ParamOp::Names) => {
+            let suffix = parameter.argument.clone().unwrap_or_default();
+            return format!("!{}{suffix}", parameter.name);
+        }
+        Some(ParamOp::Default) => ":-",
+        Some(ParamOp::DefaultUnset) => "-",
+        Some(ParamOp::Assign) => ":=",
+        Some(ParamOp::AssignUnset) => "=",
+        Some(ParamOp::Alternate) => ":+",
+        Some(ParamOp::AlternateUnset) => "+",
+        Some(ParamOp::Error) => ":?",
+        Some(ParamOp::ErrorUnset) => "?",
+        Some(ParamOp::TrimPrefixShort) => "#",
+        Some(ParamOp::TrimPrefixLong) => "##",
+        Some(ParamOp::TrimSuffixShort) => "%",
+        Some(ParamOp::TrimSuffixLong) => "%%",
+        Some(ParamOp::Substitute) => "/",
+        Some(ParamOp::SubstituteAll) => "//",
+        Some(ParamOp::Substring) => ":",
+        Some(ParamOp::UpperFirst) => "^",
+        Some(ParamOp::UpperAll) => "^^",
+        Some(ParamOp::LowerFirst) => ",",
+        Some(ParamOp::LowerAll) => ",,",
+    };
+
+    let argument = parameter.argument.clone().unwrap_or_default();
+    format!("{}{index}{symbol}{argument}", parameter.name)
 }
 
 fn ensure_config_layout(dir: &Path) {

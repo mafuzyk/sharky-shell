@@ -1906,7 +1906,20 @@ fn command_function_follows_the_last_flag() {
 #[test]
 fn command_big_v_describes_a_function() {
     let out = sharky("probe() { :; }; command -V probe");
-    assert_eq!(stdout(&out), "probe is a function\n");
+    assert_eq!(
+        stdout(&out),
+        "probe is a function\nprobe () \n{ \n    :\n}\n"
+    );
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn command_big_v_prints_every_statement_of_a_function() {
+    let out = sharky("probe() { printf '%s' one; printf '%s' two; }; command -V probe");
+    assert_eq!(
+        stdout(&out),
+        "probe is a function\nprobe () \n{ \n    printf '%s' one;\n    printf '%s' two\n}\n"
+    );
     assert_eq!(status(&out), 0);
 }
 
