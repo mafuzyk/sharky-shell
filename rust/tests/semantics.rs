@@ -1,4 +1,10 @@
-use std::process::{Command, Output};
+use std::io::Write;
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+use nix::libc;
+use nix::pty::openpty;
 
 const NO_CONFIG: &str = "/nonexistent/sharky-test";
 
@@ -444,4 +450,88 @@ fn option_cluster_after_o_keeps_pipefail_enabled() {
     let out = sharky(r#"set -oe pipefail; set +e; false | true; printf '[%s]' "$?""#);
     assert_eq!(stdout(&out), "[1]");
     assert_eq!(status(&out), 0);
+}
+
+// An interactive shell survives a failing command under errexit or nounset.
+
+fn interactive() -> (std::process::Child, std::os::fd::OwnedFd) {
+    let pty = openpty(None, None).expect("pty");
+    let stdin = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stdout = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stderr = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+
+    let child = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .stdin(stdin)
+        .stdout(stdout)
+        .stderr(stderr)
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .env("TERM", "xterm-256color")
+        .env("HOME", "/tmp")
+        .spawn()
+        .expect("spawn sharky");
+
+    (child, pty.master)
+}
+
+fn read_until(fd: RawFd, needle: &str, timeout: Duration) -> String {
+    let deadline = Instant::now() + timeout;
+    let mut collected = String::new();
+    let mut buffer = [0u8; 1024];
+
+    while Instant::now() < deadline {
+        let mut pollfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd and one valid read buffer.
+        let ready = unsafe { libc::poll(&mut pollfd, 1, 50) };
+        if ready > 0 {
+            // SAFETY: the descriptor is the pty master and the buffer is valid.
+            let count = unsafe { libc::read(fd, buffer.as_mut_ptr() as *mut _, buffer.len()) };
+            if count > 0 {
+                collected.push_str(&String::from_utf8_lossy(&buffer[..count as usize]));
+                if collected.contains(needle) {
+                    return collected;
+                }
+            }
+        }
+    }
+
+    collected
+}
+
+fn run_interactive(script: &[&str], needle: &str) -> String {
+    let (mut child, master) = interactive();
+    let fd = master.as_raw_fd();
+    let mut writer =
+        unsafe { std::fs::File::from_raw_fd(master.try_clone().unwrap().into_raw_fd()) };
+
+    read_until(fd, "❯", Duration::from_secs(5));
+    for line in script {
+        let _ = writer.write_all(format!("{line}\r").as_bytes());
+    }
+
+    let seen = read_until(fd, needle, Duration::from_secs(5));
+    let _ = writer.write_all(b"exit\r");
+    let _ = child.wait();
+    seen
+}
+
+#[test]
+fn interactive_shell_survives_errexit() {
+    let seen = run_interactive(
+        &["set -e", "false", "printf 'AFTER-E-%s' 99"],
+        "AFTER-E-99",
+    );
+    assert!(seen.contains("AFTER-E-99"), "shell died on errexit: {seen:?}");
+}
+
+#[test]
+fn interactive_shell_survives_nounset() {
+    let seen = run_interactive(
+        &["set -u", "printf '%s' \"$SHARKY_NOPE\"", "printf 'AFTER-U-%s' 99"],
+        "AFTER-U-99",
+    );
+    assert!(seen.contains("AFTER-U-99"), "shell died on nounset: {seen:?}");
 }
