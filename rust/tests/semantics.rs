@@ -47,6 +47,24 @@ fn sharky_script(source: &str) -> Output {
     out
 }
 
+fn sharky_stdin(source: &str) -> Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args(["--no-config"])
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn sharky");
+    child
+        .stdin
+        .as_mut()
+        .expect("sharky stdin")
+        .write_all(source.as_bytes())
+        .expect("failed to write sharky stdin");
+    child.wait_with_output().expect("failed to run sharky")
+}
+
 // Parameter expansion: ${name-word} substitutes only for an unset parameter,
 // while ${name:-word} also substitutes for a null one.
 
@@ -722,6 +740,47 @@ fn script_error_after_another_command_uses_1() {
     assert_eq!(stdout(&out), "ok\n");
     assert_eq!(status(&out), 1);
     assert!(String::from_utf8_lossy(&out.stderr).contains("v: boom"));
+}
+
+// A script that arrives on standard input is not a -c command string, so bash
+// reports a null or unset parameter error with 1 there as well.
+
+#[test]
+fn stdin_null_parameter_with_a_word_uses_1() {
+    let out = sharky_stdin(r#"unset v; printf '[%s]' "${v?boom}""#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("v: boom"));
+}
+
+#[test]
+fn stdin_null_parameter_without_a_word_uses_1() {
+    let out = sharky_stdin(r#"unset v; printf '[%s]' "${v?}""#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("parameter null or not set"));
+}
+
+#[test]
+fn stdin_nounset_parameter_uses_1() {
+    let out = sharky_stdin(r#"set -u; printf '[%s]' "$v""#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("v: unbound variable"));
+}
+
+#[test]
+fn interactive_null_parameter_error_reports_status_1() {
+    let seen = run_interactive(
+        &[
+            r#"unset v; printf '%s' "${v?boom}""#,
+            r#"printf 'STATUS-%s' "$?""#,
+            r#"printf 'AFTER-%s' 99"#,
+        ],
+        "AFTER-99",
+    );
+    assert!(seen.contains("STATUS-1"), "{seen:?}");
+    assert!(seen.contains("AFTER-99"), "{seen:?}");
 }
 
 // Bash also reports 1 rather than 127 when errexit is enabled, including in a

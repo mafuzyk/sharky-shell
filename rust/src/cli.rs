@@ -160,6 +160,7 @@ pub fn run() -> i32 {
 
     let mut shell = Shell::new();
     shell.load_config(no_config);
+    shell.set_command_string(command.is_some());
     if login && !(json && command.is_some()) {
         crate::profiles::login(&mut shell);
     }

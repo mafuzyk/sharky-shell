@@ -39,6 +39,10 @@ pub struct Shell {
     keybinds: HashMap<String, String>,
     settings: HashMap<String, String>,
     script: Option<String>,
+    // Set only for a `-c` command string. Bash reports a null or unset
+    // parameter error with 127 there, but with 1 when the same text arrives as
+    // a script file, on standard input, in a subshell or interactively.
+    command_string: bool,
     interactive: bool,
     errexit: bool,
     nounset: bool,
@@ -180,6 +184,7 @@ impl Shell {
             keybinds: HashMap::new(),
             settings: HashMap::new(),
             script: None,
+            command_string: false,
             interactive: false,
             errexit: false,
             nounset: false,
@@ -390,6 +395,12 @@ impl Shell {
 
     pub fn set_interactive(&mut self, interactive: bool) {
         self.interactive = interactive;
+    }
+
+    /// Marks the source as a `-c` command string, which changes the status bash
+    /// reports for a null or unset parameter error.
+    pub fn set_command_string(&mut self, command_string: bool) {
+        self.command_string = command_string;
     }
 
     pub fn setting(&self, key: &str) -> Option<&str> {
@@ -1111,17 +1122,19 @@ impl Shell {
     }
 
     // Bash reports a null or unset parameter error with 127 for a -c command
-    // string, but with 1 in a script, a subshell, an interactive shell or a
-    // shell with errexit enabled. Arithmetic and indirect errors always use 1.
+    // string, but with 1 in a script, on standard input, in a subshell, in an
+    // interactive shell or in a shell with errexit enabled. Arithmetic and
+    // indirect errors always use 1.
     fn unset_parameter_status(&self) -> i32 {
-        if self.interactive
-            || self.errexit
-            || self.script.is_some()
-            || self.in_subshell
+        if self.command_string
+            && !self.interactive
+            && !self.errexit
+            && !self.script.is_some()
+            && !self.in_subshell
         {
-            1
-        } else {
             127
+        } else {
+            1
         }
     }
 
