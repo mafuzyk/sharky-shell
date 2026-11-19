@@ -14,6 +14,18 @@ read it, run it, but do not edit it.
   stderr and exit status. Skipped when no reference binary is present; override
   with `SHARKY_REF=/path/to/sharky`.
 - `tests/cli.rs` — black-box behaviour tests against the built binary.
+- `tests/globstar.rs` — black-box CLI regressions for `shopt globstar`, with
+  expected path sets checked against Bash 5.3.20 during development.
+
+`tests/cli.rs`, `tests/history.rs`, `tests/interactive.rs`,
+`tests/job_control.rs`, `tests/robustness.rs` and `tests/globstar.rs` are CLI
+tests: they run the built Rust binary against a controlled filesystem and assert
+stdout, stderr and exit status. Bash 5.3.20 can inform a pathname-expansion
+fixture, but it is not the oracle for these tests. `tests/differential.rs` is the
+only oracle-backed suite: it runs `conformance/cases/*.sh` through both the
+frozen Ruby v1 binary (`.ruby-oracle/bin/sharky`, overridable with `SHARKY_REF`)
+and the Rust binary, comparing all three outputs. Ruby cases are the frozen
+contract of the port and are not rewritten to match Bash or the Rust shell.
 
 ## Commands
 
@@ -40,6 +52,7 @@ assert an exit status instead of waiting forever.
 - [x] Pipelines, redirects (`>`, `>>`, `<`, `N>`, `2>&1`)
 - [x] Assignments, prefix assignments, `export`, `unset`
 - [x] `$(...)`, `${...}` operators, `$((...))`, globbing, tilde
+- [x] `shopt -s/-u globstar` with recursive `**` matching
 - [x] Brace expansion, here-strings, `&>`, `${var/pat/repl}`
 - [x] Extended parameter expansion: substrings, case, indirect, `$'...'`
 - [x] Associative arrays, array slices and arithmetic indexes
@@ -115,8 +128,16 @@ assert an exit status instead of waiting forever.
 
 ### 3.5 decisions
 
-- **extglob is always enabled.** There is no `shopt` in 3.5; the pattern
-  operators work everywhere, including `case` arms and pathname expansion.
+- **extglob is always enabled.** No option toggles it; the pattern operators
+  work everywhere, including `case` arms and pathname expansion.
+- **`shopt` owns only `globstar`.** `shopt -s globstar` enables recursive `**`
+  (off by default), `shopt -u globstar` restores single-level globbing and
+  `shopt globstar` prints the state with a matching status. Other option names,
+  combined or interleaved `-s`/`-u` flags and persistence are out of scope; the
+  setting lives in shell state, not config, and is not inherited by a new
+  process. Only leading `./` and `../` components are normalized: a `.` or `..`
+  component later in the path (for example `dir/./**/*.txt`) leaves the pattern
+  literal.
 - **`exec` failure is interactive-friendly.** A failed `exec` keeps an
   interactive shell alive with status 126/127 and exits a script with that
   status. `exec` with only redirections applies them permanently.

@@ -19,6 +19,13 @@ rather than a separate preview track.
   the verified static binary, man page and example config on `x86_64-linux`.
 - Opt-in `wave overwrite` styling colours the literal target of `>`, `2>` and
   `&>` when it names an existing file.
+- `shopt` supports exactly one option, `globstar`: `shopt -s globstar` enables
+  recursive `**` pathname matching (off by default), `shopt -u globstar`
+  restores ordinary single-level globbing and `shopt globstar` reports the
+  state. Quoted `**` stays literal, hidden entries are skipped unless the
+  component starts with `.`, matches are deduplicated and `./`/`../` prefixes
+  are preserved. Other option names and combined or interleaved `-s`/`-u`
+  flags are rejected; the setting is per shell and is not persisted.
 
 ## [3.5.4] - 2026-11-02
 
