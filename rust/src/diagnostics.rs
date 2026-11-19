@@ -227,7 +227,12 @@ fn check_history() -> Check {
             }
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            let parent = path.parent().unwrap_or_else(|| Path::new("."));
+            // A relative filename has `Some("")` as its parent; an empty path
+            // names the current directory, which is where the file would go.
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
             match std::fs::metadata(parent) {
                 Ok(meta)
                     if meta.is_dir() && meta.permissions().mode() & 0o300 == 0o300 =>

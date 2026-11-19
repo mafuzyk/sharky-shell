@@ -3466,6 +3466,37 @@ fn doctor_checks_history_permissions_without_opening_or_changing_the_file() {
 }
 
 #[test]
+fn doctor_accepts_a_relative_history_path_in_the_current_directory() {
+    let dir = temp_dir();
+    let data = temp_dir();
+    std::fs::create_dir_all(data.join("sharky")).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .arg("doctor")
+        .env("SHARKY_CONFIG", &dir)
+        .env("SHARKY_HISTORY", "hist")
+        .env("XDG_DATA_HOME", &data)
+        .env("HOME", &data)
+        .current_dir(&dir)
+        .output()
+        .expect("failed to run sharky");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let history_line_ok = text
+        .lines()
+        .any(|line| line.starts_with("OK   history:") && line.contains("writable"));
+    let created_history = dir.join("hist").exists();
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&data).ok();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout: {text}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(history_line_ok, "{text}");
+    assert!(!created_history, "doctor must not create a history file");
+}
+
+#[test]
 fn doctor_detects_tools_missing_from_path() {
     let dir = temp_dir();
     let data = temp_dir();
