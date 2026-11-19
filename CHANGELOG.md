@@ -61,6 +61,9 @@ rather than a separate preview track.
 
 - `"$*"` and `"${a[*]}"` join their elements with the first character of `IFS`
   (nothing when `IFS` is empty) instead of a literal space.
+- `${!a[*]}` and `${!m[*]}` join indexed and associative array keys with the
+  first character of `IFS` (nothing when `IFS` is empty) instead of a literal
+  space.
 - `set` accepts clustered short options such as `-euo`, long names under
   `-o`/`+o` (`errexit`, `nounset`, `xtrace`, `histexpand`, `pipefail`, `vi`),
   and keeps reading letters after `o` so `set -oe pipefail` enables both.
