@@ -95,6 +95,11 @@ rather than a separate preview track.
   `-v`/`-V` it is 0 when any name resolves (and with no names), and 1 only when
   every name is missing; otherwise it is the status of the command run (127
   when the name is not found), and an invalid option returns 2.
+- `command -V NAME` now prints the function definition after the
+  `NAME is a function` line, in Bash's `declare -f` layout: the name and an
+  empty parameter list, the body in braces with one statement per line at
+  four-space indentation and semicolons between statements. Nested blocks and
+  `elif` are formatted the way Bash prints them.
 
 ### Fixed
 
@@ -103,6 +108,10 @@ rather than a separate preview track.
 - `${!a[*]}` and `${!m[*]}` join indexed and associative array keys with the
   first character of `IFS` (nothing when `IFS` is empty) instead of a literal
   space.
+- `${!x[@]}` and `${!x[*]}` treat a defined scalar as a one-element key list
+  holding `0`, so they expand to `0` instead of nothing; an undefined name
+  still expands to no keys, and empty or sparse arrays keep listing only their
+  real indices.
 - `set` accepts clustered short options such as `-euo`, long names under
   `-o`/`+o` (`errexit`, `nounset`, `xtrace`, `histexpand`, `pipefail`, `vi`),
   and keeps reading letters after `o` so `set -oe pipefail` enables both.
@@ -119,7 +128,9 @@ rather than a separate preview track.
   parameter error exits 127 in a `-c` command string without errexit, while
   scripts, standard input, subshells, errexit shells and interactive lines keep
   status 1 (arithmetic errors stay at 1). An expansion error in an `if`/`elif`
-  condition now aborts the shell instead of being treated as a false condition.
+  condition discards the whole compound command: no branch runs, not even
+  `else`. Non-interactive shells abort on the error; interactive shells report
+  its status and keep running.
 - `read` splits fields on `IFS` with Bash's last-name remainder rule: leading
   and delimiter-adjacent IFS whitespace is skipped, a non-whitespace delimiter
   ends a field even when empty, and the last name receives the rest of the line
@@ -132,6 +143,14 @@ rather than a separate preview track.
   longer discards its elements: the conversion is rejected with status 1, the
   original array is kept and the error is reported for that name while the
   remaining arguments still apply.
+- `command -v`, `command -V` and `type` report a name containing a slash only
+  when it names an executable file, without searching PATH: non-executable
+  files, directories and symlinks to non-executable files are no longer
+  reported as found. Running such a path still reports permission denied.
+- When both `-v` and `-V` are given to `command`, the last one wins, whether in
+  one cluster or across separate words: `command -Vv cd` prints the bare name
+  and `command -vV cd` prints the description. Previously any `-V` forced the
+  verbose form.
 
 ## [3.5.4] - 2026-11-02
 
