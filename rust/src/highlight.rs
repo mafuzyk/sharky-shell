@@ -1,3 +1,4 @@
+use crate::lexer::{Part, TokenKind, Word};
 use crate::prompt;
 use crate::shell::Shell;
 
@@ -15,7 +16,7 @@ pub enum Role {
 }
 
 pub fn render(shell: &Shell, text: &[char]) -> String {
-    if shell.setting("highlight") == Some("off") {
+    if shell.setting("highlight") == Some("off") || !shell.colour_enabled() {
         return text.iter().collect();
     }
 
@@ -28,10 +29,10 @@ pub fn render(shell: &Shell, text: &[char]) -> String {
         }
     });
 
-    // Visual-only opt-in: skip the scan and every filesystem lookup unless the
+    // Visual-only opt-in: no tokenizing and no filesystem lookup unless the
     // theme actually styles overwrite targets.
     let overwrite = if shell.style("overwrite").is_some() {
-        overwrite_spans(text)
+        overwrite_targets(text)
     } else {
         Vec::new()
     };
@@ -61,37 +62,45 @@ pub fn render(shell: &Shell, text: &[char]) -> String {
     out
 }
 
-// Spans of literal targets whose redirect truncates a file: `>`, `2>`, `&>`.
-// Appends (`>>`, `&>>`), input (`<`) and descriptor duplication (`>&`, `2>&1`)
-// never qualify.
-fn overwrite_spans(text: &[char]) -> Vec<(usize, usize)> {
+// Targets of truncating redirects (`>`, `2>`, `&>`) taken from the shell's own
+// tokenizer, so escaped operators, `<>`, test/arithmetic comparisons and
+// heredoc bodies are never mistaken for redirects. Incomplete input while
+// typing yields no highlight.
+fn overwrite_targets(text: &[char]) -> Vec<(usize, usize)> {
+    let source: String = text.iter().collect();
+    let Ok(tokens) = crate::lexer::tokenize(&source) else {
+        return Vec::new();
+    };
     let mut spans = Vec::new();
-    let mut index = 0;
-    while index < text.len() {
-        if text[index] != '>' && text[index] != '&' {
-            index += 1;
+    for (index, token) in tokens.iter().enumerate() {
+        if !matches!(token.kind, TokenKind::RedirOut(_) | TokenKind::RedirBoth) {
             continue;
         }
-        let op_start = index;
-        while index < text.len() && is_operator(text[index]) {
-            index += 1;
-        }
-        let op: String = text[op_start..index].iter().collect();
-        if op != ">" && op != "&>" {
+        // The lexer splits `<>` into RedirIn + RedirOut; adjacent tokens are
+        // a read/write redirect, not a truncation.
+        if index > 0 && matches!(tokens[index - 1].kind, TokenKind::RedirIn(_)) {
             continue;
         }
-        while index < text.len() && text[index].is_whitespace() {
-            index += 1;
-        }
-        let target_start = index;
-        while index < text.len() && !text[index].is_whitespace() && !is_operator(text[index]) {
-            index += 1;
-        }
-        if index > target_start {
-            spans.push((target_start, index));
-        }
+        let Some(next) = tokens.get(index + 1) else {
+            continue;
+        };
+        let TokenKind::Word(word) = &next.kind else {
+            continue;
+        };
+        // v1 is static literals only: no quotes, variables, tilde or escapes.
+        let Some(literal) = literal_word(word) else {
+            continue;
+        };
+        spans.push((next.pos, next.pos + literal.chars().count()));
     }
     spans
+}
+
+fn literal_word(word: &Word) -> Option<&str> {
+    match word.parts.as_slice() {
+        [Part::Literal(value)] => Some(value),
+        _ => None,
+    }
 }
 
 fn is_existing_regular_file(word: &str) -> bool {
@@ -388,7 +397,7 @@ fn is_operator(char: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Role, classify_with, overwrite_spans};
+    use super::{Role, classify_with, overwrite_targets};
 
     fn classify(text: &str) -> Vec<Role> {
         let chars: Vec<char> = text.chars().collect();
@@ -451,10 +460,10 @@ mod tests {
     }
 
     #[test]
-    fn overwrite_spans_only_cover_truncating_redirects() {
+    fn overwrite_targets_only_cover_truncating_redirects() {
         fn spans(text: &str) -> Vec<String> {
             let chars: Vec<char> = text.chars().collect();
-            overwrite_spans(&chars)
+            overwrite_targets(&chars)
                 .into_iter()
                 .map(|(begin, end)| chars[begin..end].iter().collect())
                 .collect()
@@ -465,5 +474,8 @@ mod tests {
             "out,err,both"
         );
         assert!(spans("echo hi >> out < in 2>&1 &>> both").is_empty());
+        assert!(spans("echo hi \\> out <> rw").is_empty());
+        assert!(spans("[[ a > x ]] (( 0 > n ))").is_empty());
+        assert!(spans("echo hi > \"out\"").is_empty());
     }
 }

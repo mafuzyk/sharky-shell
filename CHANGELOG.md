@@ -17,6 +17,8 @@ rather than a separate preview track.
   `${XDG_DATA_HOME:-~/.local/share}/sharky/history` (`SHARKY_HISTORY` overrides).
 - Prebuilt Nix flake: `nix profile install github:mafuzyk/sharky-shell` installs
   the verified static binary, man page and example config on `x86_64-linux`.
+- Opt-in `wave overwrite` styling colours the literal target of `>`, `2>` and
+  `&>` when it names an existing file.
 
 ## [3.5.4] - 2026-11-02
 
