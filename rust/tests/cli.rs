@@ -184,6 +184,10 @@ fn sharky_in(dir: &std::path::Path, args: &[&str]) -> Output {
         .expect("failed to run sharky")
 }
 
+fn file_text(path: &std::path::Path) -> String {
+    std::fs::read_to_string(path).unwrap_or_else(|err| panic!("reading {}: {err}", path.display()))
+}
+
 #[test]
 fn pipeline_connects_stdout_to_stdin() {
     let out = sharky(&["-c", r"printf 'a\nb\n' | wc -l"]);
@@ -1985,6 +1989,173 @@ fn exec_redirections_persist_in_the_shell() {
     std::fs::remove_dir_all(&dir).ok();
     assert!(out.stdout.is_empty());
     assert_eq!(text, "hi\nerr\n");
+}
+
+// A redirection attached to a command the shell runs itself must apply for the
+// duration of that command only: its effects stay, the descriptors go back.
+#[test]
+fn redirected_cd_changes_directory_and_restores_stdout() {
+    let dir = temp_dir();
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    let out = sharky_in(&dir, &["-c", "cd sub > out; pwd; printf 'after\\n'"]);
+    let target = file_text(&dir.join("out"));
+    let stray = dir.join("sub/out").exists();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
+    assert_eq!(stderr, "", "cd failed under the redirection");
+    let mut lines = stdout.lines();
+    assert!(
+        lines.next().is_some_and(|line| line.ends_with("/sub")),
+        "cd did not change the shell directory: {stdout:?}"
+    );
+    assert_eq!(
+        lines.next(),
+        Some("after"),
+        "stdout was not restored after the redirection: {stdout:?}"
+    );
+    assert_eq!(target, "", "the redirected cd wrote to its target");
+    assert!(
+        !stray,
+        "the target must be opened before cd changes directory"
+    );
+}
+
+#[test]
+fn redirected_read_sets_variables_in_the_shell() {
+    let dir = temp_dir();
+    std::fs::write(dir.join("input"), "value\n").unwrap();
+    let out = sharky_in(&dir, &["-c", "read name < input; printf '<%s>' \"$name\""]);
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "<value>",
+        "read did not reach the shell environment (stderr: {})",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn redirected_function_call_keeps_shell_effects() {
+    let dir = temp_dir();
+    let out = sharky_in(
+        &dir,
+        &[
+            "-c",
+            "f() { X=set; printf body; }; f > out; printf '<%s>' \"$X\"; cat out",
+        ],
+    );
+    let target = file_text(&dir.join("out"));
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "<set>body",
+        "the function did not run in the shell (stderr: {})",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(target, "body", "the call's redirection captured the output");
+}
+
+#[test]
+fn redirected_function_restores_stderr() {
+    let dir = temp_dir();
+    let out = sharky_in(
+        &dir,
+        &[
+            "-c",
+            "f() { printf oops >&2; }; f 2> err; printf 'after\\n'",
+        ],
+    );
+    let target = file_text(&dir.join("err"));
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "after\n");
+    assert_eq!(target, "oops", "stderr was not captured by the redirection");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "",
+        "stderr was not restored after the redirection"
+    );
+}
+
+#[test]
+fn redirected_function_reads_from_a_file_and_keeps_variables() {
+    let dir = temp_dir();
+    std::fs::write(dir.join("input"), "value\n").unwrap();
+    let out = sharky_in(
+        &dir,
+        &[
+            "-c",
+            "f() { read line; }; f < input; printf '<%s>' \"$line\"",
+        ],
+    );
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "<value>",
+        "the redirected stdin did not reach the function's read"
+    );
+}
+
+#[test]
+fn redirected_group_changes_directory_and_restores_stdout() {
+    let dir = temp_dir();
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    let out = sharky_in(&dir, &["-c", "{ cd sub; } > out; pwd; printf 'after\\n'"]);
+    let target = file_text(&dir.join("out"));
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    std::fs::remove_dir_all(&dir).ok();
+
+    let mut lines = stdout.lines();
+    assert!(
+        lines.next().is_some_and(|line| line.ends_with("/sub")),
+        "the group did not change the shell directory: {stdout:?}"
+    );
+    assert_eq!(
+        lines.next(),
+        Some("after"),
+        "stdout not restored: {stdout:?}"
+    );
+    assert_eq!(target, "");
+}
+
+// A redirection error must not skip only the redirection: the command does not
+// run, the shell keeps its own descriptors, and later commands still work.
+#[test]
+fn failed_redirection_skips_the_builtin_and_keeps_streams() {
+    let dir = temp_dir();
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    let out = sharky_in(
+        &dir,
+        &[
+            "-c",
+            "cd sub > /nonexistent/sharky-redirect/out; pwd; printf 'after\\n'",
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert!(
+        stderr.contains("/nonexistent/sharky-redirect/out"),
+        "no diagnostic for the failed redirection: {stderr:?}"
+    );
+    let mut lines = stdout.lines();
+    assert!(
+        lines.next().is_some_and(|line| !line.ends_with("/sub")),
+        "cd ran despite the failed redirection: {stdout:?}"
+    );
+    assert_eq!(
+        lines.next(),
+        Some("after"),
+        "stdout was not restored after the failed redirection: {stdout:?}"
+    );
 }
 
 #[test]
