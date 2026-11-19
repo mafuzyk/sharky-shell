@@ -310,3 +310,21 @@ fn empty_ifs_joins_array_elements_with_nothing() {
     assert_eq!(stdout(&out), "xy");
     assert_eq!(status(&out), 0);
 }
+
+// local: a name without a value shadows the previous binding without becoming
+// set itself.
+
+#[test]
+fn local_without_a_value_leaves_the_name_unset() {
+    let out = sharky(r#"v=outer; f() { local v; printf '[%s]' "${v-unset}"; }; f"#);
+    assert_eq!(stdout(&out), "[unset]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn local_without_a_value_trips_nounset() {
+    let out = sharky(r#"set -u; f() { local v; printf '%s' "$v"; }; f; printf after"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unbound"));
+}
