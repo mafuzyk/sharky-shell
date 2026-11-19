@@ -89,6 +89,16 @@ rather than a separate preview track.
 - `set -e` and `set -u` no longer exit the interactive shell: errexit failures,
   unbound variables and failing `if` conditions report a status and return to
   the prompt.
+- `command` runs a name without function lookup, so it reaches the builtin or
+  external command hidden by a same-named function. `-v` prints how each name
+  resolves (bare name for builtins and functions, `alias name='value'` for
+  aliases, a path for externals) and `-V` prints a verbose description; missing
+  names are skipped silently by `-v` and reported on stderr by `-V`. `-p`
+  searches the default PATH instead of the environment PATH for lookup and for
+  execution, without changing the environment. The status follows Bash: with
+  `-v`/`-V` it is 0 when any name resolves (and with no names), and 1 only when
+  every name is missing; otherwise it is the status of the command run (127
+  when the name is not found), and an invalid option returns 2.
 
 ## [3.5.4] - 2026-11-02
 
