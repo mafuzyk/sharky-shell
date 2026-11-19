@@ -8,19 +8,18 @@ use nix::unistd::{Pid, execve};
 
 use crate::shell::Shell;
 
-const DEFAULT_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
+pub const DEFAULT_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 
 pub fn resolve(name: &str, shell: &Shell) -> Option<PathBuf> {
+    resolve_in(name, path_of(shell))
+}
+
+/// Resolves `name` against an explicit `path`, so `command -p` can search the
+/// default path without a temporary environment change.
+pub fn resolve_in(name: &str, path: &str) -> Option<PathBuf> {
     if name.contains('/') {
         return Some(PathBuf::from(name));
     }
-
-    let path = shell
-        .env
-        .iter()
-        .find(|(key, _)| key == "PATH")
-        .map(|(_, value)| value.as_str())
-        .unwrap_or(DEFAULT_PATH);
 
     path.split(':')
         .map(|dir| {
@@ -32,6 +31,15 @@ pub fn resolve(name: &str, shell: &Shell) -> Option<PathBuf> {
         })
         .map(|dir| dir.join(name))
         .find(|candidate| is_executable(candidate))
+}
+
+fn path_of(shell: &Shell) -> &str {
+    shell
+        .env
+        .iter()
+        .find(|(key, _)| key == "PATH")
+        .map(|(_, value)| value.as_str())
+        .unwrap_or(DEFAULT_PATH)
 }
 
 pub fn exec_now(path: &Path, argv: &[String], env: &[(String, String)]) -> Result<(), String> {

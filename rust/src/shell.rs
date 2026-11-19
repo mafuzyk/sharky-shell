@@ -108,6 +108,25 @@ struct Prepared {
     declarations: Vec<Assignment>,
 }
 
+/// One name resolved through the shell's precedence table, shared by `type`
+/// and `command` so both report the same answer.
+enum Resolution {
+    Alias(String),
+    Function,
+    Builtin,
+    External(PathBuf),
+}
+
+/// The child side of `spawn`: where its standard streams go, which process
+/// group it joins, and the program already resolved for it.
+#[derive(Default)]
+struct SpawnChild<'a> {
+    stdin: Option<RawFd>,
+    stdout: Option<RawFd>,
+    leader: Option<Pid>,
+    program: Option<&'a Path>,
+}
+
 enum Action {
     Write(i32, PathBuf),
     Append(i32, PathBuf),
@@ -419,7 +438,7 @@ impl Shell {
             "break", "continue", "return", "jobs", "fg", "bg", "declare", "local", "pwd", "type",
             "alias", "abbr", "unabbr", "unalias", "history", "wait", "kill", "z", "zi",
             "reload", "trap", "read", "shift", "wake", "exec", "time", "shopt",
-            "mapfile", "readarray",
+            "mapfile", "readarray", "command",
         ]
         .iter()
         .map(|word| word.to_string())
@@ -841,7 +860,7 @@ impl Shell {
         } else if self.funcs.contains_key(&prepared.argv[0]) || is_builtin_name(&prepared.argv[0]) {
             let argv = &prepared.argv;
             return self.with_actions(&prepared.actions, |shell| {
-                shell.run_in_shell(argv, &prepared.declarations)
+                shell.run_in_shell(argv, &prepared.declarations, &prepared.env)
             });
         }
 
@@ -850,9 +869,7 @@ impl Shell {
             &prepared.argv,
             &prepared.actions,
             &prepared.env,
-            None,
-            None,
-            None,
+            SpawnChild::default(),
         ) {
             Ok(pid) => Flow::Status(self.wait_foreground(&[pid], pid, command)),
             Err(message) => {
@@ -944,7 +961,12 @@ impl Shell {
         flow
     }
 
-    fn run_in_shell(&mut self, argv: &[String], declarations: &[Assignment]) -> Flow {
+    fn run_in_shell(
+        &mut self,
+        argv: &[String],
+        declarations: &[Assignment],
+        env: &[(String, String)],
+    ) -> Flow {
         if let Some(body) = self.funcs.get(&argv[0]).cloned() {
             let saved = std::mem::replace(&mut self.positional, argv[1..].to_vec());
             self.local_scopes.push(Vec::new());
@@ -957,7 +979,7 @@ impl Shell {
             };
         }
 
-        match self.builtin(argv, declarations) {
+        match self.builtin(argv, declarations, env) {
             Some(flow) => flow,
             None => {
                 eprintln!("sharky: command not found: {}", argv[0]);
@@ -1033,7 +1055,7 @@ impl Shell {
             };
         }
 
-        if let Some(flow) = self.builtin(&prepared.argv, &prepared.declarations) {
+        if let Some(flow) = self.builtin(&prepared.argv, &prepared.declarations, &prepared.env) {
             return flow_status(flow);
         }
 
@@ -1526,10 +1548,14 @@ impl Shell {
         argv: &[String],
         actions: &[Action],
         env: &[(String, String)],
-        stdin: Option<RawFd>,
-        stdout: Option<RawFd>,
-        leader: Option<Pid>,
+        child: SpawnChild<'_>,
     ) -> Result<Pid, String> {
+        let SpawnChild {
+            stdin,
+            stdout,
+            leader,
+            program,
+        } = child;
         // SAFETY: the child only runs syscalls and allocation-safe code before exec.
         match unsafe { fork() } {
             Ok(ForkResult::Parent { child }) => {
@@ -1561,10 +1587,14 @@ impl Shell {
                 if argv.is_empty() {
                     unsafe { _exit(0) }
                 }
-                if let Some(flow) = self.builtin(argv, &[]) {
+                if let Some(flow) = self.builtin(argv, &[], env) {
                     unsafe { _exit(flow_status(flow)) }
                 }
-                match exec::resolve(&argv[0], self) {
+                let resolved = match program {
+                    Some(path) => Some(path.to_path_buf()),
+                    None => exec::resolve(&argv[0], self),
+                };
+                match resolved {
                     Some(path) => exec::exec_replace(&path, argv, env),
                     None => {
                         eprintln!("sharky: command not found: {}", argv[0]);
@@ -1576,7 +1606,12 @@ impl Shell {
         }
     }
 
-    fn builtin(&mut self, words: &[String], declarations: &[Assignment]) -> Option<Flow> {
+    fn builtin(
+        &mut self,
+        words: &[String],
+        declarations: &[Assignment],
+        env: &[(String, String)],
+    ) -> Option<Flow> {
         match words[0].as_str() {
             ":" | "true" => Some(Flow::Status(0)),
             "false" => Some(Flow::Status(1)),
@@ -1607,6 +1642,7 @@ impl Shell {
                 Some(Flow::Status(0))
             }
             "type" => Some(Flow::Status(self.type_builtin(&words[1..]))),
+            "command" => Some(self.command_builtin(&words[1..], env)),
             "alias" => Some(Flow::Status(self.alias(&words[1..]))),
             "abbr" => Some(Flow::Status(self.abbr(&words[1..]))),
             "unabbr" => Some(Flow::Status(self.unabbr(&words[1..]))),
@@ -2568,20 +2604,130 @@ impl Shell {
 
         let mut status = 0;
         for name in args {
-            if let Some(value) = self.aliases.get(name) {
-                println!("{name}: aliased to {value}");
-            } else if self.funcs.contains_key(name) {
-                println!("{name}: function");
-            } else if is_builtin_name(name) {
-                println!("{name}: shell builtin");
-            } else if let Some(path) = exec::resolve(name, self) {
-                println!("{name}: {}", path.display());
-            } else {
-                eprintln!("sharky: type: {name}: not found");
-                status = 1;
+            match self.resolve_name(name, None) {
+                Some(Resolution::Alias(value)) => println!("{name}: aliased to {value}"),
+                Some(Resolution::Function) => println!("{name}: function"),
+                Some(Resolution::Builtin) => println!("{name}: shell builtin"),
+                Some(Resolution::External(path)) => println!("{name}: {}", path.display()),
+                None => {
+                    eprintln!("sharky: type: {name}: not found");
+                    status = 1;
+                }
             }
         }
         status
+    }
+
+    // The one precedence rule: an alias shadows a function, which shadows a
+    // builtin, which shadows an external command. `path` overrides the
+    // environment PATH for the external lookup, which `command -p` needs.
+    fn resolve_name(&self, name: &str, path: Option<&str>) -> Option<Resolution> {
+        if let Some(value) = self.aliases.get(name) {
+            Some(Resolution::Alias(value.clone()))
+        } else if self.funcs.contains_key(name) {
+            Some(Resolution::Function)
+        } else if is_builtin_name(name) {
+            Some(Resolution::Builtin)
+        } else {
+            let found = match path {
+                Some(path) => exec::resolve_in(name, path),
+                None => exec::resolve(name, self),
+            };
+            found.map(Resolution::External)
+        }
+    }
+
+    // `command` runs a name without function lookup, and -v/-V only report how
+    // the shell would resolve it. -p searches the default PATH instead of the
+    // environment PATH, and it never changes what runs or its environment.
+    fn command_builtin(&mut self, args: &[String], env: &[(String, String)]) -> Flow {
+        let mut short = false;
+        let mut verbose = false;
+        let mut default_path = false;
+        let mut index = 0;
+
+        while let Some(argument) = args.get(index) {
+            if argument == "--" {
+                index += 1;
+                break;
+            }
+            if !argument.starts_with('-') || argument == "-" {
+                break;
+            }
+            for flag in argument.chars().skip(1) {
+                match flag {
+                    'v' => short = true,
+                    'V' => verbose = true,
+                    'p' => default_path = true,
+                    _ => {
+                        eprintln!("sharky: command: -{flag}: invalid option");
+                        eprintln!("sharky: command: usage: command [-pVv] command [arg ...]");
+                        return Flow::Status(2);
+                    }
+                }
+            }
+            index += 1;
+        }
+
+        let words = &args[index..];
+
+        if short || verbose {
+            let path = default_path.then_some(exec::DEFAULT_PATH);
+            let mut status = 0;
+            for name in words {
+                match self.resolve_name(name, path) {
+                    Some(Resolution::Alias(value)) if verbose => {
+                        println!("{name} is aliased to `{value}'");
+                    }
+                    Some(Resolution::Alias(value)) => println!("alias {name}='{value}'"),
+                    Some(Resolution::Function) if verbose => println!("{name} is a function"),
+                    Some(Resolution::Function) => println!("{name}"),
+                    Some(Resolution::Builtin) if verbose => println!("{name} is a shell builtin"),
+                    Some(Resolution::Builtin) => println!("{name}"),
+                    Some(Resolution::External(found)) if verbose => {
+                        println!("{name} is {}", found.display());
+                    }
+                    Some(Resolution::External(found)) => println!("{}", found.display()),
+                    None => {
+                        if verbose {
+                            eprintln!("sharky: command: {name}: not found");
+                        }
+                        status = 1;
+                    }
+                }
+            }
+            return Flow::Status(status);
+        }
+
+        if words.is_empty() {
+            return Flow::Status(0);
+        }
+
+        if let Some(flow) = self.builtin(words, &[], env) {
+            return flow;
+        }
+
+        let resolved = match default_path {
+            true => exec::resolve_in(&words[0], exec::DEFAULT_PATH),
+            false => exec::resolve(&words[0], self),
+        };
+        let Some(program) = resolved else {
+            eprintln!("sharky: command not found: {}", words[0]);
+            return Flow::Status(127);
+        };
+
+        let command = words.join(" ");
+        let child = SpawnChild {
+            program: Some(&program),
+            ..SpawnChild::default()
+        };
+        match self.spawn(words, &[], env, child) {
+            Ok(pid) => Flow::Status(self.wait_foreground(&[pid], pid, command)),
+            Err(message) => {
+                eprintln!("sharky: {message}");
+                Flow::Status(1)
+            }
+        }
     }
 
     fn alias(&mut self, args: &[String]) -> i32 {
@@ -4624,6 +4770,7 @@ fn is_builtin_name(name: &str) -> bool {
             | "readonly"
             | "typeset"
             | "shopt"
+            | "command"
     )
 }
 
