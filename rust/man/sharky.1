@@ -190,6 +190,10 @@ names are rejected, and the setting is not persisted across shells. Matching
 paths are deduplicated; Bash can repeat paths for overlapping nonconsecutive
 globstars.
 .PP
+Leading \fB./\fR and \fB../\fR components are preserved in globstar results. A
+\fB.\fR or \fB..\fR component later in the path, such as
+\fBdir/./**/*.txt\fR, is not expanded and the pattern stays literal.
+.PP
 .SH HISTORY
 After each command is evaluated, sharky appends it to one shared history file
 under a lock. A failed write is reported and the entry stays only in memory; a

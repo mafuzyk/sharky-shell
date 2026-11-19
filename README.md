@@ -169,10 +169,14 @@ matching exit status. Other option names, combined flags such as `-su`, and
 interleaved `-s`/`-u` pairs are rejected; the setting is per shell and is
 neither saved in the config files nor inherited by a new process. Quoted `**`
 stays literal, hidden entries are skipped unless the component starts with `.`,
-repeated matches are deduplicated, and `./` and `../` prefixes are preserved. A directory
+repeated matches are deduplicated, and `./` and `../` prefixes are preserved. A
+directory
 reached implicitly through a symlink is listed as an entry but not descended by
 a leading `**`; a `**` that follows a path prefix descends symlinked directories,
-and naming a symlink directly keeps normal directory behavior.
+and naming a symlink directly keeps normal directory behavior. Only leading
+`./` and `../` components are normalized: a `.` or `..` component later in the
+path (for example `dir/./**/*.txt`) is not expanded and the pattern stays
+literal.
 
 This is a subset of Bash, not a drop-in replacement. Unsupported syntax fails
 with status 2 instead of silently falling back to another shell.
