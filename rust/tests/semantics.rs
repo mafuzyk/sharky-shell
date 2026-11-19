@@ -397,3 +397,19 @@ fn set_plus_o_long_name_disables_the_flag() {
     assert_eq!(stdout(&out), "after");
     assert_eq!(status(&out), 0);
 }
+
+// A simple assignment reports the status of its command substitution.
+
+#[test]
+fn assignment_status_comes_from_the_command_substitution() {
+    let out = sharky(r#"x=$(exit 7); printf '[%s]' "$?""#);
+    assert_eq!(stdout(&out), "[7]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn failing_assignment_under_errexit_aborts() {
+    let out = sharky("set -e; x=$(false); printf after");
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+}
