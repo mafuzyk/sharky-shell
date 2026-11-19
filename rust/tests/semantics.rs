@@ -714,3 +714,80 @@ fn interactive_shell_survives_a_failing_if_condition() {
     assert!(seen.contains("else"), "condition did not run: {seen:?}");
     assert!(seen.contains("AFTER-I-99"), "shell died on the condition: {seen:?}");
 }
+
+// ${!a[0]} and ${!a[$i]} indirect through the value held by the element, while
+// ${!a[@]} and ${!a[*]} keep expanding to the array keys. An unset element
+// indirection is empty; an unset plain name, or a value that is not a name,
+// fails the expansion.
+
+#[test]
+fn indirect_element_expands_the_name_it_holds() {
+    let out =
+        sharky(r#"a=(IND OTHER); IND=hello; i=0; printf '[%s][%s]' "${!a[$i]}" "${!a[0]}""#);
+    assert_eq!(stdout(&out), "[hello][hello]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn indirect_element_uses_an_arithmetic_subscript() {
+    let out = sharky(r#"a=(IND OTHER); OTHER=world; i=0; printf '[%s]' "${!a[i+1]}""#);
+    assert_eq!(stdout(&out), "[world]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn indirect_of_an_unset_element_is_empty() {
+    let out = sharky(r#"a=(IND); IND=hello; printf '[%s][%s]' "${!a[5]}" "${!a[0]}""#);
+    assert_eq!(stdout(&out), "[][hello]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn indirect_element_reads_an_associative_value() {
+    let out = sharky(r#"declare -A m=([k]=IND); IND=hello; printf '[%s]' "${!m[k]}""#);
+    assert_eq!(stdout(&out), "[hello]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn indirect_plain_name_expands_its_value_as_a_name() {
+    let out = sharky(r#"a=(IND OTHER); name=a; printf '[%s]' "${!name}""#);
+    assert_eq!(stdout(&out), "[IND]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn indirect_plain_name_pointing_at_an_unset_name_is_empty() {
+    let out = sharky(r#"name=nope; unset nope; printf '[%s]' "${!name}""#);
+    assert_eq!(stdout(&out), "[]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn indirect_of_an_unset_name_fails() {
+    let out = sharky(r#"unset name; printf '[%s]' "${!name}"; printf after"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("name: invalid indirect expansion"),
+        "{stderr:?}"
+    );
+}
+
+#[test]
+fn indirect_of_a_value_that_is_not_a_name_fails() {
+    let out = sharky(r#"name='a b'; printf '[%s]' "${!name}"; printf after"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("a b: invalid variable name"), "{stderr:?}");
+}
+
+#[test]
+fn indirect_key_list_forms_stay_key_lists() {
+    let out =
+        sharky(r#"a=(IND OTHER); IND=hello; printf '[%s]' "${!a[@]}"; printf '<%s>' "${!a[*]}""#);
+    assert_eq!(stdout(&out), "[0][1]<0 1>");
+    assert_eq!(status(&out), 0);
+}

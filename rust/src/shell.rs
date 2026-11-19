@@ -3050,6 +3050,11 @@ impl Shell {
         out
     }
 
+    fn fail_indirect(&mut self, name: &str, message: &str) {
+        eprintln!("sharky: {name}: {message}");
+        self.expansion_error = true;
+    }
+
     fn fail_parameter_expansion(&mut self, name: &str, argument: &str) {
         let word = self.expand_string(argument);
         let message = if word.is_empty() {
@@ -3271,7 +3276,23 @@ impl Shell {
             Some(ParamOp::LowerFirst) => lower_first(&value),
             Some(ParamOp::LowerAll) => value.to_lowercase(),
             Some(ParamOp::Indirect) => {
-                if value.is_empty() {
+                if !defined {
+                    self.fail_indirect(&parameter.name, "invalid indirect expansion");
+                    String::new()
+                } else if !is_indirect_name(&value) {
+                    self.fail_indirect(&value, "invalid variable name");
+                    String::new()
+                } else {
+                    self.var(&value)
+                }
+            }
+            // A subscript that is neither `@` nor `*` turns `${!name[sub]}`
+            // into an indirection through the selected element.
+            Some(ParamOp::Keys) => {
+                if !defined {
+                    String::new()
+                } else if !is_indirect_name(&value) {
+                    self.fail_indirect(&value, "invalid variable name");
                     String::new()
                 } else {
                     self.var(&value)
@@ -3294,7 +3315,6 @@ impl Shell {
                 names.dedup();
                 names.join(" ")
             }
-            Some(ParamOp::Keys) => String::new(),
             Some(op @ (ParamOp::Substitute | ParamOp::SubstituteAll)) => {
                 let (pattern, replacement) = argument
                     .split_once('/')
@@ -3320,6 +3340,11 @@ impl Shell {
 
         match parameter.operator {
             Some(ParamOp::Keys) => {
+                // Only the `@` and `*` subscripts list the keys; a numeric or
+                // associative subscript indirects through the element instead.
+                if !matches!(parameter.index.as_deref(), Some("@") | Some("*")) {
+                    return None;
+                }
                 if let Some(assoc) = self.assoc.get(&parameter.name) {
                     return Some(assoc.keys().cloned().collect());
                 }
@@ -3780,6 +3805,19 @@ fn signal_fifo_ready(fd: RawFd, status: u8) {
         let previous = nix::libc::signal(nix::libc::SIGPIPE, nix::libc::SIG_IGN);
         let _ = nix::libc::write(fd, &status as *const u8 as *const _, 1);
         let _ = nix::libc::signal(nix::libc::SIGPIPE, previous);
+    }
+}
+
+/// A name bash accepts as the target of an indirect expansion: an identifier
+/// or a positional parameter number.
+fn is_indirect_name(text: &str) -> bool {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' => {
+            chars.all(|char| char.is_ascii_alphanumeric() || char == '_')
+        }
+        Some(first) if first.is_ascii_digit() => chars.all(|char| char.is_ascii_digit()),
+        _ => false,
     }
 }
 
