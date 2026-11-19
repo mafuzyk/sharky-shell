@@ -31,6 +31,36 @@ SHARKY_REF=.ruby-oracle/bin/sharky cargo test -j 6 --test differential
 
 `.ruby-oracle/` is gitignored. Do not commit it.
 
+## Compatibility corpus
+
+`compatibility/` holds a frozen corpus of small, benign shell fixtures split
+into portable (dash-referenced) and Bash-only cases. It measures divergence
+between a candidate shell and the references across three observable channels
+only — stdout, exit status and controlled side-effect files; stderr is not
+compared and the corpus makes no conformance claim. See
+`compatibility/CONTRACT.md` for the classification and baseline layout.
+
+No Sharky build is needed to sanity-check that the references still reproduce
+the frozen baseline. `dash` must be in PATH (or set `DASH_BIN` explicitly, as
+there is no implicit Nix-store discovery):
+
+```sh
+cd compatibility && ./run.sh verify-refs
+```
+
+To measure an already-built binary instead, pass its path to `check`; the
+corpus never compiles one:
+
+```sh
+cd compatibility && ./run.sh check /path/to/sharky
+```
+
+`DASH_BIN` and `BASH_BIN` select the reference shell paths, `COMPAT_PATH`
+overrides the controlled PATH used by every run, `TIMEOUT_SECS` (default 5) and
+`TIMEOUT_BIN` bound each invocation, and `CANDIDATE_ARGS` (default
+`--no-config -c`) sets how the candidate is invoked. `check` preflights that the
+candidate can run `printf` before reporting any result.
+
 ## Before opening a pull request
 
 1. Add a failing test for the behavior, then make it pass.

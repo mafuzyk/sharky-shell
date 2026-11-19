@@ -26,6 +26,16 @@ rather than a separate preview track.
   component starts with `.`, matches are deduplicated and `./`/`../` prefixes
   are preserved. Other option names and combined or interleaved `-s`/`-u`
   flags are rejected; the setting is per shell and is not persisted.
+- `mapfile`/`readarray` reads stdin lines into an indexed array, defaulting to
+  `MAPFILE`. The optional `-t` strips the trailing newline while preserving
+  carriage returns and backslashes. Invalid options return 2, while invalid or
+  associative targets return 1, matching Bash's status codes.
+- A portable and Bash-only compatibility corpus under `compatibility/` freezes
+  expected stdout, exit status and controlled side effects for small shell
+  fixtures and compares a candidate against dash and Bash. The `verify-refs`
+  command checks the references against the frozen baseline; `check <binary>`
+  measures a built binary's stdout/status/side-effect divergence. stderr is
+  not compared and no conformance is claimed.
 
 ## [3.5.4] - 2026-11-02
 
