@@ -1211,3 +1211,27 @@ fn declaration_builtins_keep_status_zero_for_a_failing_substitution() {
     }
 }
 
+// Converting an array rejects the change, reports it and keeps the original
+// value, unlike silently dropping the elements.
+
+#[test]
+fn indexed_array_rejects_conversion_to_associative() {
+    let out = sharky(r#"a=(x y); declare -A a; printf 'st=%s n=%s e0=%s' "$?" "${#a[@]}" "${a[0]}""#);
+    assert_eq!(stdout(&out), "st=1 n=2 e0=x");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cannot convert indexed to associative array"),
+        "{stderr:?}"
+    );
+}
+
+#[test]
+fn associative_array_rejects_conversion_to_indexed() {
+    let out = sharky(r#"declare -A a=([k]=v); declare -a a; printf 'st=%s n=%s k=%s' "$?" "${#a[@]}" "${a[k]}""#);
+    assert_eq!(stdout(&out), "st=1 n=1 k=v");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cannot convert associative to indexed array"),
+        "{stderr:?}"
+    );
+}

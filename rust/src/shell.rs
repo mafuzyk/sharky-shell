@@ -1920,6 +1920,13 @@ impl Shell {
 
             match kind {
                 Some(true) => {
+                    if self.arrays.contains_key(name) {
+                        eprintln!(
+                            "sharky: {command}: {name}: cannot convert indexed to associative array"
+                        );
+                        status = 1;
+                        continue;
+                    }
                     if local && !fresh {
                         self.env.retain(|(key, _)| key != name);
                     }
@@ -1953,6 +1960,13 @@ impl Shell {
                     }
                 }
                 Some(false) => {
+                    if self.assoc.contains_key(name) {
+                        eprintln!(
+                            "sharky: {command}: {name}: cannot convert associative to indexed array"
+                        );
+                        status = 1;
+                        continue;
+                    }
                     if local && !fresh {
                         self.env.retain(|(key, _)| key != name);
                     }
