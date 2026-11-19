@@ -16,7 +16,17 @@ pub fn run() -> i32 {
         .file_name()
         .map(|name| name.to_string_lossy().starts_with('-'))
         .unwrap_or(false);
-    let mut args = raw.map(|arg| arg.to_string_lossy().into_owned());
+    let args = raw
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+
+    // `config explain` is a static, text-only subcommand. Handle it before
+    // any config/theme loading so it never touches the filesystem.
+    if let Some(code) = try_config_explain(&args) {
+        return code;
+    }
+
+    let mut args = args.into_iter();
     let mut login = login_arg0;
     let mut command = None;
     let mut script: Option<String> = None;
@@ -174,6 +184,52 @@ pub fn run() -> i32 {
             }
         }
     }
+}
+
+/// Handle the static `config explain` subcommand. Returns `Some(exit_code)`
+/// when the invocation is a `config explain` request (including its error
+/// cases), or `None` when normal argument parsing should continue.
+fn try_config_explain(args: &[String]) -> Option<i32> {
+    let pair = args
+        .windows(2)
+        .position(|pair| pair[0] == "config" && pair[1] == "explain")?;
+    let head = &args[..pair];
+    let tail = &args[pair + 2..];
+
+    if !head.is_empty() {
+        eprintln!("sharky: config explain cannot be combined with other options");
+        return Some(2);
+    }
+
+    if let Some(option) = tail.iter().find(|arg| arg.starts_with('-')) {
+        eprintln!("sharky: config explain: unexpected option '{option}'");
+        return Some(2);
+    }
+
+    if tail.is_empty() {
+        print_text(&sharky_config::guide::index_text());
+        return Some(0);
+    }
+
+    let id = tail.join(" ");
+    match sharky_config::guide::topic(&id) {
+        Some(text) => {
+            print_text(&text);
+            Some(0)
+        }
+        None => {
+            eprintln!("sharky: config explain: unknown topic '{id}'");
+            Some(2)
+        }
+    }
+}
+
+/// Write plain text and flush it: `main` uses `process::exit`, which does not
+/// run destructors, so buffered bytes after the last newline must be forced out.
+fn print_text(text: &str) {
+    let mut stdout = std::io::stdout().lock();
+    let _ = stdout.write_all(text.as_bytes());
+    let _ = stdout.flush();
 }
 
 // Syntax-only first slice: validates top-level syntax and does not promise
@@ -464,6 +520,7 @@ fn print_help() {
     println!("  --json       print one JSON object for -c or state");
     println!("  --env        include the environment in state JSON");
     println!("  state        print shell state as JSON (requires --json)");
+    println!("  config explain [TOPIC]  print the configuration guide (or one topic)");
     println!("  --no-config  do not load the configuration file");
     println!("  --version    print the version");
     println!("  --help       print this help");
