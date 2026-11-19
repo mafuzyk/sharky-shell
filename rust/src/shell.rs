@@ -1763,7 +1763,11 @@ impl Shell {
                         }
                     }
                 }
-                None => self.set_var(name, value.unwrap_or_default()),
+                None => {
+                    if let Some(value) = value {
+                        self.set_var(name, value);
+                    }
+                }
             }
         }
         status
