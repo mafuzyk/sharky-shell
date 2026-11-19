@@ -1197,3 +1197,17 @@ fn mapfile_stops_exporting_a_stale_scalar() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+// bash's declaration builtins ignore the status of a command substitution in
+// their arguments: unlike a plain assignment, they return 0 and do not trip
+// errexit.
+
+#[test]
+fn declaration_builtins_keep_status_zero_for_a_failing_substitution() {
+    for command in ["local", "declare", "export", "readonly", "typeset"] {
+        let script = format!("set -e; f() {{ {command} x=$(false); }}; f; printf after");
+        let out = sharky(&script);
+        assert_eq!(stdout(&out), "after", "{command}: {out:?}");
+        assert_eq!(status(&out), 0, "{command}");
+    }
+}
+
