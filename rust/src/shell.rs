@@ -2673,29 +2673,36 @@ impl Shell {
 
         if short || verbose {
             let path = default_path.then_some(exec::DEFAULT_PATH);
-            let mut status = 0;
+            let mut found_any = false;
             for name in words {
-                match self.resolve_name(name, path) {
-                    Some(Resolution::Alias(value)) if verbose => {
+                let Some(resolved) = self.resolve_name(name, path) else {
+                    // Bash skips missing names here: -v stays silent, while -V
+                    // reports each one on stderr. Neither changes the status on
+                    // its own, which depends on whether any name resolved.
+                    if verbose {
+                        eprintln!("sharky: command: {name}: not found");
+                    }
+                    continue;
+                };
+                found_any = true;
+                match resolved {
+                    Resolution::Alias(value) if verbose => {
                         println!("{name} is aliased to `{value}'");
                     }
-                    Some(Resolution::Alias(value)) => println!("alias {name}='{value}'"),
-                    Some(Resolution::Function) if verbose => println!("{name} is a function"),
-                    Some(Resolution::Function) => println!("{name}"),
-                    Some(Resolution::Builtin) if verbose => println!("{name} is a shell builtin"),
-                    Some(Resolution::Builtin) => println!("{name}"),
-                    Some(Resolution::External(found)) if verbose => {
+                    Resolution::Alias(value) => println!("alias {name}='{value}'"),
+                    Resolution::Function if verbose => println!("{name} is a function"),
+                    Resolution::Function => println!("{name}"),
+                    Resolution::Builtin if verbose => println!("{name} is a shell builtin"),
+                    Resolution::Builtin => println!("{name}"),
+                    Resolution::External(found) if verbose => {
                         println!("{name} is {}", found.display());
                     }
-                    Some(Resolution::External(found)) => println!("{}", found.display()),
-                    None => {
-                        if verbose {
-                            eprintln!("sharky: command: {name}: not found");
-                        }
-                        status = 1;
-                    }
+                    Resolution::External(found) => println!("{}", found.display()),
                 }
             }
+            // Bash reports 0 when at least one name resolves (and with no names
+            // at all), and 1 only when every requested name is missing.
+            let status = if found_any || words.is_empty() { 0 } else { 1 };
             return Flow::Status(status);
         }
 

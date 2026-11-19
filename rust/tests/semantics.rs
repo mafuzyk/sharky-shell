@@ -1279,10 +1279,31 @@ fn command_v_reports_a_missing_name_silently() {
     assert_eq!(status(&out), 1);
 }
 
+// Bash reports 0 for -v/-V when *any* name resolves, regardless of where the
+// missing names sit, and 1 only when none of them resolve. The missing names
+// are simply skipped; they do not turn an otherwise successful query into a
+// failure.
 #[test]
-fn command_v_fails_when_one_of_several_names_is_missing() {
+fn command_v_succeeds_when_a_later_name_is_missing() {
     let out = sharky("command -v cd definitely-not-a-command");
     assert_eq!(stdout(&out), "cd\n");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn command_v_succeeds_when_an_earlier_name_is_missing() {
+    let out = sharky("command -v definitely-not-a-command cd");
+    assert_eq!(stdout(&out), "cd\n");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn command_v_fails_when_every_name_is_missing() {
+    let out = sharky("command -v definitely-not-a-command also-missing");
+    assert_eq!(stdout(&out), "");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
     assert_eq!(status(&out), 1);
 }
 
@@ -1292,6 +1313,30 @@ fn command_v_succeeds_when_every_name_resolves() {
     let text = stdout(&out);
     assert_eq!(status(&out), 0);
     assert!(text.starts_with("cd\nprobe\n/"), "{text:?}");
+}
+
+#[test]
+fn command_big_v_succeeds_when_a_later_name_is_missing() {
+    let out = sharky("command -V cd definitely-not-a-command");
+    assert_eq!(stdout(&out), "cd is a shell builtin\n");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("command: definitely-not-a-command: not found"),
+        "{stderr:?}"
+    );
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn command_big_v_succeeds_when_an_earlier_name_is_missing() {
+    let out = sharky("command -V definitely-not-a-command cd");
+    assert_eq!(stdout(&out), "cd is a shell builtin\n");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("command: definitely-not-a-command: not found"),
+        "{stderr:?}"
+    );
+    assert_eq!(status(&out), 0);
 }
 
 #[test]
