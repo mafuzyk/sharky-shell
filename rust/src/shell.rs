@@ -4195,10 +4195,13 @@ fn gs_is_dir(entry: &std::fs::DirEntry, follow_symlink: bool) -> bool {
 
 #[derive(Default)]
 struct GlobStats {
-    attempts: Vec<(String, usize)>,
     expanded: HashSet<(String, usize)>,
-    skipped: usize,
     entry_visits: HashSet<String>,
+    #[cfg(test)]
+    attempts: Vec<(String, usize)>,
+    #[cfg(test)]
+    skipped: usize,
+    #[cfg(test)]
     entries_skipped: usize,
 }
 
@@ -4214,9 +4217,13 @@ fn gs_walk(
     out: &mut BTreeSet<String>,
 ) {
     let key = (prefix.to_string(), index);
+    #[cfg(test)]
     stats.attempts.push(key.clone());
     if !stats.expanded.insert(key) {
-        stats.skipped += 1;
+        #[cfg(test)]
+        {
+            stats.skipped += 1;
+        }
         return;
     }
 
@@ -4303,7 +4310,10 @@ fn gs_walk(
 
 fn gs_entries(prefix: &str, trailing: bool, stats: &mut GlobStats, out: &mut BTreeSet<String>) {
     if !stats.entry_visits.insert(prefix.to_string()) {
-        stats.entries_skipped += 1;
+        #[cfg(test)]
+        {
+            stats.entries_skipped += 1;
+        }
         return;
     }
     let Ok(entries) = std::fs::read_dir(gs_dir(prefix)) else {
