@@ -131,6 +131,12 @@ pipelines, redirections (\fB>\fR, \fB>>\fR, \fB<\fR, \fB2>&1\fR), \fB;\fR,
 \fB;;&\fR and \fB;&\fR), shell functions, groups, subshells, extglob patterns
 and \fB!\fR.
 .PP
+Unquoted expansions split on \fBIFS\fR (space, tab and newline by default):
+repeated delimiters keep empty fields, leading and trailing ones are dropped,
+and \fBIFS=\fR disables splitting. A quoted \fB"$*"\fR, \fB"${a[*]}"\fR or
+\fB"${!a[*]}"\fR joins fields with the first character of \fBIFS\fR, or nothing
+when \fBIFS\fR is empty. Quoted expansions are never split.
+.PP
 This is a subset of Bash, not a replacement. Unsupported syntax fails with
 status 2 instead of falling back to another shell.
 .SH CONFIGURATION
@@ -218,8 +224,6 @@ the editor uses vi bindings: Esc enters normal mode; h, l, 0, $, w, b, e, j and
 k move; x, dd, dw, d$, D, cw, C, p, P, u and r<char> edit. A count prefix is
 accepted. Esc cancels a pending operator, Enter submits and Backspace edits.
 .SH LIMITATIONS
-Whitespace splitting uses space, tab and newline; IFS is not supported.
-.PP
 ANSI-C escapes above 0x7f are stored as UTF-8 characters, not raw bytes.
 .PP
 A process substitution created inside a pipeline is reaped by the process that
