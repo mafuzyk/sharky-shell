@@ -2504,11 +2504,6 @@ impl Shell {
     }
 
     fn set(&mut self, args: &[String]) -> i32 {
-        if args.first().map(String::as_str) == Some("--") {
-            self.positional = args[1..].to_vec();
-            return 0;
-        }
-
         if args.is_empty() {
             let active = self.active_options();
             if !active.is_empty() {
@@ -2520,42 +2515,56 @@ impl Shell {
         let mut status = 0;
         let mut index = 0;
         while index < args.len() {
-            match args[index].as_str() {
-                "-e" => self.errexit = true,
-                "+e" => self.errexit = false,
-                "-H" => self.histexpand = true,
-                "+H" => self.histexpand = false,
-                "-u" => self.nounset = true,
-                "+u" => self.nounset = false,
-                "-x" => self.xtrace = true,
-                "+x" => self.xtrace = false,
-                option @ ("-o" | "+o") => {
-                    let on = option.starts_with('-');
-                    index += 1;
-                    match args.get(index).map(String::as_str) {
-                        Some("pipefail") => self.pipefail = on,
-                        Some("vi") => self.vi = on,
-                        Some(name) => {
-                            eprintln!("sharky: set: {name}: invalid option name");
-                            status = 1;
-                        }
-                        None if on => {
-                            let active = self.active_options();
-                            if !active.is_empty() {
-                                println!("{}", active.join(" "));
-                            }
-                        }
-                        None => {
-                            eprintln!("sharky: set: {option}: option name required");
-                            status = 1;
-                        }
-                    }
-                }
-                name => {
-                    if let Some((key, value)) = name.split_once('=') {
+            let argument = args[index].as_str();
+            if argument == "--" {
+                self.positional = args[index + 1..].to_vec();
+                return status;
+            }
+
+            let sign = match argument.chars().next() {
+                Some(sign @ ('-' | '+')) => sign,
+                _ => {
+                    if let Some((key, value)) = argument.split_once('=') {
                         self.set_var(key, value.to_string());
                     } else {
-                        eprintln!("sharky: set: {name}: invalid option");
+                        eprintln!("sharky: set: {argument}: invalid option");
+                        status = 1;
+                    }
+                    index += 1;
+                    continue;
+                }
+            };
+            let on = sign == '-';
+            let letters = &argument[1..];
+            if letters.is_empty() {
+                eprintln!("sharky: set: {argument}: invalid option");
+                status = 1;
+                index += 1;
+                continue;
+            }
+
+            for letter in letters.chars() {
+                match letter {
+                    'e' => self.errexit = on,
+                    'u' => self.nounset = on,
+                    'x' => self.xtrace = on,
+                    'H' => self.histexpand = on,
+                    'o' => {
+                        index += 1;
+                        match args.get(index).map(String::as_str) {
+                            Some("pipefail") => self.pipefail = on,
+                            Some("vi") => self.vi = on,
+                            Some(name) => {
+                                eprintln!("sharky: set: {name}: invalid option name");
+                                status = 1;
+                            }
+                            None if on => self.list_options(),
+                            None => self.list_option_commands(),
+                        }
+                        break;
+                    }
+                    other => {
+                        eprintln!("sharky: set: {sign}{other}: invalid option");
                         status = 1;
                     }
                 }
@@ -2563,6 +2572,19 @@ impl Shell {
             index += 1;
         }
         status
+    }
+
+    fn list_options(&self) {
+        let active = self.active_options();
+        if !active.is_empty() {
+            println!("{}", active.join(" "));
+        }
+    }
+
+    fn list_option_commands(&self) {
+        for option in self.active_options() {
+            println!("set -o {option}");
+        }
     }
 
     fn cd(&mut self, target: Option<&str>) -> i32 {
