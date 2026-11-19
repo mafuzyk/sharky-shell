@@ -24,6 +24,15 @@ fn status(out: &Output) -> i32 {
     out.status.code().unwrap_or(-1)
 }
 
+fn temp_dir() -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("sharky-semantics-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
 // Parameter expansion: ${name-word} substitutes only for an unset parameter,
 // while ${name:-word} also substitutes for a null one.
 
@@ -1007,3 +1016,79 @@ fn mapfile_stays_line_based_with_a_custom_ifs() {
     assert_eq!(stdout(&out), "[a,b][c,d]");
     assert_eq!(status(&out), 0);
 }
+
+// An expansion failure inside for, case or [[ belongs to that command. Bash
+// runs no iteration or arm there, and the flag cannot survive into the command
+// that follows: interactive bash aborts only the failing input line.
+
+#[test]
+fn expansion_error_in_for_runs_no_iteration() {
+    let out =
+        sharky(r#"for x in ${SHARKY_UNSET_F?boom} later; do [[ -n "$x" ]]; done"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("boom"), "{stderr:?}");
+}
+
+#[test]
+fn expansion_error_in_case_runs_no_arm() {
+    let out = sharky(r#"case ${SHARKY_UNSET_F?boom} in *) [[ -n x ]] ;; esac"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("boom"), "{stderr:?}");
+}
+
+#[test]
+fn expansion_error_in_a_test_keeps_the_command_failure() {
+    let out = sharky(r#"[[ -z ${SHARKY_UNSET_F?boom} ]]"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("boom"));
+}
+
+#[test]
+fn nounset_in_a_for_word_list_runs_no_iteration() {
+    let out = sharky(r#"set -u; for x in a$SHARKY_UNSET_F b; do [[ -n "$x" ]]; done"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unbound"));
+}
+
+#[test]
+fn interactive_shell_reports_a_for_expansion_error_on_its_own_line() {
+    let seen = run_interactive(
+        &[
+            "for x in ${SHARKY_NOPE?boom}; do printf 'BODY%s' 99; done",
+            "printf 'AFTER-F-%s' 99",
+        ],
+        "AFTER-F-99",
+    );
+    assert!(!seen.contains("BODY99"), "loop body ran: {seen:?}");
+    assert!(
+        seen.contains("AFTER-F-99"),
+        "next line was swallowed: {seen:?}"
+    );
+}
+
+#[test]
+fn interactive_nounset_in_a_for_word_list_runs_no_iteration() {
+    let seen = run_interactive(
+        &[
+            "set -u",
+            "for x in a${SHARKY_NOPE} b; do printf 'BODY%s' \"$x\"; done",
+            "printf 'AFTER-U-%s' 99",
+        ],
+        "AFTER-U-99",
+    );
+    assert!(
+        !seen.contains("BODYa") && !seen.contains("BODYb"),
+        "loop body ran: {seen:?}"
+    );
+    assert!(
+        seen.contains("AFTER-U-99"),
+        "next line was swallowed: {seen:?}"
+    );
+}
+

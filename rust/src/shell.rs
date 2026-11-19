@@ -758,7 +758,7 @@ impl Shell {
                 command,
                 redirects,
             } => self.run_redirected(command, redirects),
-            Command::Test(words) => Flow::Status(self.run_test(words)),
+            Command::Test(words) => self.run_test(words),
             Command::Arithmetic(source) => Flow::Status(match arith::evaluate(source, self) {
                 Ok(0) => 1,
                 Ok(_) => 0,
@@ -770,16 +770,20 @@ impl Shell {
         }
     }
 
-    fn run_test(&mut self, words: &[Word]) -> i32 {
+    fn run_test(&mut self, words: &[Word]) -> Flow {
         let mut expand = |word: &Word| self.expand_text_word(word);
-        match test_expr::evaluate(words, &mut expand) {
+        let result = test_expr::evaluate(words, &mut expand);
+        if let Some(flow) = self.take_expansion_failure() {
+            return flow;
+        }
+        Flow::Status(match result {
             Ok(true) => 0,
             Ok(false) => 1,
             Err(message) => {
                 eprintln!("sharky: [[: {message}");
                 2
             }
-        }
+        })
     }
 
     fn run_simple(&mut self, simple: &Simple) -> Flow {
@@ -1058,6 +1062,25 @@ impl Shell {
         }
     }
 
+    // Consumes a pending expansion failure at the command that produced it.
+    // Clearing the flags here keeps them from aborting a later command, which
+    // is what bash reports: the failing command, not the one after it.
+    fn take_expansion_failure(&mut self) -> Option<Flow> {
+        if self.nounset_failed {
+            self.nounset_failed = false;
+            if self.interactive {
+                return Some(Flow::Status(1));
+            }
+            self.exit_requested = Some(1);
+            return Some(Flow::Exit(1));
+        }
+        if self.expansion_error {
+            self.expansion_error = false;
+            return Some(self.expansion_failure());
+        }
+        None
+    }
+
     fn exec_failure(&self, code: i32) -> Flow {
         if self.interactive {
             Flow::Status(code)
@@ -1165,6 +1188,12 @@ impl Shell {
             values
         };
 
+        // A word list that failed to expand aborts the whole loop: bash runs no
+        // iteration, not even for the words expanded before the failure.
+        if let Some(flow) = self.take_expansion_failure() {
+            return flow;
+        }
+
         let mut status = 0;
         for value in values {
             self.set_var(name, value);
@@ -1249,6 +1278,9 @@ impl Shell {
 
     fn run_case(&mut self, word: &Word, arms: &[CaseArm]) -> Flow {
         let value = self.expand_text_word(word);
+        if let Some(flow) = self.take_expansion_failure() {
+            return flow;
+        }
         let mut status = 0;
         let mut index = 0;
         let mut matched = false;
@@ -1261,10 +1293,18 @@ impl Shell {
             } else if matched {
                 false
             } else {
-                patterns.iter().any(|pattern| {
+                let mut arm_matches = false;
+                for pattern in patterns {
                     let pattern = self.expand_pattern_word(pattern);
-                    glob_match(&pattern, &value)
-                })
+                    if let Some(flow) = self.take_expansion_failure() {
+                        return flow;
+                    }
+                    if glob_match(&pattern, &value) {
+                        arm_matches = true;
+                        break;
+                    }
+                }
+                arm_matches
             };
 
             if !matches {
