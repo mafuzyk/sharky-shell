@@ -8,8 +8,24 @@ permissions:
   contents: write
 
 jobs:
+  test:
+    name: Test gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test
+        working-directory: rust
+        # The differential suite needs the frozen Ruby tree; point SHARKY_REF at
+        # a missing oracle so it is skipped, as in the main rust workflow.
+        env:
+          SHARKY_REF: /nonexistent/sharky
+        run: cargo test --locked --jobs 2
+
   binary:
     name: Static binary
+    needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -21,7 +37,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Build
         working-directory: rust
-        run: cargo build --release --locked --jobs 6 --target x86_64-unknown-linux-musl
+        run: cargo build --release --locked --jobs 2 --target x86_64-unknown-linux-musl
       - name: Package
         run: |
           install -Dm755 rust/target/x86_64-unknown-linux-musl/release/sharky sharky
