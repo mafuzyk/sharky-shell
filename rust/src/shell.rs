@@ -794,27 +794,8 @@ impl Shell {
     }
 
     fn run_simple_inner(&mut self, simple: &Simple) -> Flow {
-        if simple.words.is_empty() && simple.redirects.is_empty() {
-            self.substitution_status = None;
-            for assignment in &simple.assignments {
-                self.assign(assignment);
-            }
-            if self.nounset_failed {
-                self.nounset_failed = false;
-                if self.interactive {
-                    return Flow::Status(1);
-                }
-                self.exit_requested = Some(1);
-                return Flow::Exit(1);
-            }
-            if self.expansion_error {
-                self.expansion_error = false;
-                return self.expansion_failure();
-            }
-            if let Some(code) = self.substitution_status.take().filter(|code| *code != 0) {
-                return Flow::Status(code);
-            }
-            return Flow::Status(0);
+        if simple.words.is_empty() {
+            return self.run_assignments(simple);
         }
 
         let mut prepared = match self.prepare(simple) {
@@ -878,6 +859,62 @@ impl Shell {
                 eprintln!("sharky: {message}");
                 Flow::Status(1)
             }
+        }
+    }
+
+    // An assignment-only command keeps its assignments in the current shell.
+    // Its redirections apply to that command alone, but they are performed here
+    // so a failed one reports its status without dropping the assignments,
+    // which bash still applies. Assignment words expand before the redirections
+    // are applied, so an expansion failure creates and assigns nothing.
+    fn run_assignments(&mut self, simple: &Simple) -> Flow {
+        let actions = match self.redirect_actions(&simple.redirects) {
+            Ok(actions) => actions,
+            Err(message) => {
+                if let Some(flow) = self.take_expansion_failure() {
+                    return flow;
+                }
+                if !message.is_empty() {
+                    eprintln!("sharky: {message}");
+                }
+                self.substitution_status = None;
+                for assignment in &simple.assignments {
+                    self.assign(assignment);
+                }
+                if let Some(flow) = self.take_expansion_failure() {
+                    return flow;
+                }
+                return Flow::Status(1);
+            }
+        };
+
+        let saved = match save_fds(&actions) {
+            Ok(saved) => saved,
+            Err(message) => {
+                eprintln!("sharky: {message}");
+                return Flow::Status(1);
+            }
+        };
+
+        self.substitution_status = None;
+        for assignment in &simple.assignments {
+            self.assign(assignment);
+        }
+        let failure = self.take_expansion_failure();
+        let substitution = self.substitution_status.take().filter(|code| *code != 0);
+        let applied = apply_actions(&actions);
+        restore_fds(saved);
+
+        if let Some(flow) = failure {
+            return flow;
+        }
+        if let Err(message) = applied {
+            eprintln!("sharky: {message}");
+            return Flow::Status(1);
+        }
+        match substitution {
+            Some(code) => Flow::Status(code),
+            None => Flow::Status(0),
         }
     }
 

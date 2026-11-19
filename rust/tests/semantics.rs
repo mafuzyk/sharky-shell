@@ -1092,3 +1092,48 @@ fn interactive_nounset_in_a_for_word_list_runs_no_iteration() {
     );
 }
 
+// An assignment-only command keeps its assignments in the shell and performs
+// its redirections, reporting the command-substitution status.
+
+#[test]
+fn assignment_with_a_redirection_keeps_the_value_and_creates_the_file() {
+    let dir = temp_dir();
+    let file = dir.join("out");
+    let out = sharky(&format!(
+        "x=hello > {path}; printf '[%s]' \"$x\"; printf '[%s]' \"$(cat {path})\"",
+        path = file.display()
+    ));
+    assert_eq!(stdout(&out), "[hello][]");
+    assert_eq!(status(&out), 0);
+    assert!(file.exists());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn assignment_with_a_redirection_reports_the_substitution_status() {
+    let dir = temp_dir();
+    let file = dir.join("out");
+    let out = sharky(&format!(
+        "x=$(false) > {path}; printf 'st=%s x=[%s]' \"$?\" \"$x\"",
+        path = file.display()
+    ));
+    assert_eq!(stdout(&out), "st=1 x=[]");
+    assert_eq!(status(&out), 0);
+    assert!(file.exists());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn failing_assignment_redirection_aborts_under_errexit() {
+    let dir = temp_dir();
+    let file = dir.join("out");
+    let out = sharky(&format!(
+        "set -e; x=$(false) > {path}; printf after",
+        path = file.display()
+    ));
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    assert!(file.exists());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
