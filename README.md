@@ -198,11 +198,16 @@ and naming a symlink directly keeps normal directory behavior. Only leading
 path (for example `dir/./**/*.txt`) is not expanded and the pattern stays
 literal.
 
+Unquoted expansions split on `IFS` (space, tab and newline by default):
+repeated delimiters keep empty fields, leading and trailing ones are dropped,
+and an empty `IFS` disables splitting. A quoted `"$*"`, `"${a[*]}"` or
+`"${!a[*]}"` joins fields with the first character of `IFS`, or nothing when
+`IFS` is empty.
+
 This is a subset of Bash, not a drop-in replacement. Unsupported syntax fails
 with status 2 instead of silently falling back to another shell.
 
-Known limits: word splitting uses space, tab and newline (IFS is not
-supported); ANSI-C escapes above 0x7f are UTF-8 characters, not raw bytes; a
+Known limits: ANSI-C escapes above 0x7f are UTF-8 characters, not raw bytes; a
 process substitution created inside a pipeline is reaped by its parent process,
 so the top-level `wait` does not observe it. `TIMEFORMAT` is out of scope.
 
