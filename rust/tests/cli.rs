@@ -644,6 +644,53 @@ fn reads_commands_from_stdin_when_not_a_tty() {
 }
 
 #[test]
+fn pipeline_read_loop_ends_at_eof() {
+    let out = run_bounded("printf 'a\\nb\\n' | while read line; do printf '%s\\n' \"$line\"; done");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "a\nb\n");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+}
+
+// Runs `-c command` in its own process group and waits at most five seconds:
+// the pipeline under test blocks forever when a write end leaks, and the
+// bounded wait kills the whole group instead of hanging the suite or leaking
+// the loop child.
+fn run_bounded(command: &str) -> Output {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .args(["-c", command])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .expect("spawn sharky");
+
+    let group = nix::unistd::Pid::from_raw(child.id() as i32);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.try_wait().expect("wait for sharky") {
+            let out = child.wait_with_output().expect("collect output");
+            assert!(status.success(), "status: {status:?}");
+            return out;
+        }
+        if Instant::now() >= deadline {
+            let _ = nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL);
+            let out = child.wait_with_output().expect("collect output");
+            panic!(
+                "shell did not end at EOF: stdout={:?} stderr={:?}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
 fn double_bracket_tests_strings() {
     assert_eq!(sharky(&["-c", "[[ -n x ]]"]).status.code(), Some(0));
     assert_eq!(sharky(&["-c", "[[ -z '' ]]"]).status.code(), Some(0));
