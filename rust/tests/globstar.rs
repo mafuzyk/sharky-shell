@@ -356,6 +356,27 @@ fn consecutive_globstars_match_the_single_star_set() {
 }
 
 #[test]
+fn terminal_globstar_base_slash_requires_a_literal_prefix() {
+    let dir = nested_fixture();
+    let cases = [
+        (
+            r#"shopt -s globstar; printf '%s\n' topdir/sub/**"#,
+            vec!["topdir/sub/", "topdir/sub/c.txt"],
+        ),
+        (
+            r#"shopt -s globstar; printf '%s\n' **/sub/**"#,
+            vec!["topdir/sub", "topdir/sub/c.txt"],
+        ),
+    ];
+    for (script, expected) in cases {
+        let out = sharky_in(&dir, &["-c", script]);
+        assert_eq!(out.status.code(), Some(0), "{script}: {out:?}");
+        assert_eq!(sorted_lines(&out), expected, "{script}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn consecutive_terminal_globstar_drops_the_base_slash() {
     let dir = nested_fixture();
     let out = sharky_in(

@@ -4167,8 +4167,8 @@ fn pattern_has_globstar(pattern: &str) -> bool {
 fn gs_join(prefix: &str, name: &str) -> String {
     if prefix.is_empty() {
         name.to_string()
-    } else if prefix == "/" {
-        format!("/{name}")
+    } else if prefix.ends_with('/') {
+        format!("{prefix}{name}")
     } else {
         format!("{prefix}/{name}")
     }
@@ -4178,23 +4178,31 @@ fn gs_dir(prefix: &str) -> &str {
     if prefix.is_empty() { "." } else { prefix }
 }
 
-// Deliberate bash gap: implicit ** skips symlinked dirs entirely; explicit symlink prefixes keep read_dir semantics.
-fn gs_subdirs(prefix: &str) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(gs_dir(prefix)) else {
-        return Vec::new();
-    };
-    entries
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            let name = entry.file_name();
-            !name.to_string_lossy().starts_with('.')
-                && entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false)
-        })
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .collect()
+fn gs_slash(prefix: &str) -> String {
+    if prefix.ends_with('/') {
+        prefix.to_string()
+    } else {
+        format!("{prefix}/")
+    }
 }
 
-fn gs_walk(prefix: &str, components: &[&str], index: usize, trailing: bool, out: &mut Vec<String>) {
+fn gs_is_dir(entry: &std::fs::DirEntry, follow_symlink: bool) -> bool {
+    entry
+        .file_type()
+        .map(|kind| kind.is_dir() || (follow_symlink && kind.is_symlink() && entry.path().is_dir()))
+        .unwrap_or(false)
+}
+
+fn gs_walk(
+    prefix: &str,
+    components: &[&str],
+    index: usize,
+    trailing: bool,
+    bare_run_multiple: bool,
+    literal_prefix: bool,
+    descend_symlinks: bool,
+    out: &mut Vec<String>,
+) {
     let Some(component) = components.get(index) else {
         if !prefix.is_empty() {
             out.push(prefix.to_string());
@@ -4204,12 +4212,46 @@ fn gs_walk(prefix: &str, components: &[&str], index: usize, trailing: bool, out:
 
     if component_is_globstar(component) {
         if index + 1 == components.len() {
+            if !prefix.is_empty() {
+                if trailing || (literal_prefix && !bare_run_multiple) {
+                    out.push(gs_slash(prefix));
+                } else {
+                    out.push(prefix.to_string());
+                }
+            }
             gs_entries(prefix, trailing, out);
             return;
         }
-        gs_walk(prefix, components, index + 1, trailing, out);
-        for dir in gs_subdirs(prefix) {
-            gs_walk(&gs_join(prefix, &dir), components, index, trailing, out);
+        gs_walk(
+            prefix,
+            components,
+            index + 1,
+            trailing,
+            bare_run_multiple,
+            literal_prefix,
+            descend_symlinks,
+            out,
+        );
+        // Bash 5.3.20: a symlinked dir is followed only for the next component, not for deeper ** levels.
+        let Ok(entries) = std::fs::read_dir(gs_dir(prefix)) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || !gs_is_dir(&entry, descend_symlinks) {
+                continue;
+            }
+            let resume = if gs_is_dir(&entry, false) { index } else { index + 1 };
+            gs_walk(
+                &gs_join(prefix, &name),
+                components,
+                resume,
+                trailing,
+                bare_run_multiple,
+                literal_prefix,
+                descend_symlinks,
+                out,
+            );
         }
         return;
     }
@@ -4225,7 +4267,16 @@ fn gs_walk(prefix: &str, components: &[&str], index: usize, trailing: bool, out:
         if !glob_match(component, &name) {
             continue;
         }
-        gs_walk(&gs_join(prefix, &name), components, index + 1, trailing, out);
+        gs_walk(
+            &gs_join(prefix, &name),
+            components,
+            index + 1,
+            trailing,
+            bare_run_multiple,
+            literal_prefix,
+            descend_symlinks,
+            out,
+        );
     }
 }
 
@@ -4238,27 +4289,84 @@ fn gs_entries(prefix: &str, trailing: bool, out: &mut Vec<String>) {
         if name.starts_with('.') {
             continue;
         }
-        let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+        let real_dir = gs_is_dir(&entry, false);
         let path = gs_join(prefix, &name);
         if trailing {
-            if is_dir {
-                out.push(format!("{path}/"));
+            if gs_is_dir(&entry, true) {
+                out.push(gs_slash(&path));
             }
         } else {
             out.push(path.clone());
         }
-        if is_dir {
+        if real_dir {
             gs_entries(&path, trailing, out);
         }
     }
 }
 
+// Consecutive ** share one walk instead of re-traversing the tree and deduping afterwards.
+fn collapse_globstars(components: Vec<&str>, trailing: bool) -> (Vec<&str>, bool) {
+    let mut out = Vec::new();
+    let mut bare_run_multiple = false;
+    let mut index = 0;
+    while index < components.len() {
+        if component_is_globstar(components[index]) {
+            let mut run = 1;
+            while index + run < components.len() && component_is_globstar(components[index + run]) {
+                run += 1;
+            }
+            bare_run_multiple = index + run == components.len() && !trailing && run > 1;
+            out.push(components[index]);
+            index += run;
+        } else {
+            out.push(components[index]);
+            index += 1;
+        }
+    }
+    (out, bare_run_multiple)
+}
+
 fn globstar_glob(pattern: &str) -> Vec<String> {
-    let components: Vec<&str> = pattern.split('/').filter(|part| !part.is_empty()).collect();
-    let prefix = if pattern.starts_with('/') { "/" } else { "" };
+    let absolute = pattern.starts_with('/');
     let trailing = pattern.ends_with('/');
+    let mut components: Vec<&str> = pattern.split('/').filter(|part| !part.is_empty()).collect();
+    let descend_symlinks = components
+        .iter()
+        .position(|part| component_is_globstar(part))
+        .is_some_and(|index| index > 0);
+    let mut dot_prefix = String::new();
+    while components
+        .first()
+        .is_some_and(|part| *part == "." || *part == "..")
+    {
+        let part = components.remove(0);
+        if !dot_prefix.is_empty() {
+            dot_prefix.push('/');
+        }
+        dot_prefix.push_str(part);
+    }
+    if !dot_prefix.is_empty() {
+        dot_prefix.push('/');
+    }
+    let (components, bare_run_multiple) = collapse_globstars(components, trailing);
+    let literal_prefix = components
+        .last()
+        .is_some_and(|part| component_is_globstar(part))
+        && components[..components.len() - 1]
+            .iter()
+            .all(|part| !has_glob(part));
+    let prefix = if absolute { "/".to_string() } else { dot_prefix };
     let mut matches = Vec::new();
-    gs_walk(prefix, &components, 0, trailing, &mut matches);
+    gs_walk(
+        &prefix,
+        &components,
+        0,
+        trailing,
+        bare_run_multiple,
+        literal_prefix,
+        descend_symlinks,
+        &mut matches,
+    );
     matches.sort();
     matches.dedup();
     matches
