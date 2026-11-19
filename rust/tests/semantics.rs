@@ -1235,3 +1235,263 @@ fn associative_array_rejects_conversion_to_indexed() {
         "{stderr:?}"
     );
 }
+
+// `command` reports names through the same precedence table `type` uses, so a
+// function still wins over a builtin and an alias still wins over both.
+
+fn sharky_with_path(script: &str, path: &str) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args(["--no-config", "-c", script])
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .env("PATH", path)
+        .output()
+        .expect("failed to run sharky")
+}
+
+#[test]
+fn command_v_prints_the_bare_name_of_a_builtin() {
+    let out = sharky("command -v cd");
+    assert_eq!(stdout(&out), "cd\n");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn command_v_prints_the_bare_name_of_a_function() {
+    let out = sharky("probe() { :; }; command -v probe");
+    assert_eq!(stdout(&out), "probe\n");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn command_v_prints_the_path_of_an_external() {
+    let out = sharky("command -v printf");
+    let text = stdout(&out);
+    assert_eq!(status(&out), 0);
+    assert!(text.starts_with('/'), "{text:?}");
+    assert!(text.trim_end().ends_with("printf"), "{text:?}");
+}
+
+#[test]
+fn command_v_reports_a_missing_name_silently() {
+    let out = sharky("command -v definitely-not-a-command");
+    assert_eq!(stdout(&out), "");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    assert_eq!(status(&out), 1);
+}
+
+#[test]
+fn command_v_fails_when_one_of_several_names_is_missing() {
+    let out = sharky("command -v cd definitely-not-a-command");
+    assert_eq!(stdout(&out), "cd\n");
+    assert_eq!(status(&out), 1);
+}
+
+#[test]
+fn command_v_succeeds_when_every_name_resolves() {
+    let out = sharky("probe() { :; }; command -v cd probe printf");
+    let text = stdout(&out);
+    assert_eq!(status(&out), 0);
+    assert!(text.starts_with("cd\nprobe\n/"), "{text:?}");
+}
+
+#[test]
+fn command_v_prints_the_alias_definition() {
+    let out = sharky("alias hi='echo hello'; command -v hi");
+    assert_eq!(stdout(&out), "alias hi='echo hello'\n");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn command_big_v_describes_a_builtin() {
+    let out = sharky("command -V cd");
+    assert_eq!(stdout(&out), "cd is a shell builtin\n");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn command_big_v_describes_a_function() {
+    let out = sharky("probe() { :; }; command -V probe");
+    assert_eq!(stdout(&out), "probe is a function\n");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn command_big_v_describes_an_external_with_its_path() {
+    let out = sharky("command -V printf");
+    let text = stdout(&out);
+    assert_eq!(status(&out), 0);
+    let described = text.trim_end();
+    let path = described
+        .strip_prefix("printf is ")
+        .unwrap_or_else(|| panic!("unexpected description: {described:?}"));
+    assert!(path.starts_with('/'), "{described:?}");
+    assert!(path.ends_with("printf"), "{described:?}");
+}
+
+#[test]
+fn command_big_v_describes_an_alias() {
+    let out = sharky("alias hi='echo hello'; command -V hi");
+    assert_eq!(stdout(&out), "hi is aliased to `echo hello'\n");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn command_big_v_reports_a_missing_name_on_stderr_and_fails() {
+    let out = sharky("command -V definitely-not-a-command");
+    assert_eq!(stdout(&out), "");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("command: definitely-not-a-command: not found"),
+        "{stderr:?}"
+    );
+    assert_eq!(status(&out), 1);
+}
+
+#[test]
+fn command_runs_a_builtin_when_no_function_shadows_it() {
+    let out = sharky("command cd /; pwd");
+    assert_eq!(stdout(&out), "/\n");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn command_bypasses_a_function_of_the_same_name() {
+    let out = sharky(r#"printf() { echo FUNC; }; printf SHADOWED; command printf '[%s]' real"#);
+    assert_eq!(stdout(&out), "FUNC\n[real]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn command_falls_back_to_a_builtin_hidden_by_a_function() {
+    let out = sharky("type() { echo FUNC; }; type cd; command type cd");
+    assert_eq!(stdout(&out), "FUNC\ncd: shell builtin\n");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn command_returns_the_status_of_the_command_it_runs() {
+    let out = sharky("command false; printf 'st=%s' \"$?\"");
+    assert_eq!(stdout(&out), "st=1");
+}
+
+#[test]
+fn command_propagates_an_external_exit_status() {
+    let out = sharky("command sh -c 'exit 7'; printf 'st=%s' \"$?\"");
+    assert_eq!(stdout(&out), "st=7");
+}
+
+#[test]
+fn command_reports_a_missing_command_with_status_127() {
+    let out = sharky("command definitely-not-a-command; printf 'st=%s' \"$?\"");
+    assert_eq!(stdout(&out), "st=127");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("command not found: definitely-not-a-command"),
+        "{stderr:?}"
+    );
+}
+
+#[test]
+fn command_without_a_name_succeeds_and_prints_nothing() {
+    for script in ["command", "command -p", "command -v", "command -V"] {
+        let out = sharky(script);
+        assert_eq!(stdout(&out), "", "{script}");
+        assert_eq!(String::from_utf8_lossy(&out.stderr), "", "{script}");
+        assert_eq!(status(&out), 0, "{script}");
+    }
+}
+
+#[test]
+fn command_rejects_an_unknown_option_with_status_two() {
+    let out = sharky("command -z cd");
+    assert_eq!(stdout(&out), "");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("command: -z: invalid option"), "{stderr:?}");
+    assert!(
+        stderr.contains("usage: command [-pVv] command"),
+        "{stderr:?}"
+    );
+    assert_eq!(status(&out), 2);
+}
+
+#[test]
+fn command_double_dash_ends_the_options() {
+    let out = sharky("command -- printf ok");
+    assert_eq!(stdout(&out), "ok");
+    assert_eq!(status(&out), 0);
+}
+
+// -p searches the shell's default PATH instead of the current one, while
+// builtins and functions stay reachable without any PATH at all.
+
+#[test]
+fn command_dash_p_ignores_a_hostile_path() {
+    let dir = temp_dir();
+    let probe = dir.join("sharky-command-p-probe");
+    std::fs::write(&probe, "#!/bin/sh\nexit 0\n").unwrap();
+    let mut permissions = std::fs::metadata(&probe).unwrap().permissions();
+    use std::os::unix::fs::PermissionsExt;
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&probe, permissions).unwrap();
+    let path = dir.display().to_string();
+
+    let out = sharky_with_path("command -v sharky-command-p-probe", &path);
+    assert_eq!(stdout(&out), format!("{}\n", probe.display()));
+    assert_eq!(status(&out), 0);
+
+    let out = sharky_with_path("command -p -v sharky-command-p-probe", &path);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+
+    let out = sharky_with_path("command -p sharky-command-p-probe", &path);
+    assert_eq!(status(&out), 127);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("command not found: sharky-command-p-probe"),
+        "{stderr:?}"
+    );
+
+    let out = sharky_with_path("command -p -v cd; command -pv cd", &path);
+    assert_eq!(stdout(&out), "cd\ncd\n");
+    assert_eq!(status(&out), 0);
+
+    // An external that only the default PATH can find still runs with -p.
+    let out = sharky_with_path("command -p sh -c 'printf p'", "/nowhere");
+    assert_eq!(stdout(&out), "p");
+    assert_eq!(status(&out), 0);
+
+    let out = sharky_with_path("command sh -c 'printf p'", "/nowhere");
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 127);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn command_dash_p_still_runs_builtins_under_a_hostile_path() {
+    let out = sharky_with_path("command -p cd /; pwd; command -p false || pwd", "/nowhere");
+    assert_eq!(stdout(&out), "/\n/\n");
+    assert_eq!(status(&out), 0);
+}
+
+// `type` keeps its own formatting even though it now shares the resolution
+// helper with `command`.
+
+#[test]
+fn type_keeps_its_formatting_for_every_kind_of_name() {
+    let out = sharky(
+        r#"probe() { :; }; alias hi='echo hello'; type cd; type probe; type hi; type printf; type definitely-not-a-command; echo "st=$?""#,
+    );
+    let text = stdout(&out);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], "cd: shell builtin");
+    assert_eq!(lines[1], "probe: function");
+    assert_eq!(lines[2], "hi: aliased to echo hello");
+    assert!(lines[3].starts_with("printf: /"), "{text:?}");
+    assert_eq!(lines[4], "st=1");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("type: definitely-not-a-command: not found"),
+        "{stderr:?}"
+    );
+}
