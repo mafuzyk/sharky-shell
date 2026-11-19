@@ -3293,3 +3293,212 @@ fn status_rejects_options_and_extra_arguments() {
         );
     }
 }
+
+fn sharky_doctor(config: &std::path::Path, data: &std::path::Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .arg("doctor")
+        .env("SHARKY_CONFIG", config)
+        .env("XDG_DATA_HOME", data)
+        .env("HOME", data)
+        .output()
+        .expect("failed to run sharky")
+}
+
+#[test]
+fn doctor_reports_every_check_and_exits_zero_when_healthy() {
+    let dir = temp_dir();
+    let data = temp_dir();
+    std::fs::create_dir_all(data.join("sharky")).unwrap();
+    let out = sharky_doctor(&dir, &data);
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&data).ok();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.stderr.is_empty(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 6, "{text}");
+    for (name, line) in ["stdin", "stdout", "config", "theme", "history", "tools"]
+        .iter()
+        .zip(&lines)
+    {
+        assert!(line.starts_with("OK   "), "{line}");
+        assert!(line.contains(&format!("{name}:")), "{line}");
+    }
+}
+
+#[test]
+fn doctor_reports_a_config_parse_error_and_exits_one() {
+    let dir = temp_dir();
+    std::fs::write(dir.join("config.sharky"), "coral kelp\n").unwrap();
+    let data = temp_dir();
+    std::fs::create_dir_all(data.join("sharky")).unwrap();
+    let out = sharky_doctor(&dir, &data);
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&data).ok();
+    assert_eq!(out.status.code(), Some(1));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("FAIL config:"), "{text}");
+    assert!(text.contains("line 1"), "{text}");
+}
+
+#[test]
+fn doctor_detects_an_unreadable_config_file_that_load_would_skip() {
+    let dir = temp_dir();
+    std::fs::create_dir(dir.join("config.sharky")).unwrap();
+    let data = temp_dir();
+    std::fs::create_dir_all(data.join("sharky")).unwrap();
+    let out = sharky_doctor(&dir, &data);
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&data).ok();
+    assert_eq!(out.status.code(), Some(1));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("FAIL config:"), "{text}");
+    assert!(text.contains("load would skip it"), "{text}");
+}
+
+#[test]
+fn doctor_reports_a_theme_parse_error_and_exits_one() {
+    let dir = temp_dir();
+    std::fs::write(dir.join("theme.sharky"), "coral kelp not-a-colour\n").unwrap();
+    let data = temp_dir();
+    std::fs::create_dir_all(data.join("sharky")).unwrap();
+    let out = sharky_doctor(&dir, &data);
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&data).ok();
+    assert_eq!(out.status.code(), Some(1));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("FAIL theme:"), "{text}");
+    assert!(text.contains("line 1"), "{text}");
+}
+
+#[test]
+fn doctor_checks_history_permissions_without_opening_or_changing_the_file() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = temp_dir();
+    let data = temp_dir();
+    std::fs::create_dir_all(data.join("sharky")).unwrap();
+    let history = data.join("sharky/history");
+    std::fs::write(&history, "previous command\n").unwrap();
+    std::fs::set_permissions(&history, std::fs::Permissions::from_mode(0o666)).unwrap();
+
+    let out = sharky_doctor(&dir, &data);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("FAIL history: world-writable"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(std::fs::read_to_string(&history).unwrap(), "previous command\n");
+    assert_eq!(std::fs::metadata(&history).unwrap().permissions().mode() & 0o777, 0o666);
+
+    std::fs::set_permissions(&history, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let out = sharky_doctor(&dir, &data);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(std::fs::read_to_string(&history).unwrap(), "previous command\n");
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&data).ok();
+}
+
+#[test]
+fn doctor_detects_tools_missing_from_path() {
+    let dir = temp_dir();
+    let data = temp_dir();
+    std::fs::create_dir_all(data.join("sharky")).unwrap();
+    let empty_path = temp_dir();
+    let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .arg("doctor")
+        .env("SHARKY_CONFIG", &dir)
+        .env("XDG_DATA_HOME", &data)
+        .env("HOME", &data)
+        .env("PATH", &empty_path)
+        .output()
+        .expect("failed to run sharky");
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&data).ok();
+    std::fs::remove_dir_all(&empty_path).ok();
+    assert_eq!(out.status.code(), Some(1));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("FAIL tools:"), "{text}");
+    assert!(text.contains("sh"), "{text}");
+}
+
+#[test]
+fn doctor_never_prints_secret_values_or_pearl_directives() {
+    let dir = temp_dir();
+    std::fs::write(
+        dir.join("config.sharky"),
+        "pearl TOP_SECRET_DOCTOR_TOKEN \"s3cr3t-doctor-leak\"\n",
+    )
+    .unwrap();
+    let data = temp_dir();
+    std::fs::create_dir_all(data.join("sharky")).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .arg("doctor")
+        .env("SHARKY_CONFIG", &dir)
+        .env("XDG_DATA_HOME", &data)
+        .env("HOME", &data)
+        .env("SHARKY_SUPER_SECRET", "s3cr3t-env-leak")
+        .output()
+        .expect("failed to run sharky");
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&data).ok();
+    assert_eq!(out.status.code(), Some(0));
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!all.contains("s3cr3t-doctor-leak"), "{all}");
+    assert!(!all.contains("TOP_SECRET_DOCTOR_TOKEN"), "{all}");
+    assert!(!all.contains("s3cr3t-env-leak"), "{all}");
+    assert!(!all.contains("SHARKY_SUPER_SECRET"), "{all}");
+}
+
+#[test]
+fn doctor_creates_no_config_history_or_z_file() {
+    let dir = temp_dir();
+    let data = temp_dir();
+    std::fs::create_dir_all(data.join("sharky")).unwrap();
+    let out = sharky_doctor(&dir, &data);
+    assert!(!dir.join("config.sharky").exists());
+    assert!(!dir.join("theme.sharky").exists());
+    assert!(!dir.join("profile.sharky").exists());
+    assert!(!data.join("sharky/history").exists());
+    assert!(!data.join("sharky/z.jsonl").exists());
+    assert!(!data.join(".local/share/sharky/history").exists());
+    // A healthy environment is required for this assertion to be meaningful.
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&data).ok();
+}
+
+#[test]
+fn doctor_rejects_options_and_extra_arguments() {
+    for args in [vec!["doctor", "--json"], vec!["doctor", "extra"]] {
+        let out = sharky(&args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("doctor:"),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
