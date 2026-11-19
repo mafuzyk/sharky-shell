@@ -577,6 +577,9 @@ impl Shell {
     fn errexit_check(&mut self, flow: Flow) -> Flow {
         if self.nounset_failed {
             self.nounset_failed = false;
+            if self.interactive {
+                return Flow::Status(1);
+            }
             self.exit_requested = Some(1);
             return Flow::Exit(1);
         }
@@ -584,6 +587,9 @@ impl Shell {
             Flow::Status(code)
                 if code != 0 && self.errexit && !self.errexit_suppressed =>
             {
+                if self.interactive {
+                    return Flow::Status(code);
+                }
                 self.exit_requested = Some(code);
                 Flow::Exit(code)
             }
@@ -790,6 +796,9 @@ impl Shell {
             }
             if self.nounset_failed {
                 self.nounset_failed = false;
+                if self.interactive {
+                    return Flow::Status(1);
+                }
                 self.exit_requested = Some(1);
                 return Flow::Exit(1);
             }
@@ -815,6 +824,9 @@ impl Shell {
 
         if self.nounset_failed {
             self.nounset_failed = false;
+            if self.interactive {
+                return Flow::Status(1);
+            }
             self.exit_requested = Some(1);
             return Flow::Exit(1);
         }
