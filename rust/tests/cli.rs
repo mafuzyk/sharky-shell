@@ -2749,8 +2749,8 @@ fn merge_startup_flag_is_rejected() {
 }
 
 #[test]
-fn explain_without_topic_prints_a_text_index() {
-    let out = sharky(&["explain"]);
+fn config_explain_without_topic_prints_a_text_index() {
+    let out = sharky(&["config", "explain"]);
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -2765,8 +2765,8 @@ fn explain_without_topic_prints_a_text_index() {
 }
 
 #[test]
-fn explain_joins_space_separated_topic_words() {
-    let out = sharky(&["explain", "tide", "history"]);
+fn config_explain_joins_space_separated_topic_words() {
+    let out = sharky(&["config", "explain", "tide", "history"]);
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -2781,11 +2781,11 @@ fn explain_joins_space_separated_topic_words() {
 }
 
 #[test]
-fn explain_exposes_every_recognized_directive() {
+fn config_explain_exposes_every_recognized_directive() {
     for directive in [
         "tide", "pearl", "current", "reef", "shoal", "anchor", "coral", "wave", "wake",
     ] {
-        let out = sharky(&["explain", directive]);
+        let out = sharky(&["config", "explain", directive]);
         assert_eq!(
             out.status.code(),
             Some(0),
@@ -2798,7 +2798,7 @@ fn explain_exposes_every_recognized_directive() {
 }
 
 #[test]
-fn explain_loads_no_config_and_has_no_side_effects() {
+fn config_explain_loads_no_config_and_has_no_side_effects() {
     let dir = temp_dir();
     std::fs::write(
         dir.join("config.sharky"),
@@ -2807,7 +2807,7 @@ fn explain_loads_no_config_and_has_no_side_effects() {
     .unwrap();
     let data = temp_dir();
     let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
-        .args(["explain", "tide", "history"])
+        .args(["config", "explain", "tide", "history"])
         .env("SHARKY_CONFIG", &dir)
         .env("XDG_DATA_HOME", &data)
         .output()
@@ -2831,21 +2831,30 @@ fn explain_loads_no_config_and_has_no_side_effects() {
 }
 
 #[test]
-fn explain_unknown_topic_exits_two() {
-    let out = sharky(&["explain", "not-a-topic"]);
+fn config_explain_unknown_topic_exits_two() {
+    let out = sharky(&["config", "explain", "not-a-topic"]);
     assert_eq!(out.status.code(), Some(2));
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("unknown topic 'not-a-topic'"), "{err}");
+    assert!(
+        err.contains("config explain: unknown topic 'not-a-topic'"),
+        "{err}"
+    );
 }
 
 #[test]
-fn explain_rejects_options_and_mixed_requests() {
+fn config_explain_rejects_options_and_mixed_requests() {
     let cases = [
-        (vec!["explain", "--json"], "unexpected option '--json'"),
-        (vec!["explain", "-c", "true"], "unexpected option '-c'"),
         (
-            vec!["--json", "explain"],
-            "cannot be combined with other options",
+            vec!["config", "explain", "--json"],
+            "config explain: unexpected option '--json'",
+        ),
+        (
+            vec!["config", "explain", "-c", "true"],
+            "config explain: unexpected option '-c'",
+        ),
+        (
+            vec!["--json", "config", "explain"],
+            "config explain cannot be combined with other options",
         ),
     ];
     for (args, message) in cases {
@@ -2857,11 +2866,20 @@ fn explain_rejects_options_and_mixed_requests() {
 }
 
 #[test]
-fn help_lists_the_explain_subcommand() {
+fn help_lists_the_config_explain_subcommand() {
     let out = sharky(&["--help"]);
     assert!(out.status.success());
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("explain"), "{text}");
+    assert!(text.contains("config explain"), "{text}");
+}
+
+#[test]
+fn config_explain_has_no_top_level_alias() {
+    let out = sharky(&["explain"]);
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("Configuration guide topics"),
+        "top-level explain must not print the guide"
+    );
 }
 
 fn history_fixture(name: &str) -> std::path::PathBuf {
