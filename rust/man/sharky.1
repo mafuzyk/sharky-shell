@@ -16,7 +16,7 @@ sharky \- Unix-first interactive shell
 \fB\-\-json\fR [\fB\-\-env\fR]
 .br
 .B sharky
-.B explain
+.B config explain
 [\fITOPIC\fR [\fIWORD\fR...]]
 .SH DESCRIPTION
 .B sharky
@@ -62,10 +62,10 @@ Include the environment in \fBstate \-\-json\fR.
 .B state
 Print schema version, cwd, last status and pid as JSON (requires \fB\-\-json\fR).
 .TP
-.B explain
+.B config explain
 Print the configuration guide as plain text. With no \fITOPIC\fR, print an index
-of topic ids; otherwise join the words after \fBexplain\fR with spaces and print
-that topic. Each parser directive has its own topic, alongside \fBtide history\fR,
+of topic ids; otherwise join the words after \fBconfig explain\fR with spaces and
+print that topic. Each parser directive has its own topic, alongside \fBtide history\fR,
 \fBfiles\fR, \fBtheme\fR and \fBoverwrite\fR. Unknown or malformed
 requests exit 2. Runs before the shell starts, so no configuration, profiles or
 history are read.
@@ -159,9 +159,10 @@ Unknown instructions, wrong arity, invalid colours and undefined colour
 references are reported as \fBfile:line\fR errors; the shell keeps running with
 its defaults.
 .PP
-.B sharky explain
-prints this guidance as plain text: \fBsharky explain\fR lists the topic ids and
-\fBsharky explain tide history\fR prints one topic.
+.B sharky config explain
+prints this guidance as plain text: \fBsharky config explain\fR lists the topic
+ids and \fBsharky config explain tide history\fR prints one topic. There is no
+top-level \fBsharky explain\fR alias.
 .SH KEYS
 .TP
 .B Tab

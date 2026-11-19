@@ -23,10 +23,10 @@ pub const INDEX: &[(&str, &str)] = &[
     ("overwrite", "Overwrite target styling"),
 ];
 
-/// Plain-text index: one `id  title` line per topic, for `sharky explain`.
+/// Plain-text index: one `id  title` line per topic, for `sharky config explain`.
 pub fn index_text() -> String {
     let width = INDEX.iter().map(|(id, _)| id.len()).max().unwrap_or(0);
-    let mut out = String::from("Configuration guide topics (sharky explain TOPIC):\n");
+    let mut out = String::from("Configuration guide topics (sharky config explain TOPIC):\n");
     for (id, title) in INDEX {
         out.push_str(&format!("{id:<width$}  {title}\n"));
     }
