@@ -122,3 +122,65 @@ fn literal_text_is_not_split_on_ifs() {
     assert_eq!(stdout(&out), "<a,b>");
     assert_eq!(status(&out), 0);
 }
+
+// set: clustered option letters, pipefail, errexit and nounset.
+
+#[test]
+fn clustered_option_letters_enable_each_option() {
+    let out = sharky("set -euo pipefail; set +o");
+    let listing = stdout(&out);
+    assert_eq!(status(&out), 0);
+    assert!(listing.contains("set -o errexit"), "{listing:?}");
+    assert!(listing.contains("set -o nounset"), "{listing:?}");
+    assert!(listing.contains("set -o pipefail"), "{listing:?}");
+}
+
+#[test]
+fn clustered_option_letters_only_enable_listed_options() {
+    let out = sharky("set -eu; set +o");
+    let listing = stdout(&out);
+    assert_eq!(status(&out), 0);
+    assert!(listing.contains("set -o errexit"), "{listing:?}");
+    assert!(!listing.contains("set -o pipefail"), "{listing:?}");
+    assert!(!listing.contains("set -o xtrace"), "{listing:?}");
+}
+
+#[test]
+fn pipefail_reports_the_rightmost_failure_through_a_condition() {
+    let out = sharky(
+        r#"set -o pipefail; if false | true; then printf 'ok\n'; else printf 'rc=%s\n' "$?"; fi"#,
+    );
+    assert_eq!(stdout(&out), "rc=1\n");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn errexit_aborts_after_a_failing_simple_command() {
+    let out = sharky("set -e; false; printf unreachable");
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+}
+
+#[test]
+fn errexit_is_suspended_inside_conditions_and_and_or_lists() {
+    let out = sharky(
+        "set -e; if false; then printf no; else printf cond; fi; false && printf no; false || printf or; printf end",
+    );
+    assert_eq!(stdout(&out), "condorend");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn errexit_aborts_on_the_last_command_of_an_and_list() {
+    let out = sharky("set -e; true && false; printf unreachable");
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+}
+
+#[test]
+fn nounset_errors_on_an_unset_expansion() {
+    let out = sharky(r#"set -u; printf '%s' "$SHARKY_UNSET_D"; printf after"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unbound"));
+}
