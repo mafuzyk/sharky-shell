@@ -1,0 +1,18 @@
+# name<TAB>class<TAB>reference
+# portable cases are judged by dash; bash-only cases are judged by bash.
+p-printf	portable	dash
+p-status	portable	dash
+p-unset-default	portable	dash
+p-unquoted-ifs	portable	dash
+p-quoted-join	portable	dash
+p-cmdsub	portable	dash
+p-heredoc	portable	dash
+p-if-then	portable	dash
+p-side-effect-file	portable	dash
+b-set-euo-pipefail	bash	bash
+b-array	bash	bash
+b-double-bracket	bash	bash
+b-parameter-case	bash	bash
+b-brace-expansion	bash	bash
+b-local	bash	bash
+b-side-effect-append	bash	bash
