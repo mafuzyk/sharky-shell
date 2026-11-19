@@ -2813,7 +2813,16 @@ impl Shell {
 
         let no_nounset = matches!(
             parameter.operator,
-            Some(ParamOp::Default | ParamOp::Assign | ParamOp::Alternate | ParamOp::Error)
+            Some(
+                ParamOp::Default
+                    | ParamOp::Assign
+                    | ParamOp::Alternate
+                    | ParamOp::Error
+                    | ParamOp::DefaultUnset
+                    | ParamOp::AssignUnset
+                    | ParamOp::AlternateUnset
+                    | ParamOp::ErrorUnset
+            )
         );
         let value = if let Some(assoc) = self.assoc.get(&parameter.name) {
             match lookup {
@@ -2842,6 +2851,34 @@ impl Shell {
             self.expansion_var(&parameter.name)
         };
         let argument = parameter.argument.clone().unwrap_or_default();
+        let is_numeric = !parameter.name.is_empty()
+            && parameter.name.chars().all(|char| char.is_ascii_digit());
+        let defined = if let Some(assoc) = self.assoc.get(&parameter.name) {
+            match lookup {
+                Some("@") | Some("*") => !assoc.is_empty(),
+                Some(key) => assoc.contains_key(key),
+                None => assoc.contains_key("0"),
+            }
+        } else if let Some(array) = self.arrays.get(&parameter.name) {
+            match lookup {
+                Some("@") | Some("*") => array.iter().any(Option::is_some),
+                Some(_) => array.get(numeric_index).is_some_and(Option::is_some),
+                None => array.first().is_some_and(Option::is_some),
+            }
+        } else if parameter.name == "0" {
+            true
+        } else if is_numeric {
+            parameter
+                .name
+                .parse::<usize>()
+                .ok()
+                .and_then(|index| index.checked_sub(1))
+                .is_some_and(|index| index < self.positional.len())
+        } else if is_special_name(&parameter.name) {
+            true
+        } else {
+            self.env.iter().any(|(key, _)| key == &parameter.name)
+        };
 
         match parameter.operator {
             None => value,
@@ -2853,6 +2890,13 @@ impl Shell {
                     value
                 }
             }
+            Some(ParamOp::DefaultUnset) => {
+                if defined {
+                    value
+                } else {
+                    self.expand_string(&argument)
+                }
+            }
             Some(ParamOp::Assign) => {
                 if value.is_empty() {
                     let new = self.expand_string(&argument);
@@ -2862,6 +2906,15 @@ impl Shell {
                     value
                 }
             }
+            Some(ParamOp::AssignUnset) => {
+                if defined {
+                    value
+                } else {
+                    let new = self.expand_string(&argument);
+                    self.set_var(&parameter.name, new.clone());
+                    new
+                }
+            }
             Some(ParamOp::Alternate) => {
                 if value.is_empty() {
                     String::new()
@@ -2869,9 +2922,24 @@ impl Shell {
                     self.expand_string(&argument)
                 }
             }
+            Some(ParamOp::AlternateUnset) => {
+                if defined {
+                    self.expand_string(&argument)
+                } else {
+                    String::new()
+                }
+            }
             Some(ParamOp::Error) => {
                 if value.is_empty() {
                     eprintln!("sharky: {}: {}", parameter.name, argument);
+                    self.expansion_error = true;
+                }
+                value
+            }
+            Some(ParamOp::ErrorUnset) => {
+                if !defined {
+                    eprintln!("sharky: {}: {}", parameter.name, argument);
+                    self.expansion_error = true;
                 }
                 value
             }
