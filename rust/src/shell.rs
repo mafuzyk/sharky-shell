@@ -3059,6 +3059,8 @@ impl Shell {
                 .ok()
                 .and_then(|index| index.checked_sub(1))
                 .is_some_and(|index| index < self.positional.len())
+        } else if parameter.name == "@" || parameter.name == "*" {
+            !self.positional.is_empty()
         } else if is_special_name(&parameter.name) {
             true
         } else {
