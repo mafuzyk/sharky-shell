@@ -11,7 +11,8 @@ substitution, associative arrays and slices, extended parameter expansion,
 `$'...'`, extglob, C-style `for`, `;;&`/`;&`, the JSON agent interface,
 autosuggest, syntax highlighting, completion with an inline menu and a fuzzy file
 pager. The shell keeps job control, `[[ ]]`, `((...))`, heredocs, here-strings,
-brace expansion, `${var/pat/repl}`, `set` options, traps, `read` and `shift`.
+brace expansion, `${var/pat/repl}`, `set` options, `shopt -s/-u globstar`, traps,
+`read` and `shift`.
 
 ## Build
 

@@ -17,6 +17,13 @@ rather than a separate preview track.
   `${XDG_DATA_HOME:-~/.local/share}/sharky/history` (`SHARKY_HISTORY` overrides).
 - Prebuilt Nix flake: `nix profile install github:mafuzyk/sharky-shell` installs
   the verified static binary, man page and example config on `x86_64-linux`.
+- `shopt` supports exactly one option, `globstar`: `shopt -s globstar` enables
+  recursive `**` pathname matching (off by default), `shopt -u globstar`
+  restores ordinary single-level globbing and `shopt globstar` reports the
+  state. Quoted `**` stays literal, hidden entries are skipped unless the
+  component starts with `.`, matches are deduplicated and `./`/`../` prefixes
+  are preserved. Other option names and combined or interleaved `-s`/`-u`
+  flags are rejected; the setting is per shell and is not persisted.
 
 ## [3.5.4] - 2026-11-02
 

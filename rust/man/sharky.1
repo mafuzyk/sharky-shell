@@ -73,6 +73,10 @@ arithmetic expansion \fB$((...))\fR and C-style \fBfor ((...))\fR loops;
 .IP \(bu 2
 tilde expansion and glob patterns;
 .IP \(bu 2
+\fBshopt \-s globstar\fR enables recursive \fB**\fR matching (off by default),
+\fBshopt \-u globstar\fR restores single\-level globbing, and
+\fBshopt globstar\fR reports \fBon\fR or \fBoff\fR;
+.IP \(bu 2
 pipelines, redirections (\fB>\fR, \fB>>\fR, \fB<\fR, \fB2>&1\fR), \fB;\fR,
 \fB&&\fR and \fB||\fR lists, process substitution (\fB<(list)\fR,
 \fB>(list)\fR), \fBexec\fR and \fBtime\fR;
@@ -177,6 +181,14 @@ is not supported; use
 .B time
 or
 .B time -p.
+.PP
+.B shopt
+accepts only the
+.B globstar
+option. Combined or interleaved \fB\-s\fR/\fB\-u\fR flags and other option
+names are rejected, and the setting is not persisted across shells. Matching
+paths are deduplicated; Bash can repeat paths for overlapping nonconsecutive
+globstars.
 .PP
 .SH HISTORY
 After each command is evaluated, sharky appends it to one shared history file

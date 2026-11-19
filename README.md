@@ -136,12 +136,12 @@ The prompt, `-c` and script files share one grammar:
 | associative arrays | `declare -A a`, `a[key]=value`, `"${a[key]}"`, `"${!a[@]}"` |
 | command substitution | `files=$(ls \| wc -l)` |
 | arithmetic | `$((2 + 3 * 4))`, `((total > 10))` |
-| globbing and tilde | `src/*.rs`, `~/bin`, `@(a|b).txt`, `!(tmp)` |
+| globbing and tilde | `src/*.rs`, `~/bin`, `@(a|b).txt`, `!(tmp)`, `shopt -s globstar; **/*.rs` |
 | pipelines and redirects | `a \| b > out 2>&1`, `cmd &> out`, `cmd &>> out` |
 | heredocs and here-strings | `cat <<EOF` ... `EOF`, `<<-EOF`, `<<'EOF'`, `cat <<< "text"` |
 | process substitution | `diff <(a) <(b)`, `tee >(cat > out)` |
 | lists | `a; b`, `a && b`, `a \|\| b` |
-| options | `set -e`, `set -u`, `set -x`, `set -o pipefail`, `set -H`/`+H`, `set -o vi`/`+o vi`, `set -- a b` |
+| options | `set -e`, `set -u`, `set -x`, `set -o pipefail`, `set -H`/`+H`, `set -o vi`/`+o vi`, `set -- a b`, `shopt -s/-u globstar`, `shopt globstar` |
 | traps | `trap 'cleanup' EXIT`, `trap -l` |
 | read and shift | `read -r name`, `shift 2` |
 | conditionals | `if`, `elif`, `else`, `fi`, `[[ -f x && "$y" =~ ^f ]]` |
@@ -160,6 +160,19 @@ The prompt, `-c` and script files share one grammar:
 | history expansion | `!!`, `!n`, `!-n`, `!prefix`, `!?text?`, `!$`, `!*`, `!^`, `^old^new^`; `set +H` disables |
 | job control | `cmd &`, `jobs`, `fg`, `bg`, Ctrl-Z |
 | scripts | `source lib.sh`, `sharky file.sh args` |
+
+`shopt` supports exactly one option, `globstar`. It is off by default:
+`shopt -s globstar` makes `**` match across zero or more directories,
+`shopt -u globstar` restores ordinary single-level globbing, and
+`shopt globstar` prints `globstar` followed by a tab and `on` or `off`, with a
+matching exit status. Other option names, combined flags such as `-su`, and
+interleaved `-s`/`-u` pairs are rejected; the setting is per shell and is
+neither saved in the config files nor inherited by a new process. Quoted `**`
+stays literal, hidden entries are skipped unless the component starts with `.`,
+repeated matches are deduplicated, and `./` and `../` prefixes are preserved. A directory
+reached implicitly through a symlink is listed as an entry but not descended by
+a leading `**`; a `**` that follows a path prefix descends symlinked directories,
+and naming a symlink directly keeps normal directory behavior.
 
 This is a subset of Bash, not a drop-in replacement. Unsupported syntax fails
 with status 2 instead of silently falling back to another shell.
