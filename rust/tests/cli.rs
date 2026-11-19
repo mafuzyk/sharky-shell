@@ -2873,7 +2873,7 @@ fn config_explain_rejects_options_and_mixed_requests() {
         ),
         (
             vec!["--json", "config", "explain"],
-            "config explain cannot be combined with other options",
+            "sharky: --json is only supported with -c or state",
         ),
     ];
     for (args, message) in cases {
@@ -2897,7 +2897,40 @@ fn config_explain_has_no_top_level_alias() {
     let out = sharky(&["explain"]);
     assert!(
         !String::from_utf8_lossy(&out.stdout).contains("Configuration guide topics"),
-        "top-level explain must not print the guide"
+        "top-level explain must only be a subcommand after config"
+    );
+}
+
+#[test]
+fn config_explain_after_a_script_is_passed_as_positional_arguments() {
+    let dir = temp_dir();
+    let script = dir.join("positional.sh");
+    std::fs::write(&script, "printf '<%s>|<%s>|<%s>' \"$1\" \"$2\" \"$#\"\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .arg(&script)
+        .args(["config", "explain"])
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .output()
+        .expect("failed to run sharky");
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "<config>|<explain>|<2>");
+}
+
+#[test]
+fn config_explain_after_a_command_does_not_hijack_execution() {
+    let out = sharky(&["-c", "echo hi", "config", "explain"]);
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("cannot use -c with a script"), "{err}");
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("Configuration guide topics"),
+        "-c invocation must not print the guide"
     );
 }
 

@@ -191,19 +191,18 @@ pub fn run() -> i32 {
 }
 
 /// Handle the static `config explain` subcommand. Returns `Some(exit_code)`
-/// when the invocation is a `config explain` request (including its error
+/// when the invocation starts with `config explain` (including its error
 /// cases), or `None` when normal argument parsing should continue.
 fn try_config_explain(args: &[String]) -> Option<i32> {
-    let pair = args
-        .windows(2)
-        .position(|pair| pair[0] == "config" && pair[1] == "explain")?;
-    let head = &args[..pair];
-    let tail = &args[pair + 2..];
-
-    if !head.is_empty() {
-        eprintln!("sharky: config explain cannot be combined with other options");
-        return Some(2);
+    // The subcommand occupies the first two arguments only. A later pair is a
+    // script name followed by `explain` (or a `-c` command's trailing words)
+    // and belongs to the normal argument parser.
+    if args.first().map(String::as_str) != Some("config")
+        || args.get(1).map(String::as_str) != Some("explain")
+    {
+        return None;
     }
+    let tail = &args[2..];
 
     if let Some(option) = tail.iter().find(|arg| arg.starts_with('-')) {
         eprintln!("sharky: config explain: unexpected option '{option}'");
