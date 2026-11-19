@@ -59,6 +59,8 @@ pub const BUILTINS: &[&str] = &[
     "typeset",
     "shopt",
     "command",
+    "exec",
+    "time",
     "help",
 ];
 
@@ -68,6 +70,15 @@ pub const CLI_TOPICS: &[&str] = &[
     "--check",
     "--json",
     "-i",
+    "-l",
+    "--login",
+    "-P",
+    "--private",
+    "--env",
+    "--no-config",
+    "--version",
+    "--help",
+    "-h",
     "state",
     "config explain",
     "status",
@@ -293,6 +304,15 @@ fn builtin_text(id: &str) -> Option<&'static str> {
              -v prints how each name resolves, -V prints a verbose description,\n\
              -p searches the default path.\n"
         }
+        "exec" => {
+            "exec [-a NAME] COMMAND [ARG ...]  replace the shell with COMMAND.\n\
+             With no command, apply the redirections and keep the shell running.\n\
+             -a sets argv[0] to NAME.\n"
+        }
+        "time" => {
+            "time [-p] PIPELINE  run PIPELINE and report real, user and system time.\n\
+             -p selects the POSIX report format.\n"
+        }
         "help" => {
             "help [TOPIC]  print the help index, or the text for one topic.\n\
              Topics are builtin names, command-line flags and subcommands, and the\n\
@@ -324,6 +344,23 @@ fn cli_text(id: &str) -> Option<&'static str> {
             "-i  force interactive mode.\n\
              Fails when standard input or output is not a terminal.\n"
         }
+        "-l" => "-l  short form of --login; read login profiles before the command.\n",
+        "--login" => "--login  read login profiles before the command.\n",
+        "-P" => "-P  short form of --private; keep no history file.\n",
+        "--private" => {
+            "--private  keep no history file: read and write nothing.\n"
+        }
+        "--env" => {
+            "--env  include the environment in the state JSON.\n\
+             Only valid together with state.\n"
+        }
+        "--no-config" => "--no-config  do not load the configuration file.\n",
+        "--version" => "--version  print the version and exit.\n",
+        "--help" => {
+            "--help  print the help index and exit.\n\
+             -h is a synonym. `sharky help` prints the same index.\n"
+        }
+        "-h" => "-h  short form of --help; print the help index and exit.\n",
         "state" => {
             "state --json [--env]  print schema version, cwd, last status and pid.\n\
              --env adds the environment; --json is required. Runs before the shell\n\

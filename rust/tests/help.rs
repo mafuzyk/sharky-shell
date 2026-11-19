@@ -250,6 +250,52 @@ fn cli_flags_and_subcommands_are_help_topics() {
     }
 }
 
+/// Extract the flag tokens the help index advertises. Brackets around optional
+/// flags (`[--env]`) and comma-separated short/long pairs (`-l, --login`) are
+/// normalised, so every advertised flag becomes a plain `-x` or `--long` token.
+fn advertised_flags(index: &str) -> Vec<String> {
+    let mut flags: Vec<String> = index
+        .split_whitespace()
+        .map(|word| {
+            word.trim_matches(|char| matches!(char, '[' | ']' | ',' | '.' | '(' | ')'))
+        })
+        .filter(|token| token.starts_with('-') && token.len() > 1)
+        .map(str::to_string)
+        .collect();
+    flags.sort();
+    flags.dedup();
+    flags
+}
+
+#[test]
+fn every_flag_advertised_in_the_index_has_a_help_topic() {
+    let help = sharky(&["--help"]);
+    assert_eq!(help.status.code(), Some(0), "{}", stderr(&help));
+    let flags = advertised_flags(&stdout(&help));
+
+    // Guard against a parsing regression that would make the test vacuous.
+    for known in ["-c", "--check", "--json", "--version", "--help"] {
+        assert!(
+            flags.iter().any(|flag| flag == known),
+            "index flag parser missed {known}; parsed flags: {flags:?}"
+        );
+    }
+
+    for flag in &flags {
+        let out = sharky(&["help", flag]);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "index advertises {flag} but it has no help topic: {}",
+            stderr(&out)
+        );
+        assert!(
+            !stdout(&out).trim().is_empty(),
+            "help {flag} printed no text"
+        );
+    }
+}
+
 #[test]
 fn cli_help_reads_and_creates_no_configuration() {
     let root = scratch("cli-no-config");
