@@ -1,6 +1,8 @@
 use std::os::unix::fs::FileTypeExt;
 use std::process::{Command, Output};
 
+mod common;
+
 const NO_CONFIG: &str = "/nonexistent/sharky-test";
 
 fn sharky(args: &[&str]) -> Output {
@@ -2030,7 +2032,8 @@ fn history_expansion_never_runs_in_c() {
 
 #[test]
 fn exec_replaces_the_shell() {
-    let out = sharky(&["-c", "exec /bin/echo hi"]);
+    let echo = common::resolve("echo");
+    let out = sharky(&["-c", &format!("exec {} hi", echo.display())]);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\n");
     assert_eq!(out.status.code(), Some(0));
 
@@ -2522,7 +2525,8 @@ fn json_command_reports_status_streams_and_schema() {
     assert_eq!(out.status.code(), Some(7));
     assert!(String::from_utf8_lossy(&out.stdout).contains("\"status\":7"));
 
-    let out = sharky(&["--json", "-c", "/bin/printf '\\377'"]);
+    let printf = common::resolve("printf");
+    let out = sharky(&["--json", "-c", &format!("{} '\\377'", printf.display())]);
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains('\u{fffd}'), "non-UTF-8 not replaced: {text}");
 }
@@ -2549,7 +2553,8 @@ fn json_command_reports_environment_delta_and_cwd() {
 
 #[test]
 fn json_command_wraps_exec_in_the_envelope() {
-    let out = sharky(&["--json", "-c", "exec /bin/echo hi"]);
+    let echo = common::resolve("echo");
+    let out = sharky(&["--json", "-c", &format!("exec {} hi", echo.display())]);
     assert_eq!(out.status.code(), Some(0));
     let text = String::from_utf8_lossy(&out.stdout);
     assert_eq!(text.lines().count(), 1, "{text}");
@@ -2559,10 +2564,11 @@ fn json_command_wraps_exec_in_the_envelope() {
 
 #[test]
 fn json_exec_publishes_the_state_before_the_process_replacement() {
+    let echo = common::resolve("echo");
     let out = sharky(&[
         "--json",
         "-c",
-        "export AUDIT=changed; cd /; exec /bin/echo hi",
+        &format!("export AUDIT=changed; cd /; exec {} hi", echo.display()),
     ]);
     assert_eq!(out.status.code(), Some(0));
     let text = String::from_utf8_lossy(&out.stdout);
@@ -2606,10 +2612,23 @@ fn json_capture_failure_does_not_run_the_command() {
 
 #[test]
 fn json_exec_from_a_profile_keeps_the_state() {
+    use std::os::unix::fs::PermissionsExt;
+
     let home = login_home("json-exec-profile");
+    // NixOS coreutils is a multicall binary that dispatches on argv[0], so
+    // `exec -a NAME <echo>` alone would be seen as an unknown applet. Run echo
+    // through a tiny wrapper to keep the `exec -a` semantics under test while
+    // preserving echo's observable output.
+    let echo = common::resolve("echo");
+    let wrapper = home.join("profile-echo");
+    std::fs::write(&wrapper, format!("#!/bin/sh\nexec {} \"$@\"\n", echo.display())).unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::write(
         home.join(".config/sharky/profile.sharky"),
-        "export AUDIT_PROFILE=changed\ncd /\nexec -a NAME /bin/echo PROFILE\n",
+        format!(
+            "export AUDIT_PROFILE=changed\ncd /\nexec -a NAME {} PROFILE\n",
+            wrapper.display()
+        ),
     )
     .unwrap();
     let out = sharky_with_home(&home, &["-l", "--json", "-c", "true"]);
