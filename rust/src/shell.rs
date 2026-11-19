@@ -70,10 +70,6 @@ pub struct Shell {
     substitution_ready: Vec<i32>,
     json_exec: Option<(RawFd, Vec<(String, String)>)>,
     expansion_error: bool,
-    // Counts expansion failures so a condition can tell a discarded command
-    // from a genuinely false one, which both reach it as a plain status in an
-    // interactive shell.
-    expansion_failures: u64,
     substitution_status: Option<i32>,
     pub exit_requested: Option<i32>,
     jobs: Vec<Job>,
@@ -109,6 +105,10 @@ const SIGNALS: &[&str] = &[
 enum Flow {
     Status(i32),
     Exit(i32),
+    // An interactive expansion error abandons the rest of the input unit, as
+    // bash discards the line it is executing, without leaving the shell. It
+    // unwinds to `run_program`; a forked child maps it to its exit status.
+    Discard(i32),
     Break,
     Continue,
     Return(i32),
@@ -213,7 +213,6 @@ impl Shell {
             substitution_ready: Vec::new(),
             json_exec: None,
             expansion_error: false,
-            expansion_failures: 0,
             substitution_status: None,
             exit_requested: None,
             jobs: Vec::new(),
@@ -385,7 +384,7 @@ impl Shell {
         let program = parser::parse(source)?;
         before_run();
         Ok(match self.run_program(&program) {
-            Flow::Status(code) | Flow::Exit(code) | Flow::Return(code) => code,
+            Flow::Status(code) | Flow::Exit(code) | Flow::Discard(code) | Flow::Return(code) => code,
             Flow::Break | Flow::Continue => 0,
         })
     }
@@ -522,6 +521,12 @@ impl Shell {
                 Flow::Status(code) => {
                     status = code;
                     self.last_status = code;
+                }
+                // The input unit ends here. The shell keeps its state for the
+                // next one; only the status survives, for `$?`.
+                Flow::Discard(code) => {
+                    self.last_status = code;
+                    return Flow::Discard(code);
                 }
                 other => return other,
             }
@@ -1143,13 +1148,15 @@ impl Shell {
         }
     }
 
+    // A failing expansion in an interactive shell discards the rest of the
+    // input unit and reports its status; bash throws back to the reader loop
+    // rather than continuing with the commands that follow on the same line.
     fn unset_parameter_failure(&mut self) -> Flow {
         let code = self.unset_parameter_status();
         self.nounset_failed = false;
         self.null_parameter_error = false;
-        self.expansion_failures += 1;
         if self.interactive {
-            Flow::Status(code)
+            Flow::Discard(code)
         } else {
             self.exit_requested = Some(code);
             Flow::Exit(code)
@@ -1164,9 +1171,8 @@ impl Shell {
         };
         self.null_parameter_error = false;
         self.expansion_error = false;
-        self.expansion_failures += 1;
         if self.interactive {
-            Flow::Status(code)
+            Flow::Discard(code)
         } else {
             Flow::Exit(code)
         }
@@ -1271,16 +1277,10 @@ impl Shell {
 
     fn run_if(&mut self, branches: &[(List, List)], else_body: Option<&List>) -> Flow {
         for (condition, body) in branches {
-            // A condition that fails an expansion reports a status in an
-            // interactive shell, where a status is all it can report, so the
-            // failure count tells it apart from a genuinely false condition.
-            // Bash discards the whole compound command in that case: no branch
-            // runs, not even else.
-            let failures = self.expansion_failures;
+            // A condition whose expansion fails ends the whole compound command:
+            // no branch runs, not even else, and the discard flow carries the
+            // error status out of the if.
             match self.run_suppressed(condition) {
-                Flow::Status(code) if self.expansion_failures != failures => {
-                    return Flow::Status(code);
-                }
                 Flow::Status(0) => return self.run_list(body),
                 Flow::Status(_) => {}
                 other => return other,
@@ -2413,7 +2413,14 @@ impl Shell {
         let saved = std::mem::replace(&mut self.positional, args[1..].to_vec());
         let flow = self.run_program(&program);
         self.positional = saved;
-        flow
+        // An interactive expansion error inside the file abandons it and
+        // reports the status, while the caller's input line keeps running. Bash
+        // resumes at the next line of the file too; the parser keeps a file in
+        // one list, so this stops at the file boundary instead.
+        match flow {
+            Flow::Discard(code) => Flow::Status(code),
+            other => other,
+        }
     }
 
     /// Warns on a refused history file and falls back to memory only. The failed
@@ -5149,7 +5156,7 @@ fn reset_child_signals() {
 
 fn flow_status(flow: Flow) -> i32 {
     match flow {
-        Flow::Status(code) | Flow::Exit(code) | Flow::Return(code) => code,
+        Flow::Status(code) | Flow::Exit(code) | Flow::Discard(code) | Flow::Return(code) => code,
         Flow::Break | Flow::Continue => 0,
     }
 }

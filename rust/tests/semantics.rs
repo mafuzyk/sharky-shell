@@ -1604,6 +1604,245 @@ fn interactive_nounset_in_a_for_word_list_runs_no_iteration() {
     );
 }
 
+// Bash discards everything left on the failing input line, not only the
+// command that reported the error: a later command on the same line never
+// runs, while the next input line does. A pipeline element, a command
+// substitution and a subshell are separate processes, so their error is
+// contained and the parent keeps running the rest of its line.
+
+#[test]
+fn interactive_expansion_error_discards_the_rest_of_the_line() {
+    let seen = run_interactive(
+        &[
+            r#"unset v; printf '%s' "${v?boom}"; printf 'SAME-%s' 99"#,
+            r#"printf 'STATUS-%s' "$?""#,
+            r#"printf 'AFTER-L-%s' 99"#,
+        ],
+        "AFTER-L-99",
+    );
+    assert!(seen.contains("v: boom"), "missing error: {seen:?}");
+    assert!(!seen.contains("SAME-99"), "rest of line ran: {seen:?}");
+    assert!(seen.contains("STATUS-1"), "wrong status: {seen:?}");
+    assert!(
+        seen.contains("AFTER-L-99"),
+        "next line was swallowed: {seen:?}"
+    );
+}
+
+#[test]
+fn interactive_expansion_error_discards_a_group_and_the_rest_of_the_line() {
+    let seen = run_interactive(
+        &[
+            r#"unset v; { printf '%s' "${v?boom}"; printf 'GROUP-%s' 99; }; printf 'AFTER-G-%s' 99"#,
+            r#"printf 'NEXT-G-%s' 99"#,
+        ],
+        "NEXT-G-99",
+    );
+    assert!(seen.contains("v: boom"), "missing error: {seen:?}");
+    assert!(!seen.contains("GROUP-99"), "group body ran: {seen:?}");
+    assert!(!seen.contains("AFTER-G-99"), "rest of line ran: {seen:?}");
+    assert!(
+        seen.contains("NEXT-G-99"),
+        "next line was swallowed: {seen:?}"
+    );
+}
+
+#[test]
+fn interactive_expansion_error_in_an_if_body_discards_the_line() {
+    let seen = run_interactive(
+        &[
+            r#"unset v; if true; then printf '%s' "${v?boom}"; printf 'THEN-%s' 99; fi; printf 'AFTER-I-%s' 99"#,
+            r#"printf 'NEXT-I-%s' 99"#,
+        ],
+        "NEXT-I-99",
+    );
+    assert!(seen.contains("v: boom"), "missing error: {seen:?}");
+    assert!(!seen.contains("THEN-99"), "then body ran: {seen:?}");
+    assert!(!seen.contains("AFTER-I-99"), "rest of line ran: {seen:?}");
+    assert!(
+        seen.contains("NEXT-I-99"),
+        "next line was swallowed: {seen:?}"
+    );
+}
+
+#[test]
+fn interactive_expansion_error_in_a_loop_body_discards_the_line() {
+    let seen = run_interactive(
+        &[
+            r#"unset v; for i in 1 2; do printf '%s' "${v?boom}"; printf 'BODY-%s' 99; done; printf 'AFTER-W-%s' 99"#,
+            r#"printf 'NEXT-W-%s' 99"#,
+        ],
+        "NEXT-W-99",
+    );
+    assert!(seen.contains("v: boom"), "missing error: {seen:?}");
+    assert!(!seen.contains("BODY-99"), "loop body ran: {seen:?}");
+    assert!(!seen.contains("AFTER-W-99"), "rest of line ran: {seen:?}");
+    assert!(
+        seen.contains("NEXT-W-99"),
+        "next line was swallowed: {seen:?}"
+    );
+}
+
+#[test]
+fn interactive_expansion_error_in_a_case_body_discards_the_line() {
+    let seen = run_interactive(
+        &[
+            r#"unset v; case x in x) printf '%s' "${v?boom}"; printf 'ARM-%s' 99;; esac; printf 'AFTER-C-%s' 99"#,
+            r#"printf 'NEXT-C-%s' 99"#,
+        ],
+        "NEXT-C-99",
+    );
+    assert!(seen.contains("v: boom"), "missing error: {seen:?}");
+    assert!(!seen.contains("ARM-99"), "case arm ran: {seen:?}");
+    assert!(!seen.contains("AFTER-C-99"), "rest of line ran: {seen:?}");
+    assert!(
+        seen.contains("NEXT-C-99"),
+        "next line was swallowed: {seen:?}"
+    );
+}
+
+#[test]
+fn interactive_expansion_error_in_a_function_discards_the_callers_line() {
+    let seen = run_interactive(
+        &[
+            r#"f() { printf '%s' "${v?boom}"; printf 'FBODY-%s' 99; }"#,
+            r#"unset v; f; printf 'AFTER-FN-%s' 99"#,
+            r#"printf 'NEXT-FN-%s' 99"#,
+        ],
+        "NEXT-FN-99",
+    );
+    assert!(seen.contains("v: boom"), "missing error: {seen:?}");
+    assert!(!seen.contains("FBODY-99"), "function body ran: {seen:?}");
+    assert!(!seen.contains("AFTER-FN-99"), "rest of line ran: {seen:?}");
+    assert!(
+        seen.contains("NEXT-FN-99"),
+        "next line was swallowed: {seen:?}"
+    );
+}
+
+// The discard covers the whole input unit: a compound command that spans lines
+// also drops the commands that follow its closing keyword on that line.
+#[test]
+fn interactive_expansion_error_discards_a_multiline_compound_and_its_line() {
+    let seen = run_interactive(
+        &[
+            "unset v",
+            "if true; then",
+            r#"printf '%s' "${v?boom}""#,
+            r#"fi; printf 'AFTER-ML-%s' 99"#,
+            r#"printf 'NEXT-ML-%s' 99"#,
+        ],
+        "NEXT-ML-99",
+    );
+    assert!(seen.contains("v: boom"), "missing error: {seen:?}");
+    assert!(!seen.contains("AFTER-ML-99"), "rest of line ran: {seen:?}");
+    assert!(
+        seen.contains("NEXT-ML-99"),
+        "next line was swallowed: {seen:?}"
+    );
+}
+
+#[test]
+fn interactive_negated_expansion_error_discards_the_line() {
+    let seen = run_interactive(
+        &[
+            r#"unset v; ! printf '%s' "${v?boom}"; printf 'AFTER-N-%s' 99"#,
+            r#"printf 'NEXT-N-%s' 99"#,
+        ],
+        "NEXT-N-99",
+    );
+    assert!(seen.contains("v: boom"), "missing error: {seen:?}");
+    assert!(!seen.contains("AFTER-N-99"), "rest of line ran: {seen:?}");
+    assert!(
+        seen.contains("NEXT-N-99"),
+        "next line was swallowed: {seen:?}"
+    );
+}
+
+#[test]
+fn interactive_pipeline_expansion_error_keeps_the_rest_of_the_line() {
+    let seen = run_interactive(
+        &[
+            r#"unset v; printf '%s' "${v?boom}" | cat; printf 'AFTER-P-%s' 99"#,
+            r#"printf 'NEXT-P-%s' 99"#,
+        ],
+        "NEXT-P-99",
+    );
+    assert!(seen.contains("v: boom"), "missing error: {seen:?}");
+    assert!(
+        seen.contains("AFTER-P-99"),
+        "rest of line was discarded: {seen:?}"
+    );
+    assert!(seen.contains("NEXT-P-99"), "next line was swallowed: {seen:?}");
+}
+
+#[test]
+fn interactive_subshell_expansion_error_discards_only_the_subshell() {
+    let seen = run_interactive(
+        &[
+            r#"unset v; ( printf '%s' "${v?boom}"; printf 'SUBSH-%s' 99 ); printf 'AFTER-S-%s' 99"#,
+            r#"printf 'NEXT-S-%s' 99"#,
+        ],
+        "NEXT-S-99",
+    );
+    assert!(seen.contains("v: boom"), "missing error: {seen:?}");
+    assert!(!seen.contains("SUBSH-99"), "subshell body ran: {seen:?}");
+    assert!(
+        seen.contains("AFTER-S-99"),
+        "parent line was discarded: {seen:?}"
+    );
+    assert!(seen.contains("NEXT-S-99"), "next line was swallowed: {seen:?}");
+}
+
+#[test]
+fn interactive_command_substitution_expansion_error_keeps_the_rest_of_the_line() {
+    let seen = run_interactive(
+        &[
+            r#"unset v; printf '%s' "$(printf '%s' "${v?boom}")"; printf 'AFTER-CS-%s' 99"#,
+            r#"printf 'NEXT-CS-%s' 99"#,
+        ],
+        "NEXT-CS-99",
+    );
+    assert!(seen.contains("v: boom"), "missing error: {seen:?}");
+    assert!(
+        seen.contains("AFTER-CS-99"),
+        "rest of line was discarded: {seen:?}"
+    );
+    assert!(
+        seen.contains("NEXT-CS-99"),
+        "next line was swallowed: {seen:?}"
+    );
+}
+
+// Outside an interactive shell the error ends the whole input: the command
+// string, the script and the standard-input source all stop there.
+
+#[test]
+fn command_string_expansion_error_stops_the_rest_of_the_string() {
+    let out = sharky(r#"unset v; printf '%s' "${v?boom}"; printf 'SAME-%s' 99"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 127);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("v: boom"));
+}
+
+#[test]
+fn script_expansion_error_stops_the_rest_of_the_script() {
+    let out = sharky_script(
+        "unset v\nprintf '%s' \"${v?boom}\"; printf 'SAME-%s' 99\nprintf 'AFTER-SCRIPT-%s' 99\n",
+    );
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("v: boom"));
+}
+
+#[test]
+fn standard_input_expansion_error_stops_the_rest_of_the_input() {
+    let out = sharky_stdin("unset v\nprintf '%s' \"${v?boom}\"; printf 'SAME-%s' 99\necho AFTER\n");
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("v: boom"));
+}
+
 // An assignment-only command keeps its assignments in the shell and performs
 // its redirections, reporting the command-substitution status.
 
