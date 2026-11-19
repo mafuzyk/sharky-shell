@@ -44,7 +44,7 @@ nix run github:mafuzyk/sharky-shell#sharky-bin -- --version
 ```
 
 The flake installs the official prebuilt static binary for `x86_64-linux`,
-pinned to the verified v3.5.4 release tarball and checked against its published
+pinned to the latest verified release tarball and checked against its published
 SHA256. It also installs the man page and the example `config.sharky` and
 `theme.sharky` under `share/sharky`. There is no source build or wrapper script.
 
@@ -109,14 +109,15 @@ sharky doctor   # read-only local checks, exit 1 if any check fails
 
 Both subcommands run before the shell starts: they never load configuration,
 apply `pearl`, evaluate profiles or write files, and they never print environment
-values or configuration values. `status` always exits 0 and prints one plain-text
-fact per line; the paths honour `SHARKY_CONFIG`, `XDG_CONFIG_HOME`, `HOME`,
-`SHARKY_HISTORY` and `XDG_DATA_HOME`. `doctor` prints an `OK` or `FAIL` line for
-stdin/stdout descriptor validity, config and theme parsing, history permissions
-and writability, and the presence of `sh`, `ls` and `cat` on `PATH`. A missing
-TTY is reported but does not fail the check; history is inspected through
-metadata only, without opening it for append or taking a lock. There are no
-compile-time feature flags in this release, so `status` reports `features: none`.
+values or configuration values. `status` exits 0 when its arguments are valid
+and prints one plain-text fact per line; the paths honour `SHARKY_CONFIG`,
+`XDG_CONFIG_HOME`, `HOME`, `SHARKY_HISTORY` and `XDG_DATA_HOME`. `doctor` prints
+an `OK` or `FAIL` line for stdin/stdout descriptor validity, config and theme
+parsing, history permissions and writability, and the presence of `sh`, `ls` and
+`cat` on `PATH`. A missing TTY is reported but does not fail the check; history is
+inspected through metadata only, without opening it for append or taking a lock.
+There are no compile-time feature flags in this release, so `status` reports
+`features: none`.
 
 ## Help
 
@@ -128,11 +129,12 @@ sharky help tide history    # one configuration topic
 
 `sharky help [TOPIC...]` and the shell `help` builtin share one registry. With
 no topic, both print exactly the text of `--help`. With a topic, they join every
-word after `help` with a single space and print one entry. Topics are builtin
-names, command-line flags and subcommands, plus the configuration-language
-topics listed under `config explain`. An unknown topic exits 1 with a message
-on stderr. The subcommand runs before the shell starts: it never loads or
-creates configuration and has no side effects.
+word after `help` with a single space and print one entry. Topics cover every
+builtin, the `state`, `config explain`, `status` and `doctor` subcommands and the
+`-c`, `--check`, `--json` and `-i` flags, plus the configuration-language topics
+listed under `config explain`. An unknown topic exits 1 with a message on stderr.
+The subcommand runs before the shell starts: it never loads or creates
+configuration and has no side effects.
 
 ## Login shell
 
@@ -165,7 +167,7 @@ The prompt, `-c` and script files share one grammar:
 | --- | --- |
 | quotes, escapes, comments | `printf '%s\n' "a b" # comment` |
 | variables | `name=value`, `"$name"`, `${name}` |
-| parameter operators | `${NAME:-default}`, `${#NAME}`, `${NAME#pre}`, `${NAME/pat/repl}`, `${NAME//pat/repl}`, `${NAME:1:2}`, `${NAME^^}`, `${!NAME}` |
+| parameter operators | `${NAME:-default}`, `${NAME-default}`, `${NAME:=default}`, `${NAME=default}`, `${NAME:+word}`, `${NAME+word}`, `${NAME:?msg}`, `${NAME?msg}`, `${#NAME}`, `${NAME#pre}`, `${NAME/pat/repl}`, `${NAME//pat/repl}`, `${NAME:1:2}`, `${NAME^^}`, `${!NAME}` |
 | ANSI-C quoting | `$'a\tb'`, `$'\x41\u00e9'` |
 | brace expansion | `file{1..3}.txt`, `a{b,c}d` |
 | indexed arrays | `a=(one two)`, `"${a[1]}"`, `"${a[@]}"`, `"${#a[@]}"`, `"${a[@]:1:2}"` |
@@ -185,7 +187,7 @@ The prompt, `-c` and script files share one grammar:
 | case | `case $x in f*) ...;; *) ...;; esac`, `;;&`, `;&` |
 | functions | `greet() { printf 'hi %s\n' "$1"; }` |
 | groups and subshells | `{ a; b; }`, `( a; b )` |
-| builtins | `type`, `command`, `help`, `alias`, `unalias`, `abbr`, `unabbr`, `history`, `pwd`, `read`, `shift`, `exec`, `time` |
+| builtins | `type`, `command`, `help`, `alias`, `unalias`, `abbr`, `unabbr`, `history`, `pwd`, `read`, `mapfile`, `readarray`, `shift`, `local`, `exec`, `time` |
 | history search | Ctrl-R, type to filter, Enter runs the match, Ctrl-G cancels |
 | paste and multiline | bracketed paste inserts text verbatim; Enter submits the whole buffer; Up/Down, Home/End work per line |
 | autosuggest | history suffix ghost text; Right/End accepts, `tide autosuggest off` disables |
