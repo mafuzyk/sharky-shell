@@ -14,6 +14,10 @@ sharky \- Unix-first interactive shell
 .B sharky
 .B state
 \fB\-\-json\fR [\fB\-\-env\fR]
+.br
+.B sharky
+.B explain
+[\fITOPIC\fR [\fIWORD\fR...]]
 .SH DESCRIPTION
 .B sharky
 is an interactive POSIX-like shell written in Rust. Commands run as real Unix
@@ -57,6 +61,14 @@ Include the environment in \fBstate \-\-json\fR.
 .TP
 .B state
 Print schema version, cwd, last status and pid as JSON (requires \fB\-\-json\fR).
+.TP
+.B explain
+Print the configuration guide as plain text. With no \fITOPIC\fR, print an index
+of topic ids; otherwise join the words after \fBexplain\fR with spaces and print
+that topic. Each parser directive has its own topic, alongside \fBtide history\fR,
+\fBfiles\fR, \fBtheme\fR and \fBoverwrite\fR. Unknown or malformed
+requests exit 2. Runs before the shell starts, so no configuration, profiles or
+history are read.
 .TP
 .B \-\-no\-config
 Do not read the configuration files.
@@ -146,6 +158,10 @@ Set the prompt template (\fBprompt\fR) and styles. Styles reference colours with
 Unknown instructions, wrong arity, invalid colours and undefined colour
 references are reported as \fBfile:line\fR errors; the shell keeps running with
 its defaults.
+.PP
+.B sharky explain
+prints this guidance as plain text: \fBsharky explain\fR lists the topic ids and
+\fBsharky explain tide history\fR prints one topic.
 .SH KEYS
 .TP
 .B Tab

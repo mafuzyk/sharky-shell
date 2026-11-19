@@ -84,6 +84,8 @@ sharky -c 'printf "a b\n" | wc -w'
 sharky                      # interactive, needs a TTY
 sharky script.sh argument   # runs a script through sharky's own parser
 echo 'printf hi' | sharky   # reads stdin when there is no terminal
+sharky explain              # plain-text index of configuration topics
+sharky explain tide history # plain-text guide for one topic
 ```
 
 ## Agent interface
@@ -311,6 +313,17 @@ highlighting or colour is off.
 Invalid instructions, wrong arity, bad colours, unknown key actions and
 undefined `@colour` references are reported as `file:line: message`. The shell
 continues with defaults, so a typo never locks you out of your own shell.
+
+### `explain`
+
+`sharky explain` prints the configuration guide as plain text. With no topic it
+prints an index of topic ids; `sharky explain tide history` prints the text for
+one topic, joining every word after `explain` with a single space. Each parser
+directive has its own topic — `tide`, `pearl`, `current`, `reef`, `shoal`,
+`anchor`, `coral`, `wave` and `wake` — alongside `tide history`, `files`, `theme`
+and `overwrite`. An unknown topic or an option mixed into the request exits 2
+with a message on stderr. `explain` runs before the shell starts: it reads no
+configuration, profiles or history and has no side effects.
 
 ## Files
 
