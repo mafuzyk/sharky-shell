@@ -3040,15 +3040,26 @@ impl Shell {
     }
 
     fn expand_parts(&mut self, parts: &[Part], out: &mut String) {
+        self.expand_parts_in(parts, out, false);
+    }
+
+    fn expand_parts_in(&mut self, parts: &[Part], out: &mut String, quoted: bool) {
         for part in parts {
             match part {
                 Part::Literal(text) | Part::Single(text) | Part::Escaped(text) => out.push_str(text),
-                Part::Double(inner) => self.expand_parts(inner, out),
+                Part::Double(inner) => self.expand_parts_in(inner, out, true),
                 Part::Variable(name) => {
                     let value = self.expansion_var(name);
                     out.push_str(&value);
                 }
-                Part::Parameter(parameter) => out.push_str(&self.parameter_value(parameter)),
+                Part::Parameter(parameter) => {
+                    let value = if quoted {
+                        self.parameter_value_quoted(parameter)
+                    } else {
+                        self.parameter_value(parameter)
+                    };
+                    out.push_str(&value);
+                }
                 Part::ProcessSub(source, input) => {
                     out.push_str(&self.process_substitution(source, *input))
                 }
@@ -3105,6 +3116,44 @@ impl Shell {
         self.expansion_error = true;
     }
 
+    /// The keys selected by `${!a[@]}` or `${!a[*]}`. Outside double quotes the
+    /// at form joins with a space; inside them it keeps the first IFS character.
+    /// With a null IFS the at form falls back to a space and the star form joins
+    /// with nothing.
+    fn join_parameter_keys(&mut self, parameter: &Parameter, quoted: bool) -> String {
+        let at_form = parameter.index.as_deref() == Some("@");
+        let separator = match self.ifs_first_char() {
+            Some(separator) if quoted || !at_form => separator.to_string(),
+            Some(_) => " ".to_string(),
+            None if at_form => " ".to_string(),
+            None => String::new(),
+        };
+        if let Some(array) = self.arrays.get(&parameter.name) {
+            return array
+                .iter()
+                .enumerate()
+                .filter(|(_, value)| value.is_some())
+                .map(|(index, _)| index.to_string())
+                .collect::<Vec<_>>()
+                .join(&separator);
+        }
+        if let Some(assoc) = self.assoc.get(&parameter.name) {
+            return assoc.keys().cloned().collect::<Vec<_>>().join(&separator);
+        }
+        String::new()
+    }
+
+    /// A parameter expansion that appears inside double quotes in a context
+    /// without word splitting. Only the key list tells the two contexts apart.
+    fn parameter_value_quoted(&mut self, parameter: &Parameter) -> String {
+        if parameter.operator == Some(ParamOp::Keys)
+            && matches!(parameter.index.as_deref(), Some("@") | Some("*"))
+        {
+            return self.join_parameter_keys(parameter, true);
+        }
+        self.parameter_value(parameter)
+    }
+
     fn parameter_value(&mut self, parameter: &Parameter) -> String {
         let index = parameter.index.as_deref();
         let multiple = matches!(index, Some("@") | Some("*"));
@@ -3120,30 +3169,7 @@ impl Shell {
         }
 
         if parameter.operator == Some(ParamOp::Keys) && multiple {
-            // The at form falls back to a space when IFS is empty, while the
-            // star form joins with nothing.
-            let separator = match self.ifs_first_char() {
-                Some(separator) => separator.to_string(),
-                None if index == Some("@") => " ".to_string(),
-                None => String::new(),
-            };
-            if let Some(array) = self.arrays.get(&parameter.name) {
-                return array
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, value)| value.is_some())
-                    .map(|(index, _)| index.to_string())
-                    .collect::<Vec<_>>()
-                    .join(&separator);
-            }
-            if let Some(assoc) = self.assoc.get(&parameter.name) {
-                return assoc
-                    .keys()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(&separator);
-            }
-            return String::new();
+            return self.join_parameter_keys(parameter, false);
         }
 
         let expanded = match index {
@@ -3173,14 +3199,20 @@ impl Shell {
                     | ParamOp::ErrorUnset
             )
         );
-        let ifs_separator = self.ifs_join_separator();
+        // Without word splitting the at form joins its elements with a space,
+        // whatever IFS holds; the star form keeps the first IFS character.
+        let multi_separator = if lookup == Some("@") {
+            " ".to_string()
+        } else {
+            self.ifs_join_separator()
+        };
         let value = if let Some(assoc) = self.assoc.get(&parameter.name) {
             match lookup {
                 Some("@") | Some("*") => assoc
                     .values()
                     .cloned()
                     .collect::<Vec<_>>()
-                    .join(&ifs_separator),
+                    .join(&multi_separator),
                 Some(key) => assoc.get(key).cloned().unwrap_or_default(),
                 None => assoc.get("0").cloned().unwrap_or_default(),
             }
@@ -3191,7 +3223,7 @@ impl Shell {
                     .flatten()
                     .cloned()
                     .collect::<Vec<_>>()
-                    .join(&ifs_separator),
+                    .join(&multi_separator),
                 Some(_) => array
                     .get(numeric_index)
                     .cloned()

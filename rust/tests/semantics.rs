@@ -791,3 +791,79 @@ fn indirect_key_list_forms_stay_key_lists() {
     assert_eq!(stdout(&out), "[0][1]<0 1>");
     assert_eq!(status(&out), 0);
 }
+
+// In a context without word splitting — an assignment, a here-document — the at
+// form of an array expands with its elements joined by a space, whatever IFS
+// holds; the star form keeps the first character of IFS.
+
+#[test]
+fn assigned_array_elements_join_with_a_space() {
+    let out = sharky(r#"IFS=,; a=(k1 k2); v=${a[@]}; printf '[%s]' "$v""#);
+    assert_eq!(stdout(&out), "[k1 k2]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn quoted_assigned_array_elements_join_with_a_space() {
+    let out = sharky(r#"IFS=,; a=(k1 k2); v="x${a[@]}y"; printf '[%s]' "$v""#);
+    assert_eq!(stdout(&out), "[xk1 k2y]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn assigned_array_elements_join_with_a_space_with_an_empty_ifs() {
+    let out = sharky(r#"IFS=; a=(k1 k2); v=${a[@]}; printf '[%s]' "$v""#);
+    assert_eq!(stdout(&out), "[k1 k2]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn assigned_array_elements_keep_their_spaces() {
+    let out = sharky(r#"IFS=,; a=('k 1' k2); v=${a[@]}; printf '[%s]' "$v""#);
+    assert_eq!(stdout(&out), "[k 1 k2]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn consecutive_assigned_array_expansions_stay_space_joined() {
+    let out = sharky(r#"IFS=,; a=(k1 k2); v=${a[@]}${a[@]}; printf '[%s]' "$v""#);
+    assert_eq!(stdout(&out), "[k1 k2k1 k2]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn assigned_array_keys_still_join_with_a_space() {
+    let out = sharky(r#"IFS=,; a=(k1 k2); v=${!a[@]}; printf '[%s]' "$v""#);
+    assert_eq!(stdout(&out), "[0 1]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn quoted_assigned_array_keys_keep_the_ifs_join() {
+    let out = sharky(r#"IFS=,; a=(k1 k2); v="${!a[@]}"; printf '[%s]' "$v""#);
+    assert_eq!(stdout(&out), "[0,1]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn assigned_array_star_form_keeps_the_ifs_join() {
+    let out = sharky(r#"IFS=,; a=(k1 k2); v=${a[*]}; printf '[%s]' "$v""#);
+    assert_eq!(stdout(&out), "[k1,k2]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn assigned_associative_values_join_with_a_space() {
+    let out = sharky(
+        r#"IFS=,; declare -A m=([k1]=v1 [k2]=v2); v=${m[@]}; printf '[%s]' "$v""#,
+    );
+    assert_eq!(stdout(&out), "[v1 v2]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn here_document_joins_array_elements_with_a_space() {
+    let out = sharky("IFS=,; a=(k1 k2); cat <<EOF\n[${a[@]}]\nEOF");
+    assert_eq!(stdout(&out), "[k1 k2]\n");
+    assert_eq!(status(&out), 0);
+}
