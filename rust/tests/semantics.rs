@@ -2423,3 +2423,38 @@ fn type_prints_a_function_definition_after_the_description() {
     );
     assert_eq!(status(&out), 0);
 }
+
+#[test]
+fn type_with_no_arguments_is_silent_and_succeeds() {
+    let out = sharky("type; echo \"st=$?\"");
+    assert_eq!(stdout(&out), "st=0\n");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn type_treats_a_leading_double_dash_as_end_of_options() {
+    let out = sharky("type --; echo \"st=$?\"");
+    assert_eq!(stdout(&out), "st=0\n");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn type_leading_double_dash_still_reports_following_names() {
+    let out = sharky("type -- cd; echo \"st=$?\"");
+    assert_eq!(stdout(&out), "cd is a shell builtin\nst=0\n");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn type_empty_string_argument_is_reported_as_not_found() {
+    let out = sharky("type ''; echo \"st=$?\"");
+    assert_eq!(stdout(&out), "st=1\n");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("type: : not found"),
+        "{:?}",
+        out.stderr
+    );
+    assert_eq!(status(&out), 0);
+}

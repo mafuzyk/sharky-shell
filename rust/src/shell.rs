@@ -2665,9 +2665,14 @@ impl Shell {
     // a flag was given: plain `type` never prints the short form. A function is
     // followed by its definition, in the layout `declare -f` uses.
     fn type_builtin(&mut self, args: &[String]) -> i32 {
+        // A leading `--` ends option parsing; it is not itself a name. With no
+        // names left afterwards bash reports nothing and succeeds silently.
+        let args = match args.split_first() {
+            Some((first, rest)) if first == "--" => rest,
+            _ => args,
+        };
         if args.is_empty() {
-            eprintln!("sharky: type: usage: type name ...");
-            return 1;
+            return 0;
         }
 
         let mut status = 0;
