@@ -279,3 +279,34 @@ fn errexit_stays_suppressed_in_the_last_command_of_an_if_condition() {
     assert_eq!(stdout(&out), "elseafter");
     assert_eq!(status(&out), 0);
 }
+
+// "$*" and "${a[*]}" join with the first character of IFS, with nothing when
+// IFS is empty.
+
+#[test]
+fn quoted_array_elements_join_with_ifs_first_char() {
+    let out = sharky(r#"IFS=:; a=(x y); printf '%s' "${a[*]}""#);
+    assert_eq!(stdout(&out), "x:y");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn unquoted_array_elements_join_with_ifs_first_char() {
+    let out = sharky(r#"IFS=:; a=('x y' z); set -- ${a[*]}; printf '<%s>' "$@""#);
+    assert_eq!(stdout(&out), "<x y><z>");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn empty_ifs_joins_positional_parameters_with_nothing() {
+    let out = sharky(r#"IFS=; set -- a b; printf '%s' "$*""#);
+    assert_eq!(stdout(&out), "ab");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn empty_ifs_joins_array_elements_with_nothing() {
+    let out = sharky(r#"IFS=; a=(x y); printf '%s' "${a[*]}""#);
+    assert_eq!(stdout(&out), "xy");
+    assert_eq!(status(&out), 0);
+}
