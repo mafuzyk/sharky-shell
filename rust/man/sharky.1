@@ -22,6 +22,10 @@ owned by the shell itself.
 .PP
 With no arguments and a terminal on standard input, sharky starts interactively.
 With no arguments and no terminal it reads commands from standard input.
+.PP
+sharky is in alpha, an ongoing stage of maturity delivered through the normal
+release channel. Use it as an interactive shell; using it as a login shell is
+not recommended during alpha.
 .SH OPTIONS
 .TP
 .B \-c \fICOMMAND\fR
@@ -31,7 +35,8 @@ Run \fICOMMAND\fR and exit with its status.
 Force interactive mode; fails when standard input or output is not a terminal.
 .TP
 .B \-l, \-\-login
-Read login profiles before the command or system input.
+Read login profiles before the command or system input. Not recommended as a
+login shell during alpha.
 .TP
 .B \-P, \-\-private
 Use no history file: prior commands are not read and new ones are not written.
@@ -174,12 +179,14 @@ or
 .B time -p.
 .PP
 .SH HISTORY
-Commands are appended to the shared file as they run, so an abrupt exit loses
-nothing. A shell that started earlier keeps its own view until it runs
+After each command is evaluated, sharky appends it to one shared history file
+under a lock. A failed write is reported and the entry stays only in memory; a
+torn tail from a crash is dropped and cleared on the next append. A shell that
+started earlier keeps its own view until it runs
 .B history merge
 from the prompt; this never rewrites entries from another session. Private mode
-keeps everything in memory and leaves the file untouched. A history file that
-cannot be read warns at startup and makes \fBhistory \-c\fR fail instead of
+(\fB\-P\fR) keeps history in memory and leaves the file untouched. A history file
+that cannot be read warns at startup and makes \fBhistory \-c\fR fail instead of
 claiming it cleared the file.
 .SH FILES
 .TP
@@ -190,7 +197,8 @@ Shell preferences, environment, PATH entries, aliases and key bindings.
 Colour palette and prompt styles.
 .TP
 .I ~/.local/share/sharky/history
-Command history, limited by \fBtide history\fR.
+Command history, limited by \fBtide history\fR. \fBSHARKY_HISTORY\fR overrides
+the path; otherwise \fBXDG_DATA_HOME\fR replaces the \fB~/.local/share\fR prefix.
 .TP
 .I /etc/sharky/profile.sharky, ~/.config/sharky/profile.sharky
 Login profiles run by \fB\-l\fR.

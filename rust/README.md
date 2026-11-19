@@ -4,13 +4,14 @@ An interactive Unix shell written in Rust. This directory is the v3
 implementation; the Ruby v1 tree at the repository root is frozen at tag
 `v1-ruby` and only serves as the behavioural oracle for the differential tests.
 
-Status: 3.5 adds vi mode, login profiles, `exec` and `time`, history expansion,
-process substitution, associative arrays and slices, extended parameter
-expansion, `$'...'`, extglob, C-style `for`, `;;&`/`;&`, the JSON agent
-interface, autosuggest, syntax highlighting, completion with an inline menu and
-a fuzzy file pager. The shell keeps job control, `[[ ]]`, `((...))`, heredocs,
-here-strings, brace expansion, `${var/pat/repl}`, `set` options, traps, `read`
-and `shift`.
+Status: alpha, an ongoing stage of maturity shipped through the normal release
+channel; using sharky as a login shell is not recommended during alpha. 3.5 adds
+vi mode, login profiles, `exec` and `time`, history expansion, process
+substitution, associative arrays and slices, extended parameter expansion,
+`$'...'`, extglob, C-style `for`, `;;&`/`;&`, the JSON agent interface,
+autosuggest, syntax highlighting, completion with an inline menu and a fuzzy file
+pager. The shell keeps job control, `[[ ]]`, `((...))`, heredocs, here-strings,
+brace expansion, `${var/pat/repl}`, `set` options, traps, `read` and `shift`.
 
 ## Build
 
@@ -72,9 +73,11 @@ and the shell continues with defaults.
 
 ## History
 
-Stored in `$XDG_DATA_HOME/sharky/history` (default
-`~/.local/share/sharky/history`), limited by `tide history`. Ctrl-R opens an
-incremental reverse search; Enter runs the selected entry and Ctrl-G cancels.
+Stored in `$SHARKY_HISTORY`, or `${XDG_DATA_HOME:-~/.local/share}/sharky/history`,
+and limited by `tide history`. Commands are appended after evaluation under a
+lock; a failed write keeps the entry only in memory. `-P`/`--private` keeps
+history in memory and leaves the file untouched. Ctrl-R opens an incremental
+reverse search; Enter runs the selected entry and Ctrl-G cancels.
 
 ## Tests
 

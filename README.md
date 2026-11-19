@@ -11,6 +11,13 @@ wraps Bash or `/bin/sh`.
 - an interactive editor with history and completion, plus real job control;
 - a small declarative configuration language for settings and themes.
 
+## Status
+
+sharky is in alpha. Alpha names an ongoing stage of maturity, not a separate
+release track: the packages below are the normal release channel and follow the
+project's regular cadence. Expect behaviour to change between releases; the
+language subset and configuration format are not yet frozen.
+
 The Ruby v1 implementation is frozen at tag `v1-ruby`. It is not published in
 this tree: the source of truth is the Rust code under `rust/`. Keep a local
 checkout at `.ruby-oracle/` (gitignored) only when you need the differential
@@ -25,9 +32,9 @@ paru -S sharky-shell-bin       # prebuilt static binary (x86_64)
 paru -S sharky-shell-git       # builds the latest main locally
 ```
 
-`sharky-shell-bin` is the stable package: it installs the same binary published
-on the GitHub release. `sharky-shell-git` tracks `main` and needs a Rust
-toolchain.
+`sharky-shell-bin` is the prebuilt release package: it installs the same binary
+published on the GitHub release. `sharky-shell-git` tracks `main` and needs a
+Rust toolchain.
 
 ### Nix (flake)
 
@@ -98,6 +105,21 @@ sharky -i                      # force the REPL; fails on a non-TTY
 code, then imports only literal `NAME=value` / `export NAME=value` lines from
 `/etc/profile`, `~/.profile`, `~/.bash_profile` and `~/.zshprofile`. Command
 substitution and arbitrary shell code in those files never run.
+
+Using sharky as a login shell is not recommended while it is in alpha: profile
+import is deliberately limited and the login-shell stability gate has not
+passed. Prefer starting sharky from an existing login shell.
+
+## History
+
+After each command is evaluated, sharky appends it to one shared history file
+(`$SHARKY_HISTORY`, or `${XDG_DATA_HOME:-~/.local/share}/sharky/history`). The
+write happens under a lock; a failed write is reported and the entry stays only
+in memory, and a torn tail from a crash is dropped and cleared on the next
+append. Each session keeps its own view until it runs `history merge`, which
+never rewrites entries from another session. Use `-P`/`--private` to keep history
+in memory and leave the file untouched. A history file that cannot be read warns
+at startup and makes `history -c` fail rather than claim it cleared the file.
 
 ## Shell language
 
@@ -276,8 +298,8 @@ continues with defaults, so a typo never locks you out of your own shell.
 | `~/.config/sharky/theme.sharky` | palette and prompt styles |
 | `~/.local/share/sharky/history` | command history |
 
-Environment: `SHARKY_CONFIG`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `NO_COLOR`,
-`PATH`.
+Environment: `SHARKY_CONFIG`, `SHARKY_HISTORY`, `XDG_CONFIG_HOME`,
+`XDG_DATA_HOME`, `NO_COLOR`, `PATH`.
 
 ## Development
 
