@@ -24,6 +24,15 @@ Bash-only cases: `b-set-euo-pipefail`, `b-array`, `b-double-bracket`,
 `p-unquoted-ifs` pins the *correct* unquoted-IFS behavior: with `IFS=,` an
 unquoted `$v` splits into three fields (`a`, `b`, `c`), `count=3`.
 
+`p-quoted-join` pins quoted `"$*"` joining: with `IFS=,` the fields join as
+`aa,bb,cc`, and with `IFS=` they concatenate with no separator (`aabbcc`); a
+literal-space join fails both. It stays in the portable class because dash
+follows the same first-IFS-character rule.
+
+`b-set-euo-pipefail` first observes the pipefail status (`false | true` reports
+`rc=1`), then trips nounset on an unset variable, so a candidate that ignores
+either extension diverges.
+
 ## What is compared
 
 Only three observable channels are part of the contract:
