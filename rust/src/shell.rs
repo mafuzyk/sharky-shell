@@ -105,6 +105,19 @@ enum Action {
     Here { fd: i32, file: std::fs::File },
 }
 
+impl Action {
+    // The descriptor this action moves and, for a dup, the one it copies.
+    fn fds(&self) -> (RawFd, Option<RawFd>) {
+        match self {
+            Action::Write(fd, _)
+            | Action::Append(fd, _)
+            | Action::Read(fd, _)
+            | Action::Here { fd, .. } => (*fd, None),
+            Action::Dup { from, to } => (*to, Some(*from)),
+        }
+    }
+}
+
 impl Shell {
     pub fn new() -> Self {
         let env = std::env::vars_os()
@@ -772,24 +785,13 @@ impl Shell {
             return self.exec_builtin(&prepared.argv[1..], &prepared.env);
         }
 
-        if prepared.actions.is_empty() {
-            if prepared.argv.is_empty() {
+        if prepared.argv.is_empty() {
+            if prepared.actions.is_empty() {
                 return Flow::Status(0);
             }
-
-            if let Some(body) = self.funcs.get(&prepared.argv[0]).cloned() {
-                let saved = std::mem::replace(&mut self.positional, prepared.argv[1..].to_vec());
-                let flow = self.run_list(&body);
-                self.positional = saved;
-                return match flow {
-                    Flow::Return(code) => Flow::Status(code),
-                    other => other,
-                };
-            }
-
-            if let Some(flow) = self.builtin(&prepared.argv) {
-                return flow;
-            }
+        } else if self.funcs.contains_key(&prepared.argv[0]) || is_builtin_name(&prepared.argv[0]) {
+            let argv = &prepared.argv;
+            return self.with_actions(&prepared.actions, |shell| shell.run_in_shell(argv));
         }
 
         let command = prepared.argv.join(" ");
@@ -805,6 +807,52 @@ impl Shell {
             Err(message) => {
                 eprintln!("sharky: {message}");
                 Flow::Status(1)
+            }
+        }
+    }
+
+    // Runs a command that must change the shell itself. The redirections apply
+    // to this command only, so the descriptors are saved, applied, and put back
+    // even when the command or a redirection fails.
+    fn with_actions<F>(&mut self, actions: &[Action], run: F) -> Flow
+    where
+        F: FnOnce(&mut Self) -> Flow,
+    {
+        let saved = match save_fds(actions) {
+            Ok(saved) => saved,
+            Err(message) => {
+                eprintln!("sharky: {message}");
+                return Flow::Status(1);
+            }
+        };
+
+        if let Err(message) = apply_actions(actions) {
+            restore_fds(saved);
+            eprintln!("sharky: {message}");
+            return Flow::Status(1);
+        }
+
+        let flow = run(self);
+        restore_fds(saved);
+        flow
+    }
+
+    fn run_in_shell(&mut self, argv: &[String]) -> Flow {
+        if let Some(body) = self.funcs.get(&argv[0]).cloned() {
+            let saved = std::mem::replace(&mut self.positional, argv[1..].to_vec());
+            let flow = self.run_list(&body);
+            self.positional = saved;
+            return match flow {
+                Flow::Return(code) => Flow::Status(code),
+                other => other,
+            };
+        }
+
+        match self.builtin(argv) {
+            Some(flow) => flow,
+            None => {
+                eprintln!("sharky: command not found: {}", argv[0]);
+                Flow::Status(127)
             }
         }
     }
@@ -988,6 +1036,12 @@ impl Shell {
                 }
             };
             return self.exec_builtin(&prepared.argv[1..], &prepared.env);
+        }
+
+        // A group shares the shell's state, so its redirections are temporary
+        // rather than a fork boundary.
+        if matches!(command, Command::Group(_)) {
+            return self.with_actions(&actions, |shell| shell.run_command(command));
         }
 
         // SAFETY: the child runs shell code and exits without unwinding.
@@ -3746,6 +3800,7 @@ fn is_builtin_name(name: &str) -> bool {
             | "trap"
             | "read"
             | "history"
+            | "wake"
             | "wait"
             | "kill"
             | "z"
@@ -3885,6 +3940,79 @@ fn move_fd(from: RawFd, to: RawFd) -> Result<(), String> {
         return Err(format!("redirect: {}", std::io::Error::last_os_error()));
     }
     Ok(())
+}
+
+struct SavedFd {
+    target: RawFd,
+    copy: Option<RawFd>,
+    flags: i32,
+}
+
+// Saves every descriptor the actions touch above every descriptor they
+// reference, so a nested save cannot clobber the enclosing one.
+fn save_fds(actions: &[Action]) -> Result<Vec<SavedFd>, String> {
+    let mut targets = Vec::new();
+    let mut floor = 10;
+
+    for action in actions {
+        let (target, from) = action.fds();
+        floor = floor.max(target + 1);
+        if let Some(from) = from {
+            floor = floor.max(from + 1);
+        }
+        if !targets.contains(&target) {
+            targets.push(target);
+        }
+    }
+
+    let mut saved = Vec::with_capacity(targets.len());
+    for target in targets {
+        // SAFETY: reads this process's own descriptor table.
+        let flags = unsafe { nix::libc::fcntl(target, nix::libc::F_GETFD) };
+        if flags < 0 {
+            // F_GETFD only fails here for a descriptor that is already closed.
+            saved.push(SavedFd {
+                target,
+                copy: None,
+                flags: 0,
+            });
+            continue;
+        }
+
+        // SAFETY: the copy is a new descriptor owned by this process.
+        let copy = unsafe { nix::libc::fcntl(target, nix::libc::F_DUPFD_CLOEXEC, floor) };
+        if copy < 0 {
+            let message = format!("redirect: {}", std::io::Error::last_os_error());
+            restore_fds(saved);
+            return Err(message);
+        }
+        saved.push(SavedFd {
+            target,
+            copy: Some(copy),
+            flags,
+        });
+    }
+
+    Ok(saved)
+}
+
+fn restore_fds(saved: Vec<SavedFd>) {
+    for entry in saved {
+        match entry.copy {
+            Some(copy) => {
+                // SAFETY: both descriptors are owned by this process.
+                unsafe {
+                    nix::libc::dup2(copy, entry.target);
+                    nix::libc::fcntl(entry.target, nix::libc::F_SETFD, entry.flags);
+                    nix::libc::close(copy);
+                }
+            }
+            // SAFETY: the descriptor was closed before the command ran.
+            None => {
+                unsafe { nix::libc::close(entry.target) };
+            }
+        }
+    }
 }
 
 // shortcut: allocates in the forked child; safe while sharky is single-threaded.
