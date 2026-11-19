@@ -594,6 +594,13 @@ fn history_session() -> HistorySession {
 }
 
 fn history_session_with(config_text: Option<&str>) -> HistorySession {
+    history_session_with_env(config_text, &[])
+}
+
+fn history_session_with_env(
+    config_text: Option<&str>,
+    extra_env: &[(&str, &str)],
+) -> HistorySession {
     let data = std::env::temp_dir().join(format!(
         "sharky-histexpand-{}-{:?}",
         std::process::id(),
@@ -617,16 +624,18 @@ fn history_session_with(config_text: Option<&str>) -> HistorySession {
     let stdout = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
     let stderr = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
 
-    let child = Command::new(env!("CARGO_BIN_EXE_sharky"))
-        .stdin(stdin)
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_sharky"));
+    cmd.stdin(stdin)
         .stdout(stdout)
         .stderr(stderr)
         .env("SHARKY_CONFIG", config_env)
         .env("TERM", "xterm-256color")
         .env("HOME", &home)
-        .env("XDG_DATA_HOME", &data)
-        .spawn()
-        .expect("spawn sharky");
+        .env("XDG_DATA_HOME", &data);
+    for (key, value) in extra_env {
+        cmd.env(key, value);
+    }
+    let child = cmd.spawn().expect("spawn sharky");
 
     let writer = unsafe { std::fs::File::from_raw_fd(pty.master.try_clone().unwrap().into_raw_fd()) };
     read_until(
@@ -1115,15 +1124,21 @@ tide greeting off
 
 const OVERWRITE_DANGER: &str = "\u{1b}[38;2;255;143;128m";
 
-// Types a redirect line without pressing Enter, captures the highlighted
+// Inserts a redirect line without pressing Enter, captures the highlighted
 // redraw, then cancels. The target is a literal absolute path to a regular
-// file created only when `exists` is true.
-fn overwrite_render<F>(exists: bool, build: F) -> (String, String)
+// file created only when `exists` is true. `deliver` picks typing vs. paste;
+// `extra_env` exercises colour gates such as NO_COLOR.
+fn overwrite_case<F>(
+    exists: bool,
+    build: F,
+    extra_env: &[(&str, &str)],
+    deliver: fn(&mut std::fs::File, &str),
+) -> (String, String)
 where
     F: Fn(&str) -> String,
 {
     static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let mut session = history_session_with(Some(OVERWRITE_CONFIG));
+    let mut session = history_session_with_env(Some(OVERWRITE_CONFIG), extra_env);
     let target = std::env::temp_dir()
         .join(format!(
             "sharky-overwrite-{}-{}",
@@ -1138,13 +1153,38 @@ where
     }
     let command = build(&target);
     let fd = session.master.as_raw_fd();
-    let _ = session.writer.write_all(command.as_bytes());
+    deliver(&mut session.writer, &command);
     let seen = read_until(fd, "\u{0}", Duration::from_millis(500));
     let _ = session.writer.write_all(b"\x03");
     let _ = read_until(fd, HISTORY_PROMPT_END, Duration::from_secs(5));
     session.finish();
     std::fs::remove_file(&target).ok();
     (seen, target)
+}
+
+fn type_line(writer: &mut std::fs::File, text: &str) {
+    let _ = writer.write_all(text.as_bytes());
+}
+
+fn overwrite_render<F>(exists: bool, build: F) -> (String, String)
+where
+    F: Fn(&str) -> String,
+{
+    overwrite_case(exists, build, &[], type_line)
+}
+
+fn overwrite_paste<F>(exists: bool, build: F) -> (String, String)
+where
+    F: Fn(&str) -> String,
+{
+    overwrite_case(exists, build, &[], paste)
+}
+
+fn overwrite_no_color<F>(exists: bool, build: F) -> (String, String)
+where
+    F: Fn(&str) -> String,
+{
+    overwrite_case(exists, build, &[("NO_COLOR", "1")], type_line)
 }
 
 #[test]
@@ -1184,6 +1224,71 @@ fn overwrite_warning_ignores_non_overwrite_redirects() {
     assert!(
         !missing.contains(OVERWRITE_DANGER),
         "nonexistent target was painted: {missing:?}"
+    );
+}
+
+#[test]
+fn overwrite_warning_ignores_escaped_operator() {
+    let (seen, _) = overwrite_render(true, |t| format!("echo hi \\> {t}"));
+    assert!(
+        !seen.contains(OVERWRITE_DANGER),
+        "escaped '>' painted a target: {seen:?}"
+    );
+}
+
+#[test]
+fn overwrite_warning_ignores_read_write_redirect() {
+    let (seen, _) = overwrite_render(true, |t| format!("echo hi <> {t}"));
+    assert!(
+        !seen.contains(OVERWRITE_DANGER),
+        "'<>' painted a target: {seen:?}"
+    );
+}
+
+#[test]
+fn overwrite_warning_ignores_test_comparison() {
+    let (seen, _) = overwrite_render(true, |t| format!("[[ a > {t} ]]"));
+    assert!(
+        !seen.contains(OVERWRITE_DANGER),
+        "'[[ ... > ... ]]' painted a target: {seen:?}"
+    );
+}
+
+#[test]
+fn overwrite_warning_ignores_arithmetic_comparison() {
+    let (seen, _) = overwrite_render(true, |t| format!("(( 0 > {t} ))"));
+    assert!(
+        !seen.contains(OVERWRITE_DANGER),
+        "'(( ... > ... ))' painted a target: {seen:?}"
+    );
+}
+
+#[test]
+fn overwrite_warning_ignores_heredoc_body() {
+    let (seen, _) = overwrite_paste(true, |t| format!("cat <<EOF\n> {t}\nEOF"));
+    assert!(
+        !seen.contains(OVERWRITE_DANGER),
+        "heredoc body painted a target: {seen:?}"
+    );
+}
+
+#[test]
+fn overwrite_warning_respects_no_color() {
+    let (seen, _) = overwrite_no_color(true, |t| format!("echo hi > {t}"));
+    assert!(
+        !seen.contains(OVERWRITE_DANGER),
+        "NO_COLOR still painted a target: {seen:?}"
+    );
+}
+
+// v1 covers unquoted static literals only; simple quoted literals are a
+// separate assessment and must not be highlighted yet.
+#[test]
+fn overwrite_warning_leaves_quoted_literals_for_a_later_slice() {
+    let (seen, _) = overwrite_render(true, |t| format!("echo hi > \"{t}\""));
+    assert!(
+        !seen.contains(OVERWRITE_DANGER),
+        "quoted target painted beyond v1 scope: {seen:?}"
     );
 }
 
