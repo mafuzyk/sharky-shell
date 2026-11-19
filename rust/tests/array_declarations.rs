@@ -57,6 +57,14 @@ fn local_without_flag_accepts_indexed_array_literal() {
 }
 
 #[test]
+fn local_array_literal_appends_to_the_same_frame() {
+    assert_output(
+        r#"f() { local a+=(1); local a+=(2); printf '%s%s' "${a[0]}" "${a[1]}"; }; f"#,
+        "12",
+    );
+}
+
+#[test]
 fn readonly_with_flag_accepts_indexed_array_literal() {
     assert_output(
         r#"readonly -a a=(p q); printf '%s' "${a[1]}""#,

@@ -105,6 +105,7 @@ struct Prepared {
     argv: Vec<String>,
     actions: Vec<Action>,
     env: Vec<(String, String)>,
+    declarations: Vec<Assignment>,
 }
 
 enum Action {
@@ -854,7 +855,9 @@ impl Shell {
             }
         } else if self.funcs.contains_key(&prepared.argv[0]) || is_builtin_name(&prepared.argv[0]) {
             let argv = &prepared.argv;
-            return self.with_actions(&prepared.actions, |shell| shell.run_in_shell(argv));
+            return self.with_actions(&prepared.actions, |shell| {
+                shell.run_in_shell(argv, &prepared.declarations)
+            });
         }
 
         let command = prepared.argv.join(" ");
@@ -900,7 +903,7 @@ impl Shell {
         flow
     }
 
-    fn run_in_shell(&mut self, argv: &[String]) -> Flow {
+    fn run_in_shell(&mut self, argv: &[String], declarations: &[Assignment]) -> Flow {
         if let Some(body) = self.funcs.get(&argv[0]).cloned() {
             let saved = std::mem::replace(&mut self.positional, argv[1..].to_vec());
             self.local_scopes.push(Vec::new());
@@ -913,7 +916,7 @@ impl Shell {
             };
         }
 
-        match self.builtin(argv) {
+        match self.builtin(argv, declarations) {
             Some(flow) => flow,
             None => {
                 eprintln!("sharky: command not found: {}", argv[0]);
@@ -989,7 +992,7 @@ impl Shell {
             };
         }
 
-        if let Some(flow) = self.builtin(&prepared.argv) {
+        if let Some(flow) = self.builtin(&prepared.argv, &prepared.declarations) {
             return flow_status(flow);
         }
 
@@ -1312,8 +1315,11 @@ impl Shell {
         let actions = self.redirect_actions(&simple.redirects)?;
 
         let mut env = self.env.clone();
+        let mut declarations = Vec::new();
+        let declaring = argv.first().is_some_and(|name| is_declaration_word(name));
         for assignment in &simple.assignments {
             match &assignment.value {
+                AssignmentValue::Array(_) if declaring => declarations.push(assignment.clone()),
                 AssignmentValue::Array(_) => self.assign(assignment),
                 AssignmentValue::Word(word) if assignment.index.is_some() => {
                     self.assign(assignment);
@@ -1337,6 +1343,7 @@ impl Shell {
             argv,
             actions,
             env,
+            declarations,
         })
     }
 
@@ -1477,7 +1484,7 @@ impl Shell {
                 if argv.is_empty() {
                     unsafe { _exit(0) }
                 }
-                if let Some(flow) = self.builtin(argv) {
+                if let Some(flow) = self.builtin(argv, &[]) {
                     unsafe { _exit(flow_status(flow)) }
                 }
                 match exec::resolve(&argv[0], self) {
@@ -1492,7 +1499,7 @@ impl Shell {
         }
     }
 
-    fn builtin(&mut self, words: &[String]) -> Option<Flow> {
+    fn builtin(&mut self, words: &[String], declarations: &[Assignment]) -> Option<Flow> {
         match words[0].as_str() {
             ":" | "true" => Some(Flow::Status(0)),
             "false" => Some(Flow::Status(1)),
@@ -1536,8 +1543,22 @@ impl Shell {
             }
             "wait" => Some(Flow::Status(self.wait_builtin(&words[1..]))),
             "kill" => Some(Flow::Status(self.kill_builtin(&words[1..]))),
-            "declare" => Some(Flow::Status(self.declare(&words[1..]))),
-            "local" => Some(Flow::Status(self.local(&words[1..]))),
+            "declare" => Some(Flow::Status(self.declaration(
+                "declare",
+                &words[1..],
+                declarations,
+            ))),
+            "local" => Some(Flow::Status(self.declaration("local", &words[1..], declarations))),
+            "readonly" => Some(Flow::Status(self.declaration(
+                "readonly",
+                &words[1..],
+                declarations,
+            ))),
+            "typeset" => Some(Flow::Status(self.declaration(
+                "typeset",
+                &words[1..],
+                declarations,
+            ))),
             "z" => Some(Flow::Status(self.z_builtin(&words[1..], false))),
             "zi" => Some(Flow::Status(self.z_builtin(&words[1..], true))),
             "reload" => Some(Flow::Status(self.reload())),
@@ -1628,18 +1649,7 @@ impl Shell {
     fn assign(&mut self, assignment: &Assignment) {
         match &assignment.value {
             AssignmentValue::Array(elements) => {
-                let mut values = Vec::new();
-                for element in elements {
-                    let expanded = self.expand_word(element);
-                    if expanded.is_empty()
-                        && element.parts.len() == 1
-                        && matches!(&element.parts[0], Part::Double(inner) if inner.is_empty())
-                    {
-                        values.push(String::new());
-                    } else {
-                        values.extend(expanded);
-                    }
-                }
+                let values = self.expand_array_elements(elements);
                 if self.assoc.contains_key(&assignment.name) {
                     let mut map = BTreeMap::new();
                     for value in values {
@@ -1681,49 +1691,30 @@ impl Shell {
         }
     }
 
-    fn declare(&mut self, args: &[String]) -> i32 {
-        let mut kind = None;
-        let mut names = Vec::new();
-        for arg in args {
-            match arg.as_str() {
-                "-A" => kind = Some(true),
-                "-a" => kind = Some(false),
-                other if other.starts_with('-') => {
-                    eprintln!("sharky: declare: unsupported option: {other}");
-                    return 2;
-                }
-                other => names.push(other.to_string()),
-            }
-        }
-
-        let Some(assoc) = kind else {
-            eprintln!("sharky: declare: usage: declare -A|-a name ...");
-            return 2;
-        };
-        if names.is_empty() {
-            eprintln!("sharky: declare: usage: declare -A|-a name ...");
-            return 2;
-        }
-
-        for name in names {
-            if assoc {
-                let values = self.arrays.remove(&name).unwrap_or_default();
-                let map = self.assoc.entry(name).or_default();
-                for value in values.into_iter().flatten() {
-                    if let Some((key, value)) = assoc_literal(&value) {
-                        map.insert(key, value);
-                    }
-                }
+    fn expand_array_elements(&mut self, elements: &[Word]) -> Vec<String> {
+        let mut values = Vec::new();
+        for element in elements {
+            let expanded = self.expand_word(element);
+            if expanded.is_empty()
+                && element.parts.len() == 1
+                && matches!(&element.parts[0], Part::Double(inner) if inner.is_empty())
+            {
+                values.push(String::new());
             } else {
-                self.assoc.remove(&name);
-                self.arrays.entry(name).or_default();
+                values.extend(expanded);
             }
         }
-        0
+        values
     }
 
-    fn local(&mut self, args: &[String]) -> i32 {
-        if self.local_scopes.is_empty() {
+    fn declaration(
+        &mut self,
+        command: &str,
+        args: &[String],
+        declarations: &[Assignment],
+    ) -> i32 {
+        let local = command == "local";
+        if local && self.local_scopes.is_empty() {
             eprintln!("sharky: local: can only be used in a function");
             return 1;
         }
@@ -1746,7 +1737,7 @@ impl Shell {
                 "a" => kind = Some(false),
                 "A" => kind = Some(true),
                 other => {
-                    eprintln!("sharky: local: -{other}: unsupported option");
+                    eprintln!("sharky: {command}: -{other}: unsupported option");
                     return 2;
                 }
             }
@@ -1754,7 +1745,7 @@ impl Shell {
         }
 
         if index >= args.len() {
-            eprintln!("sharky: local: usage: local [-a|-A] name[=value] ...");
+            eprintln!("sharky: {command}: usage: {command} [-a|-A] name[=value] ...");
             return 2;
         }
 
@@ -1765,29 +1756,86 @@ impl Shell {
                 None => (argument.as_str(), None),
             };
             if !is_valid_array_name(name) {
-                eprintln!("sharky: local: {name}: not a valid identifier");
+                eprintln!("sharky: {command}: {name}: not a valid identifier");
                 status = 1;
                 continue;
             }
 
-            self.save_local(name);
-            self.env.retain(|(key, _)| key != name);
-            self.arrays.remove(name);
-            self.assoc.remove(name);
+            let literal = declarations
+                .iter()
+                .find(|declaration| declaration.name == name);
+            let fresh = local && self.save_local(name);
+            if fresh {
+                self.env.retain(|(key, _)| key != name);
+                self.arrays.remove(name);
+                self.assoc.remove(name);
+            }
+
+            let kind = kind.or(match literal.map(|declaration| &declaration.value) {
+                Some(AssignmentValue::Array(_)) => Some(false),
+                _ => None,
+            });
+
             match kind {
-                Some(assoc) => {
-                    if assoc {
-                        self.assoc.insert(name.to_string(), BTreeMap::new());
-                    } else {
-                        self.arrays.insert(name.to_string(), Vec::new());
-                        if let Some(value) = value {
-                            self.set_array_element(name, "0", value);
+                Some(true) => {
+                    if local && !fresh {
+                        self.env.retain(|(key, _)| key != name);
+                    }
+                    let previous = self.arrays.remove(name).unwrap_or_default();
+                    let literal_values = match literal.map(|declaration| &declaration.value) {
+                        Some(AssignmentValue::Array(elements)) => {
+                            Some(self.expand_array_elements(elements))
+                        }
+                        _ => None,
+                    };
+                    let append = literal.is_some_and(|declaration| declaration.append);
+                    let map = self.assoc.entry(name.to_string()).or_default();
+                    for value in previous.into_iter().flatten() {
+                        if let Some((key, value)) = assoc_literal(&value) {
+                            map.insert(key, value);
+                        }
+                    }
+                    if let Some(values) = literal_values {
+                        if !append {
+                            map.clear();
+                        }
+                        for value in values {
+                            if let Some((key, value)) = assoc_literal(&value) {
+                                map.insert(key, value);
+                            }
+                        }
+                    }
+                }
+                Some(false) => {
+                    if local && !fresh {
+                        self.env.retain(|(key, _)| key != name);
+                    }
+                    self.assoc.remove(name);
+                    self.arrays.entry(name.to_string()).or_default();
+                    match literal.map(|declaration| (&declaration.value, declaration.append)) {
+                        Some((AssignmentValue::Array(elements), append)) => {
+                            let values = self.expand_array_elements(elements);
+                            self.set_array(name, values, append);
+                        }
+                        _ => {
+                            if let Some(value) = value {
+                                self.set_array_element(name, "0", value);
+                            }
                         }
                     }
                 }
                 None => {
                     if let Some(value) = value {
-                        self.set_var(name, value);
+                        if self.assoc.contains_key(name) {
+                            self.assoc
+                                .entry(name.to_string())
+                                .or_default()
+                                .insert("0".to_string(), value);
+                        } else if self.arrays.contains_key(name) {
+                            self.set_array_element(name, "0", value);
+                        } else {
+                            self.set_var(name, value);
+                        }
                     }
                 }
             }
@@ -1795,13 +1843,13 @@ impl Shell {
         status
     }
 
-    fn save_local(&mut self, name: &str) {
+    fn save_local(&mut self, name: &str) -> bool {
         let already_saved = self
             .local_scopes
             .last()
             .is_some_and(|frame| frame.iter().any(|saved| saved.name == name));
         if already_saved {
-            return;
+            return false;
         }
 
         let var = self
@@ -1818,6 +1866,7 @@ impl Shell {
         if let Some(frame) = self.local_scopes.last_mut() {
             frame.push(saved);
         }
+        true
     }
 
     fn restore_locals(&mut self) {
@@ -4225,8 +4274,14 @@ fn is_builtin_name(name: &str) -> bool {
             | "shift"
             | "declare"
             | "local"
+            | "readonly"
+            | "typeset"
             | "shopt"
     )
+}
+
+fn is_declaration_word(name: &str) -> bool {
+    matches!(name, "declare" | "local" | "readonly" | "typeset")
 }
 
 fn is_special_name(name: &str) -> bool {
