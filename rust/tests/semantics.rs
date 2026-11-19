@@ -365,3 +365,35 @@ fn empty_error_word_uses_the_null_parameter_message() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("v: parameter null or not set"), "{stderr:?}");
 }
+
+// set -o accepts the long option names of the flags it implements.
+
+#[test]
+fn set_o_errexit_aborts_after_a_failing_command() {
+    let out = sharky("set -o errexit; false; printf no");
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+}
+
+#[test]
+fn set_o_nounset_errors_on_an_unset_expansion() {
+    let out = sharky(r#"set -o nounset; printf '%s' "$SHARKY_UNSET_E"; printf after"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unbound"));
+}
+
+#[test]
+fn set_o_xtrace_traces_to_stderr() {
+    let out = sharky("set -o xtrace; printf hi");
+    assert_eq!(stdout(&out), "hi");
+    assert_eq!(status(&out), 0);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("+ printf hi"));
+}
+
+#[test]
+fn set_plus_o_long_name_disables_the_flag() {
+    let out = sharky("set -e; set +o errexit; false; printf after");
+    assert_eq!(stdout(&out), "after");
+    assert_eq!(status(&out), 0);
+}
