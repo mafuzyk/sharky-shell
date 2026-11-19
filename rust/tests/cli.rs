@@ -2748,6 +2748,122 @@ fn merge_startup_flag_is_rejected() {
     );
 }
 
+#[test]
+fn explain_without_topic_prints_a_text_index() {
+    let out = sharky(&["explain"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.stderr.is_empty());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("tide history"), "{text}");
+    assert!(text.contains("anchor"), "{text}");
+    assert!(!text.contains('{'), "index must be plain text: {text}");
+}
+
+#[test]
+fn explain_joins_space_separated_topic_words() {
+    let out = sharky(&["explain", "tide", "history"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("tide history"), "{text}");
+    assert!(text.contains("1000"), "{text}");
+    assert!(text.contains("expects a number"), "{text}");
+    assert!(!text.contains('{'), "topic must be plain text: {text}");
+}
+
+#[test]
+fn explain_exposes_every_recognized_directive() {
+    for directive in [
+        "tide", "pearl", "current", "reef", "shoal", "anchor", "coral", "wave", "wake",
+    ] {
+        let out = sharky(&["explain", directive]);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{directive}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains(directive), "{directive}: {text}");
+    }
+}
+
+#[test]
+fn explain_loads_no_config_and_has_no_side_effects() {
+    let dir = temp_dir();
+    std::fs::write(
+        dir.join("config.sharky"),
+        "wake \"printf WAKE\"\ntide greeting yes\n",
+    )
+    .unwrap();
+    let data = temp_dir();
+    let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args(["explain", "tide", "history"])
+        .env("SHARKY_CONFIG", &dir)
+        .env("XDG_DATA_HOME", &data)
+        .output()
+        .expect("failed to run sharky");
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&data).ok();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.stderr.is_empty(),
+        "config must not be read: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("WAKE"));
+    assert!(!data.join("sharky/history").exists());
+    assert!(!data.join("sharky/z.jsonl").exists());
+}
+
+#[test]
+fn explain_unknown_topic_exits_two() {
+    let out = sharky(&["explain", "not-a-topic"]);
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("unknown topic 'not-a-topic'"), "{err}");
+}
+
+#[test]
+fn explain_rejects_options_and_mixed_requests() {
+    let cases = [
+        (vec!["explain", "--json"], "unexpected option '--json'"),
+        (vec!["explain", "-c", "true"], "unexpected option '-c'"),
+        (
+            vec!["--json", "explain"],
+            "cannot be combined with other options",
+        ),
+    ];
+    for (args, message) in cases {
+        let out = sharky(&args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains(message), "{args:?}: {err}");
+    }
+}
+
+#[test]
+fn help_lists_the_explain_subcommand() {
+    let out = sharky(&["--help"]);
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("explain"), "{text}");
+}
+
 fn history_fixture(name: &str) -> std::path::PathBuf {
     let dir = std::path::Path::new("/tmp/opencode").join(format!(
         "sharky-cli-history-{name}-{}",
