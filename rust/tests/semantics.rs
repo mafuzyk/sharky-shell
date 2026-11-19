@@ -340,8 +340,10 @@ fn local_without_a_value_trips_nounset() {
 
 #[test]
 fn empty_positional_parameters_are_unset_for_alternate_operators() {
-    let out = sharky(r#"printf '[%s][%s][%s][%s]' "${@+set}" "${@-fallback}" "${*+set}" "${*-fallback}""#);
-    assert_eq!(stdout(&out), "[][fallback][][fallback]");
+    let out = sharky(
+        r#"printf '<%s>' "${@+set}"; printf '|'; printf '<%s>' "${@-fallback}"; printf '|'; printf '<%s>' "${*+set}"; printf '|'; printf '<%s>' "${*-fallback}""#,
+    );
+    assert_eq!(stdout(&out), "<>|<fallback>|<>|<fallback>");
     assert_eq!(status(&out), 0);
 }
 
