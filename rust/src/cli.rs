@@ -27,6 +27,7 @@ pub fn run() -> i32 {
     let mut state_env = false;
     let mut interactive = false;
     let mut private = false;
+    let mut check = false;
 
     while let Some(arg) = args.next() {
         if script.is_some() {
@@ -43,6 +44,7 @@ pub fn run() -> i32 {
                 return 0;
             }
             "--no-config" => no_config = true,
+            "--check" => check = true,
             "--json" => json = true,
             "--env" => state_env = true,
             "-i" => interactive = true,
@@ -102,6 +104,39 @@ pub fn run() -> i32 {
         return 2;
     }
 
+    if check {
+        if interactive {
+            eprintln!("sharky: --check cannot use -i");
+            return 2;
+        }
+        if login {
+            eprintln!("sharky: --check cannot use login mode");
+            return 2;
+        }
+        if state {
+            eprintln!("sharky: --check cannot use state");
+            return 2;
+        }
+        if json {
+            eprintln!("sharky: --check cannot use --json");
+            return 2;
+        }
+        return match (command.as_deref(), script.as_deref()) {
+            (Some(source), None) => check_source("-c", source),
+            (None, Some(path)) => match std::fs::read_to_string(path) {
+                Ok(source) => check_source(path, &source),
+                Err(err) => {
+                    eprintln!("sharky: {path}: {err}");
+                    2
+                }
+            },
+            _ => {
+                eprintln!("sharky: --check requires -c or a file");
+                2
+            }
+        };
+    }
+
     if state {
         return run_state(no_config, state_env);
     }
@@ -137,6 +172,23 @@ pub fn run() -> i32 {
                     }
                 }
             }
+        }
+    }
+}
+
+// Syntax-only first slice: validates top-level syntax and does not promise
+// checks inside nested bodies; nothing is executed, loaded or recorded.
+fn check_source(name: &str, source: &str) -> i32 {
+    match crate::parser::parse(source) {
+        Ok(_) => 0,
+        Err(err) => {
+            let line = if err.line > 0 {
+                format!(":{}", err.line)
+            } else {
+                String::new()
+            };
+            eprintln!("sharky: {name}{line}: {}", err.message);
+            2
         }
     }
 }
@@ -404,6 +456,8 @@ fn print_help() {
     println!("       sharky state --json [--env] [--no-config]");
     println!();
     println!("  -c COMMAND   run COMMAND and exit");
+    println!("  --check      check top-level syntax only: no execution, config, profiles or history");
+    println!("               requires -c or a file; reports line info and exits 2 on errors");
     println!("  -i           force interactive mode");
     println!("  -l, --login  read login profiles before the command");
     println!("  -P, --private  keep no history file: read and write nothing");

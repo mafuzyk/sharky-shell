@@ -31,6 +31,14 @@ not recommended during alpha.
 .B \-c \fICOMMAND\fR
 Run \fICOMMAND\fR and exit with its status.
 .TP
+.B \-\-check
+Parse \fB\-c\fR or a file for syntax only: exit 0 silently on success, or 2 with
+a line reference on a top-level syntax error. Requires \fB\-c\fR or a file;
+standard input is not supported. Only top-level syntax is promised, nested
+bodies are not guaranteed to be checked. Nothing is executed, and configuration,
+profiles and history are neither read nor written. Cannot be combined with
+\fB\-i\fR, \fB\-l\fR, \fB\-\-json\fR or \fBstate\fR.
+.TP
 .B \-i
 Force interactive mode; fails when standard input or output is not a terminal.
 .TP
