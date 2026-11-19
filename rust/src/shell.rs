@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
-use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
@@ -58,6 +58,7 @@ pub struct Shell {
     substitution_pids: Vec<Pid>,
     substitution_paths: Vec<String>,
     substitution_ready: Vec<i32>,
+    tty: Option<OwnedFd>,
     json_exec: Option<(RawFd, Vec<(String, String)>)>,
     expansion_error: bool,
     pub exit_requested: Option<i32>,
@@ -130,8 +131,19 @@ impl Shell {
             .collect();
 
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        // fd 0 is the terminal until a scoped redirect replaces it, so keep a
+        // copy for the job-control calls that must not follow the redirect.
+        let tty = if unsafe { nix::libc::isatty(0) } == 1 {
+            // SAFETY: the duplicate is a new descriptor owned by this process.
+            let fd = unsafe { nix::libc::fcntl(0, nix::libc::F_DUPFD_CLOEXEC, 3) };
+            // SAFETY: the descriptor is valid and uniquely owned here.
+            (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd) })
+        } else {
+            None
+        };
         let mut shell = Shell {
             env,
+            tty,
             cwd: cwd.clone(),
             last_status: 0,
             last_duration_ms: 0,
@@ -427,10 +439,18 @@ impl Shell {
         self.interactive && self.job_pgid.is_none()
     }
 
+    // The shell's own terminal, which a scoped redirect can hide behind fd 0.
+    fn terminal(&self) -> RawFd {
+        self.tty.as_ref().map_or(0, |fd| fd.as_raw_fd())
+    }
+
     fn reclaim_terminal(&self) {
         if self.foreground_control() {
-            // SAFETY: fd 0 is the terminal for the whole life of an interactive shell.
-            let _ = tcsetpgrp(unsafe { std::os::fd::BorrowedFd::borrow_raw(0) }, getpgrp());
+            // SAFETY: the saved descriptor is the shell's terminal.
+            let _ = tcsetpgrp(
+                unsafe { std::os::fd::BorrowedFd::borrow_raw(self.terminal()) },
+                getpgrp(),
+            );
         }
     }
 
@@ -626,9 +646,9 @@ impl Shell {
                     if self.interactive {
                         if leader.is_none() {
                             if self.foreground_control() {
-                                // SAFETY: fd 0 is the terminal; this child leads the job.
+                                // SAFETY: the saved descriptor is the shell's terminal.
                                 let _ = tcsetpgrp(
-                                    unsafe { std::os::fd::BorrowedFd::borrow_raw(0) },
+                                    unsafe { std::os::fd::BorrowedFd::borrow_raw(self.terminal()) },
                                     child,
                                 );
                             }
@@ -1395,9 +1415,10 @@ impl Shell {
         match unsafe { fork() } {
             Ok(ForkResult::Parent { child }) => {
                 if self.foreground_control() && leader.is_none() {
-                    // SAFETY: fd 0 is the terminal; the child was just placed in its own group.
+                    // SAFETY: the saved descriptor is the shell's terminal; the
+                    // child was just placed in its own group.
                     let _ = tcsetpgrp(
-                        unsafe { std::os::fd::BorrowedFd::borrow_raw(0) },
+                        unsafe { std::os::fd::BorrowedFd::borrow_raw(self.terminal()) },
                         child,
                     );
                 }
@@ -1832,8 +1853,11 @@ impl Shell {
         println!("{}", job.command);
 
         if self.foreground_control() {
-            // SAFETY: fd 0 is the terminal for the life of an interactive shell.
-            let _ = tcsetpgrp(unsafe { std::os::fd::BorrowedFd::borrow_raw(0) }, job.pgid);
+            // SAFETY: the saved descriptor is the shell's terminal.
+            let _ = tcsetpgrp(
+                unsafe { std::os::fd::BorrowedFd::borrow_raw(self.terminal()) },
+                job.pgid,
+            );
         }
         let _ = killpg(job.pgid, Signal::SIGCONT);
 
@@ -3972,9 +3996,9 @@ fn save_fds(actions: &[Action]) -> Result<Vec<SavedFd>, String> {
 
     for action in actions {
         let (target, from) = action.fds();
-        floor = floor.max(target + 1);
+        floor = floor.max(target.saturating_add(1));
         if let Some(from) = from {
-            floor = floor.max(from + 1);
+            floor = floor.max(from.saturating_add(1));
         }
         if !targets.contains(&target) {
             targets.push(target);
@@ -4031,6 +4055,26 @@ fn restore_fds(saved: Vec<SavedFd>) {
     }
 }
 
+// Gives `file` to `fd` without closing the target when the file already landed
+// on it, and keeps the target inheritable the way a dup2 does.
+fn apply_file(file: std::fs::File, fd: RawFd) -> Result<(), String> {
+    let raw = file.into_raw_fd();
+    if let Err(message) = move_fd(raw, fd) {
+        // SAFETY: the file handed its descriptor over to us.
+        unsafe { nix::libc::close(raw) };
+        return Err(message);
+    }
+
+    if raw == fd {
+        // SAFETY: the descriptor belongs to this process.
+        unsafe { nix::libc::fcntl(fd, nix::libc::F_SETFD, 0) };
+    } else {
+        // SAFETY: the duplicate is no longer needed.
+        unsafe { nix::libc::close(raw) };
+    }
+    Ok(())
+}
+
 // shortcut: allocates in the forked child; safe while sharky is single-threaded.
 fn apply_actions(actions: &[Action]) -> Result<(), String> {
     for action in actions {
@@ -4038,7 +4082,7 @@ fn apply_actions(actions: &[Action]) -> Result<(), String> {
             Action::Write(fd, path) => {
                 let file = std::fs::File::create(path)
                     .map_err(|err| format!("{}: {err}", path.display()))?;
-                move_fd(file.as_raw_fd(), *fd)?;
+                apply_file(file, *fd)?;
             }
             Action::Append(fd, path) => {
                 let file = std::fs::OpenOptions::new()
@@ -4046,18 +4090,24 @@ fn apply_actions(actions: &[Action]) -> Result<(), String> {
                     .create(true)
                     .open(path)
                     .map_err(|err| format!("{}: {err}", path.display()))?;
-                move_fd(file.as_raw_fd(), *fd)?;
+                apply_file(file, *fd)?;
             }
             Action::Read(fd, path) => {
                 let file =
                     std::fs::File::open(path).map_err(|err| format!("{}: {err}", path.display()))?;
-                move_fd(file.as_raw_fd(), *fd)?;
+                apply_file(file, *fd)?;
             }
             Action::Dup { from, to } => {
                 move_fd(*from, *to)?;
             }
             Action::Here { fd, file } => {
-                move_fd(file.as_raw_fd(), *fd)?;
+                let raw = file.as_raw_fd();
+                move_fd(raw, *fd)?;
+                if raw == *fd {
+                    // SAFETY: the temp file stays owned by the action; keep the
+                    // target it became inheritable.
+                    unsafe { nix::libc::fcntl(*fd, nix::libc::F_SETFD, 0) };
+                }
             }
         }
     }
