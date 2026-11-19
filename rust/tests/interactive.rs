@@ -1108,6 +1108,85 @@ fn highlight_off_renders_plain_text() {
     );
 }
 
+const OVERWRITE_CONFIG: &str = "coral danger #FF8F80
+wave overwrite @danger
+tide greeting off
+";
+
+const OVERWRITE_DANGER: &str = "\u{1b}[38;2;255;143;128m";
+
+// Types a redirect line without pressing Enter, captures the highlighted
+// redraw, then cancels. The target is a literal absolute path to a regular
+// file created only when `exists` is true.
+fn overwrite_render<F>(exists: bool, build: F) -> (String, String)
+where
+    F: Fn(&str) -> String,
+{
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let mut session = history_session_with(Some(OVERWRITE_CONFIG));
+    let target = std::env::temp_dir()
+        .join(format!(
+            "sharky-overwrite-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ))
+        .to_str()
+        .unwrap()
+        .to_string();
+    if exists {
+        std::fs::write(&target, b"old").unwrap();
+    }
+    let command = build(&target);
+    let fd = session.master.as_raw_fd();
+    let _ = session.writer.write_all(command.as_bytes());
+    let seen = read_until(fd, "\u{0}", Duration::from_millis(500));
+    let _ = session.writer.write_all(b"\x03");
+    let _ = read_until(fd, HISTORY_PROMPT_END, Duration::from_secs(5));
+    session.finish();
+    std::fs::remove_file(&target).ok();
+    (seen, target)
+}
+
+#[test]
+fn overwrite_warning_paints_an_existing_redirect_target() {
+    for redirect in [">", "2>", "&>"] {
+        let (seen, target) =
+            overwrite_render(true, |target| format!("echo hi {redirect} {target}"));
+        let painted = format!("{OVERWRITE_DANGER}{target}");
+        assert!(
+            seen.contains(&painted),
+            "{redirect} did not paint the existing target: {seen:?}"
+        );
+    }
+}
+
+#[test]
+fn overwrite_warning_ignores_non_overwrite_redirects() {
+    let (append, _) = overwrite_render(true, |t| format!("echo hi >> {t}"));
+    assert!(
+        !append.contains(OVERWRITE_DANGER),
+        "append painted a target: {append:?}"
+    );
+
+    let (input, _) = overwrite_render(true, |t| format!("echo hi < {t}"));
+    assert!(
+        !input.contains(OVERWRITE_DANGER),
+        "input painted a target: {input:?}"
+    );
+
+    let (dup, _) = overwrite_render(true, |_| "echo hi 2>&1".to_string());
+    assert!(
+        !dup.contains(OVERWRITE_DANGER),
+        "fd duplication painted a target: {dup:?}"
+    );
+
+    let (missing, _) = overwrite_render(false, |t| format!("echo hi > {t}"));
+    assert!(
+        !missing.contains(OVERWRITE_DANGER),
+        "nonexistent target was painted: {missing:?}"
+    );
+}
+
 #[test]
 fn anchor_rebinds_keys_to_actions() {
     let mut session = history_session_with(Some(
