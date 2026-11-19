@@ -28,6 +28,14 @@ pub fn render(shell: &Shell, text: &[char]) -> String {
         }
     });
 
+    // Visual-only opt-in: skip the scan and every filesystem lookup unless the
+    // theme actually styles overwrite targets.
+    let overwrite = if shell.style("overwrite").is_some() {
+        overwrite_spans(text)
+    } else {
+        Vec::new()
+    };
+
     let mut out = String::new();
     let mut index = 0;
     while index < text.len() {
@@ -37,9 +45,57 @@ pub fn render(shell: &Shell, text: &[char]) -> String {
             index += 1;
         }
         let segment: String = text[start..index].iter().collect();
-        out.push_str(&prompt::painted(shell, role_key(role), &segment));
+        let overwrite_target = overwrite.iter().any(|&(begin, end)| {
+            begin == start
+                && end == index
+                && roles[start] == Role::Path
+                && is_existing_regular_file(&segment)
+        });
+        let key = if overwrite_target {
+            "overwrite"
+        } else {
+            role_key(role)
+        };
+        out.push_str(&prompt::painted(shell, key, &segment));
     }
     out
+}
+
+// Spans of literal targets whose redirect truncates a file: `>`, `2>`, `&>`.
+// Appends (`>>`, `&>>`), input (`<`) and descriptor duplication (`>&`, `2>&1`)
+// never qualify.
+fn overwrite_spans(text: &[char]) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut index = 0;
+    while index < text.len() {
+        if text[index] != '>' && text[index] != '&' {
+            index += 1;
+            continue;
+        }
+        let op_start = index;
+        while index < text.len() && is_operator(text[index]) {
+            index += 1;
+        }
+        let op: String = text[op_start..index].iter().collect();
+        if op != ">" && op != "&>" {
+            continue;
+        }
+        while index < text.len() && text[index].is_whitespace() {
+            index += 1;
+        }
+        let target_start = index;
+        while index < text.len() && !text[index].is_whitespace() && !is_operator(text[index]) {
+            index += 1;
+        }
+        if index > target_start {
+            spans.push((target_start, index));
+        }
+    }
+    spans
+}
+
+fn is_existing_regular_file(word: &str) -> bool {
+    std::fs::metadata(word).is_ok_and(|meta| meta.is_file())
 }
 
 fn role_key(role: Role) -> &'static str {
@@ -332,7 +388,7 @@ fn is_operator(char: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Role, classify_with};
+    use super::{Role, classify_with, overwrite_spans};
 
     fn classify(text: &str) -> Vec<Role> {
         let chars: Vec<char> = text.chars().collect();
@@ -392,5 +448,22 @@ mod tests {
         let text = "echo ${HOME";
         let roles = classify(text);
         assert_eq!(at(&roles, text, 5), Role::Error);
+    }
+
+    #[test]
+    fn overwrite_spans_only_cover_truncating_redirects() {
+        fn spans(text: &str) -> Vec<String> {
+            let chars: Vec<char> = text.chars().collect();
+            overwrite_spans(&chars)
+                .into_iter()
+                .map(|(begin, end)| chars[begin..end].iter().collect())
+                .collect()
+        }
+
+        assert_eq!(
+            spans("echo hi > out 2> err &> both").join(","),
+            "out,err,both"
+        );
+        assert!(spans("echo hi >> out < in 2>&1 &>> both").is_empty());
     }
 }
