@@ -36,6 +36,13 @@ rather than a separate preview track.
   command checks the references against the frozen baseline; `check <binary>`
   measures a built binary's stdout/status/side-effect divergence. stderr is
   not compared and no conformance is claimed.
+- `sharky config explain` prints the configuration guide as plain text before the
+  shell starts, reading no configuration, profiles or history and leaving no side
+  effects. With no topic it lists every topic id; the words after `explain` are
+  joined with spaces to select one topic. Each parser directive has its own topic
+  (`tide`, `pearl`, `current`, `reef`, `shoal`, `anchor`, `coral`, `wave`, `wake`)
+  alongside `tide history`, `files`, `theme` and `overwrite`. Unknown topics and
+  mixed options exit 2, and there is no top-level `sharky explain` alias.
 
 ## [3.5.4] - 2026-11-02
 
