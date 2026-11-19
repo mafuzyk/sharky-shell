@@ -1,5 +1,10 @@
 # Releasing sharky
 
+Releases ship alpha builds through the normal channel: the AUR packages, GitHub
+release assets and the Nix flake below are the supported delivery paths. Alpha
+names the project's ongoing maturity, not a separate release track, so this
+checklist is the same for every version.
+
 Version numbers live in `rust/Cargo.toml`, `rust/man/sharky.1` and the AUR
 recipes. Bump them and write the `CHANGELOG.md` entry before tagging.
 

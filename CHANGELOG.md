@@ -2,7 +2,21 @@
 
 All notable changes to sharky are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project uses semantic
-versioning.
+versioning. sharky is in alpha: version numbers mark releases, while alpha is
+the project's ongoing maturity, delivered through the normal release channel
+rather than a separate preview track.
+
+## [Unreleased]
+
+### Added
+
+- Durable command history: each evaluated command is appended to one shared file
+  under a lock, with failed writes kept only in memory and torn tails dropped on
+  the next append. Sessions keep their own view until `history merge`, and
+  `-P`/`--private` keeps history in memory. The file defaults to
+  `${XDG_DATA_HOME:-~/.local/share}/sharky/history` (`SHARKY_HISTORY` overrides).
+- Prebuilt Nix flake: `nix profile install github:mafuzyk/sharky-shell` installs
+  the verified static binary, man page and example config on `x86_64-linux`.
 
 ## [3.5.4] - 2026-11-02
 
