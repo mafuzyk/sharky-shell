@@ -248,3 +248,34 @@ fn local_restores_a_shadowed_array_on_return() {
     assert_eq!(stdout(&out), "inner;outer");
     assert_eq!(status(&out), 0);
 }
+
+// errexit: suppression covers every command of a condition, including the last
+// command of an and-or chain and a failing function called as a condition.
+
+#[test]
+fn errexit_stays_suppressed_in_the_last_command_of_a_while_condition() {
+    let out = sharky("set -e; while false || false; do printf body; done; printf after");
+    assert_eq!(stdout(&out), "after");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn errexit_stays_suppressed_in_the_last_command_of_an_until_condition() {
+    let out = sharky("set -e; until false || true; do printf body; done; printf after");
+    assert_eq!(stdout(&out), "after");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn errexit_stays_suppressed_when_a_function_condition_fails() {
+    let out = sharky("f() { false || false; }; set -e; while f; do :; done; printf after");
+    assert_eq!(stdout(&out), "after");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn errexit_stays_suppressed_in_the_last_command_of_an_if_condition() {
+    let out = sharky("set -e; if false || false; then :; else printf else; fi; printf after");
+    assert_eq!(stdout(&out), "elseafter");
+    assert_eq!(status(&out), 0);
+}
