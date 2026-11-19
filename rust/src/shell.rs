@@ -2688,11 +2688,11 @@ impl Shell {
                     'o' => {
                         index += 1;
                         match args.get(index).map(String::as_str) {
-                            Some("pipefail") => self.pipefail = on,
-                            Some("vi") => self.vi = on,
                             Some(name) => {
-                                eprintln!("sharky: set: {name}: invalid option name");
-                                status = 1;
+                                if !self.set_named_option(name, on) {
+                                    eprintln!("sharky: set: {name}: invalid option name");
+                                    status = 1;
+                                }
                             }
                             None if on => self.list_options(),
                             None => self.list_option_commands(),
@@ -2708,6 +2708,19 @@ impl Shell {
             index += 1;
         }
         status
+    }
+
+    fn set_named_option(&mut self, name: &str, on: bool) -> bool {
+        match name {
+            "errexit" => self.errexit = on,
+            "nounset" => self.nounset = on,
+            "xtrace" => self.xtrace = on,
+            "histexpand" => self.histexpand = on,
+            "pipefail" => self.pipefail = on,
+            "vi" => self.vi = on,
+            _ => return false,
+        }
+        true
     }
 
     fn list_options(&self) {
