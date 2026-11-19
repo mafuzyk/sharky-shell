@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, IntoRawFd, RawFd};
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
@@ -58,7 +58,6 @@ pub struct Shell {
     substitution_pids: Vec<Pid>,
     substitution_paths: Vec<String>,
     substitution_ready: Vec<i32>,
-    tty: Option<OwnedFd>,
     json_exec: Option<(RawFd, Vec<(String, String)>)>,
     expansion_error: bool,
     pub exit_requested: Option<i32>,
@@ -131,19 +130,8 @@ impl Shell {
             .collect();
 
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-        // fd 0 is the terminal until a scoped redirect replaces it, so keep a
-        // copy for the job-control calls that must not follow the redirect.
-        let tty = if unsafe { nix::libc::isatty(0) } == 1 {
-            // SAFETY: the duplicate is a new descriptor owned by this process.
-            let fd = unsafe { nix::libc::fcntl(0, nix::libc::F_DUPFD_CLOEXEC, 3) };
-            // SAFETY: the descriptor is valid and uniquely owned here.
-            (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd) })
-        } else {
-            None
-        };
         let mut shell = Shell {
             env,
-            tty,
             cwd: cwd.clone(),
             last_status: 0,
             last_duration_ms: 0,
@@ -439,19 +427,34 @@ impl Shell {
         self.interactive && self.job_pgid.is_none()
     }
 
-    // The shell's own terminal, which a scoped redirect can hide behind fd 0.
-    fn terminal(&self) -> RawFd {
-        self.tty.as_ref().map_or(0, |fd| fd.as_raw_fd())
+    // Hands the terminal to `pgid`. The descriptor is opened per call: a stored
+    // number is a redirect target like any other, so `exec 3> file` would take
+    // the shell's own terminal away for good.
+    fn set_foreground(&self, pgid: Pid) {
+        if !self.foreground_control() {
+            return;
+        }
+
+        let opened = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+            .ok();
+
+        // SAFETY: fd 0 is only borrowed while it is an open terminal.
+        let tty = match &opened {
+            Some(file) => file.as_fd(),
+            None if unsafe { nix::libc::isatty(0) } == 1 => unsafe {
+                std::os::fd::BorrowedFd::borrow_raw(0)
+            },
+            None => return,
+        };
+
+        let _ = tcsetpgrp(tty, pgid);
     }
 
     fn reclaim_terminal(&self) {
-        if self.foreground_control() {
-            // SAFETY: the saved descriptor is the shell's terminal.
-            let _ = tcsetpgrp(
-                unsafe { std::os::fd::BorrowedFd::borrow_raw(self.terminal()) },
-                getpgrp(),
-            );
-        }
+        self.set_foreground(getpgrp());
     }
 
     fn run_program(&mut self, program: &Program) -> Flow {
@@ -641,13 +644,7 @@ impl Shell {
                 Ok(ForkResult::Parent { child }) => {
                     if self.interactive {
                         if leader.is_none() {
-                            if self.foreground_control() {
-                                // SAFETY: the saved descriptor is the shell's terminal.
-                                let _ = tcsetpgrp(
-                                    unsafe { std::os::fd::BorrowedFd::borrow_raw(self.terminal()) },
-                                    child,
-                                );
-                            }
+                            self.set_foreground(child);
                             leader = Some(child);
                         } else if let Some(leader) = leader {
                             let _ = setpgid(child, leader);
@@ -1398,13 +1395,8 @@ impl Shell {
         // SAFETY: the child only runs syscalls and allocation-safe code before exec.
         match unsafe { fork() } {
             Ok(ForkResult::Parent { child }) => {
-                if self.foreground_control() && leader.is_none() {
-                    // SAFETY: the saved descriptor is the shell's terminal; the
-                    // child was just placed in its own group.
-                    let _ = tcsetpgrp(
-                        unsafe { std::os::fd::BorrowedFd::borrow_raw(self.terminal()) },
-                        child,
-                    );
+                if leader.is_none() {
+                    self.set_foreground(child);
                 }
                 Ok(child)
             }
@@ -1836,13 +1828,7 @@ impl Shell {
         job.stopped = false;
         println!("{}", job.command);
 
-        if self.foreground_control() {
-            // SAFETY: the saved descriptor is the shell's terminal.
-            let _ = tcsetpgrp(
-                unsafe { std::os::fd::BorrowedFd::borrow_raw(self.terminal()) },
-                job.pgid,
-            );
-        }
+        self.set_foreground(job.pgid);
         let _ = killpg(job.pgid, Signal::SIGCONT);
 
         self.wait_foreground(&job.pids, job.pgid, job.command)
