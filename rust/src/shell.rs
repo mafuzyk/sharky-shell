@@ -46,6 +46,11 @@ pub struct Shell {
     pipefail: bool,
     errexit_suppressed: bool,
     nounset_failed: bool,
+    // ${name?word} and ${name:?word} failures, which bash reports with 127 for
+    // a -c command string but with 1 in a script, a subshell, an interactive
+    // shell or a shell with errexit enabled.
+    null_parameter_error: bool,
+    in_subshell: bool,
     traps: HashMap<String, String>,
     exit_trap_ran: bool,
     history: Option<History>,
@@ -182,6 +187,8 @@ impl Shell {
             pipefail: false,
             errexit_suppressed: false,
             nounset_failed: false,
+            null_parameter_error: false,
+            in_subshell: false,
             traps: HashMap::new(),
             exit_trap_ran: false,
             history: None,
@@ -596,12 +603,7 @@ impl Shell {
 
     fn errexit_check(&mut self, flow: Flow) -> Flow {
         if self.nounset_failed {
-            self.nounset_failed = false;
-            if self.interactive {
-                return Flow::Status(1);
-            }
-            self.exit_requested = Some(1);
-            return Flow::Exit(1);
+            return self.unset_parameter_failure();
         }
         match flow {
             Flow::Status(code)
@@ -828,12 +830,7 @@ impl Shell {
         };
 
         if self.nounset_failed {
-            self.nounset_failed = false;
-            if self.interactive {
-                return Flow::Status(1);
-            }
-            self.exit_requested = Some(1);
-            return Flow::Exit(1);
+            return self.unset_parameter_failure();
         }
 
         if let Some(name) = prepared.argv.first()
@@ -1113,11 +1110,45 @@ impl Shell {
         }
     }
 
-    fn expansion_failure(&self) -> Flow {
-        if self.interactive {
-            Flow::Status(1)
+    // Bash reports a null or unset parameter error with 127 for a -c command
+    // string, but with 1 in a script, a subshell, an interactive shell or a
+    // shell with errexit enabled. Arithmetic and indirect errors always use 1.
+    fn unset_parameter_status(&self) -> i32 {
+        if self.interactive
+            || self.errexit
+            || self.script.is_some()
+            || self.in_subshell
+        {
+            1
         } else {
-            Flow::Exit(1)
+            127
+        }
+    }
+
+    fn unset_parameter_failure(&mut self) -> Flow {
+        let code = self.unset_parameter_status();
+        self.nounset_failed = false;
+        self.null_parameter_error = false;
+        if self.interactive {
+            Flow::Status(code)
+        } else {
+            self.exit_requested = Some(code);
+            Flow::Exit(code)
+        }
+    }
+
+    fn expansion_failure(&mut self) -> Flow {
+        let code = if self.null_parameter_error {
+            self.unset_parameter_status()
+        } else {
+            1
+        };
+        self.null_parameter_error = false;
+        self.expansion_error = false;
+        if self.interactive {
+            Flow::Status(code)
+        } else {
+            Flow::Exit(code)
         }
     }
 
@@ -1126,15 +1157,9 @@ impl Shell {
     // is what bash reports: the failing command, not the one after it.
     fn take_expansion_failure(&mut self) -> Option<Flow> {
         if self.nounset_failed {
-            self.nounset_failed = false;
-            if self.interactive {
-                return Some(Flow::Status(1));
-            }
-            self.exit_requested = Some(1);
-            return Some(Flow::Exit(1));
+            return Some(self.unset_parameter_failure());
         }
         if self.expansion_error {
-            self.expansion_error = false;
             return Some(self.expansion_failure());
         }
         None
@@ -1158,6 +1183,7 @@ impl Shell {
             }
             Ok(ForkResult::Child) => {
                 reset_child_signals();
+                self.in_subshell = true;
                 let code = flow_status(self.run_list(list));
                 unsafe { _exit(code) }
             }
@@ -3429,6 +3455,7 @@ impl Shell {
         };
         eprintln!("sharky: {name}: {message}");
         self.expansion_error = true;
+        self.null_parameter_error = true;
     }
 
     /// The keys selected by `${!a[@]}` or `${!a[*]}`. Outside double quotes the

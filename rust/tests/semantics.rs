@@ -33,6 +33,20 @@ fn temp_dir() -> std::path::PathBuf {
     dir
 }
 
+fn sharky_script(source: &str) -> Output {
+    let dir = temp_dir();
+    let path = dir.join("script.sh");
+    std::fs::write(&path, source).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args(["--no-config"])
+        .arg(&path)
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .output()
+        .expect("failed to run sharky");
+    std::fs::remove_dir_all(&dir).ok();
+    out
+}
+
 // Parameter expansion: ${name-word} substitutes only for an unset parameter,
 // while ${name:-word} also substitutes for a null one.
 
@@ -86,7 +100,7 @@ fn alternate_without_a_colon_expands_only_when_set() {
 fn unset_parameter_error_without_a_colon_aborts() {
     let out = sharky(r#"unset SHARKY_UNSET_C; printf '[%s]' "${SHARKY_UNSET_C?boom}"; printf after"#);
     assert_eq!(stdout(&out), "");
-    assert_eq!(status(&out), 1);
+    assert_eq!(status(&out), 127);
     assert!(String::from_utf8_lossy(&out.stderr).contains("boom"));
 }
 
@@ -196,7 +210,7 @@ fn errexit_aborts_on_the_last_command_of_an_and_list() {
 fn nounset_errors_on_an_unset_expansion() {
     let out = sharky(r#"set -u; printf '%s' "$SHARKY_UNSET_D"; printf after"#);
     assert_eq!(stdout(&out), "");
-    assert_eq!(status(&out), 1);
+    assert_eq!(status(&out), 127);
     assert!(String::from_utf8_lossy(&out.stderr).contains("unbound"));
 }
 
@@ -503,7 +517,7 @@ fn local_without_a_value_leaves_the_name_unset() {
 fn local_without_a_value_trips_nounset() {
     let out = sharky(r#"set -u; f() { local v; printf '%s' "$v"; }; f; printf after"#);
     assert_eq!(stdout(&out), "");
-    assert_eq!(status(&out), 1);
+    assert_eq!(status(&out), 127);
     assert!(String::from_utf8_lossy(&out.stderr).contains("unbound"));
 }
 
@@ -532,7 +546,7 @@ fn colon_operators_still_see_empty_positional_parameters_as_null() {
 fn error_expansion_expands_its_word_before_failing() {
     let out = sharky(r#"unset v; printf '[%s]' "${v?$(echo boom)}"; printf after"#);
     assert_eq!(stdout(&out), "");
-    assert_eq!(status(&out), 1);
+    assert_eq!(status(&out), 127);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("v: boom"), "{stderr:?}");
 }
@@ -541,9 +555,191 @@ fn error_expansion_expands_its_word_before_failing() {
 fn empty_error_word_uses_the_null_parameter_message() {
     let out = sharky(r#"unset v; printf '[%s]' "${v?}"; printf after"#);
     assert_eq!(stdout(&out), "");
-    assert_eq!(status(&out), 1);
+    assert_eq!(status(&out), 127);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("v: parameter null or not set"), "{stderr:?}");
+}
+
+// Bash reports a null or unset parameter error with 127 in a -c command string,
+// including when it happens inside a function, but with 1 in a script or a
+// subshell. Verify every measured shape in each of those contexts.
+
+#[test]
+fn command_string_null_parameter_with_a_word_uses_127() {
+    let out = sharky(r#"unset v; printf '[%s]' "${v?boom}""#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 127);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("v: boom"));
+}
+
+#[test]
+fn command_string_null_parameter_without_a_word_uses_127() {
+    let out = sharky(r#"unset v; printf '[%s]' "${v?}""#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 127);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("parameter null or not set"));
+}
+
+#[test]
+fn command_string_nounset_parameter_uses_127() {
+    let out = sharky(r#"set -u; printf '[%s]' "$v""#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 127);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("v: unbound variable"));
+}
+
+#[test]
+fn command_string_nounset_in_a_for_list_uses_127() {
+    let out = sharky(r#"set -u; for x in a$missing b; do :; done"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 127);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("missing: unbound variable"));
+}
+
+#[test]
+fn command_string_error_after_another_command_uses_127() {
+    let out = sharky(r#"unset v; echo ok; printf '[%s]' "${v?boom}""#);
+    assert_eq!(stdout(&out), "ok\n");
+    assert_eq!(status(&out), 127);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("v: boom"));
+}
+
+#[test]
+fn function_null_parameter_with_a_word_uses_127() {
+    let out = sharky(r#"unset v; f(){ printf '[%s]' "${v?boom}"; }; f"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 127);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("v: boom"));
+}
+
+#[test]
+fn function_null_parameter_without_a_word_uses_127() {
+    let out = sharky(r#"unset v; f(){ printf '[%s]' "${v?}"; }; f"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 127);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("parameter null or not set"));
+}
+
+#[test]
+fn function_nounset_parameter_uses_127() {
+    let out = sharky(r#"set -u; f(){ printf '[%s]' "$v"; }; f"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 127);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("v: unbound variable"));
+}
+
+#[test]
+fn function_nounset_in_a_for_list_uses_127() {
+    let out = sharky(r#"set -u; f(){ for x in a$missing b; do :; done; }; f"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 127);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("missing: unbound variable"));
+}
+
+#[test]
+fn function_error_after_another_command_uses_127() {
+    let out = sharky(r#"unset v; f(){ echo ok; printf '[%s]' "${v?boom}"; }; f"#);
+    assert_eq!(stdout(&out), "ok\n");
+    assert_eq!(status(&out), 127);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("v: boom"));
+}
+
+#[test]
+fn subshell_null_parameter_with_a_word_uses_1() {
+    let out = sharky(r#"unset v; ( printf '[%s]' "${v?boom}" )"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("v: boom"));
+}
+
+#[test]
+fn subshell_null_parameter_without_a_word_uses_1() {
+    let out = sharky(r#"unset v; ( printf '[%s]' "${v?}" )"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("parameter null or not set"));
+}
+
+#[test]
+fn subshell_nounset_parameter_uses_1() {
+    let out = sharky(r#"set -u; ( printf '[%s]' "$v" )"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("v: unbound variable"));
+}
+
+#[test]
+fn subshell_nounset_in_a_for_list_uses_1() {
+    let out = sharky(r#"set -u; ( for x in a$missing b; do :; done )"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("missing: unbound variable"));
+}
+
+#[test]
+fn subshell_error_after_another_command_uses_1() {
+    let out = sharky(r#"unset v; ( echo ok; printf '[%s]' "${v?boom}" )"#);
+    assert_eq!(stdout(&out), "ok\n");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("v: boom"));
+}
+
+#[test]
+fn script_null_parameter_with_a_word_uses_1() {
+    let out = sharky_script(r#"unset v; printf '[%s]' "${v?boom}""#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("v: boom"));
+}
+
+#[test]
+fn script_null_parameter_without_a_word_uses_1() {
+    let out = sharky_script(r#"unset v; printf '[%s]' "${v?}""#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("parameter null or not set"));
+}
+
+#[test]
+fn script_nounset_parameter_uses_1() {
+    let out = sharky_script(r#"set -u; printf '[%s]' "$v""#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("v: unbound variable"));
+}
+
+#[test]
+fn script_nounset_in_a_for_list_uses_1() {
+    let out = sharky_script(r#"set -u; for x in a$missing b; do :; done"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("missing: unbound variable"));
+}
+
+#[test]
+fn script_error_after_another_command_uses_1() {
+    let out = sharky_script(r#"unset v; echo ok; printf '[%s]' "${v?boom}""#);
+    assert_eq!(stdout(&out), "ok\n");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("v: boom"));
+}
+
+// Bash also reports 1 rather than 127 when errexit is enabled, including in a
+// corpus-style `set -euo pipefail` script.
+#[test]
+fn errexit_null_parameter_error_uses_1() {
+    let out = sharky(r#"set -e; unset v; printf '[%s]' "${v?boom}"; printf after"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("v: boom"));
+}
+
+#[test]
+fn errexit_nounset_error_uses_1() {
+    let out = sharky(r#"set -euo pipefail; printf 'start\n'; printf '[%s]' "$v""#);
+    assert_eq!(stdout(&out), "start\n");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("v: unbound variable"));
 }
 
 // set -o accepts the long option names of the flags it implements.
@@ -559,7 +755,7 @@ fn set_o_errexit_aborts_after_a_failing_command() {
 fn set_o_nounset_errors_on_an_unset_expansion() {
     let out = sharky(r#"set -o nounset; printf '%s' "$SHARKY_UNSET_E"; printf after"#);
     assert_eq!(stdout(&out), "");
-    assert_eq!(status(&out), 1);
+    assert_eq!(status(&out), 127);
     assert!(String::from_utf8_lossy(&out.stderr).contains("unbound"));
 }
 
@@ -1026,7 +1222,7 @@ fn expansion_error_in_for_runs_no_iteration() {
     let out =
         sharky(r#"for x in ${SHARKY_UNSET_F?boom} later; do [[ -n "$x" ]]; done"#);
     assert_eq!(stdout(&out), "");
-    assert_eq!(status(&out), 1);
+    assert_eq!(status(&out), 127);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("boom"), "{stderr:?}");
 }
@@ -1035,7 +1231,7 @@ fn expansion_error_in_for_runs_no_iteration() {
 fn expansion_error_in_case_runs_no_arm() {
     let out = sharky(r#"case ${SHARKY_UNSET_F?boom} in *) [[ -n x ]] ;; esac"#);
     assert_eq!(stdout(&out), "");
-    assert_eq!(status(&out), 1);
+    assert_eq!(status(&out), 127);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("boom"), "{stderr:?}");
 }
@@ -1044,7 +1240,7 @@ fn expansion_error_in_case_runs_no_arm() {
 fn expansion_error_in_a_test_keeps_the_command_failure() {
     let out = sharky(r#"[[ -z ${SHARKY_UNSET_F?boom} ]]"#);
     assert_eq!(stdout(&out), "");
-    assert_eq!(status(&out), 1);
+    assert_eq!(status(&out), 127);
     assert!(String::from_utf8_lossy(&out.stderr).contains("boom"));
 }
 
@@ -1052,7 +1248,7 @@ fn expansion_error_in_a_test_keeps_the_command_failure() {
 fn nounset_in_a_for_word_list_runs_no_iteration() {
     let out = sharky(r#"set -u; for x in a$SHARKY_UNSET_F b; do [[ -n "$x" ]]; done"#);
     assert_eq!(stdout(&out), "");
-    assert_eq!(status(&out), 1);
+    assert_eq!(status(&out), 127);
     assert!(String::from_utf8_lossy(&out.stderr).contains("unbound"));
 }
 

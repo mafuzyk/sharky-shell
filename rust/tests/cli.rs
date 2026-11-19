@@ -1111,9 +1111,17 @@ fn shift_moves_positional_parameters() {
 #[test]
 fn nounset_stops_expansion_of_an_unset_variable() {
     let out = sharky(&["-c", r#"set -u; printf '%s' "$UNSET_X"; printf after"#]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(127));
     assert!(out.stdout.is_empty());
     assert!(String::from_utf8_lossy(&out.stderr).contains("unbound variable"));
+}
+
+#[test]
+fn error_expansion_reports_the_command_string_status() {
+    let out = sharky(&["-c", r#"unset v; printf '[%s]' "${v?boom}"; printf after"#]);
+    assert_eq!(out.status.code(), Some(127));
+    assert!(out.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("v: boom"));
 }
 
 #[test]
