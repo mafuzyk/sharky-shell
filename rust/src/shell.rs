@@ -4837,6 +4837,8 @@ fn is_builtin_name(name: &str) -> bool {
             | "typeset"
             | "shopt"
             | "command"
+            | "exec"
+            | "time"
             | "help"
     )
 }
