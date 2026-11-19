@@ -1663,14 +1663,9 @@ impl Shell {
     fn assign(&mut self, assignment: &Assignment) {
         match &assignment.value {
             AssignmentValue::Array(elements) => {
-                let values = self.expand_array_elements(elements);
+                let entries = self.expand_array_entries(elements);
                 if self.assoc.contains_key(&assignment.name) {
-                    let mut map = BTreeMap::new();
-                    for value in values {
-                        if let Some((key, value)) = assoc_literal(&value) {
-                            map.insert(key, value);
-                        }
-                    }
+                    let map: BTreeMap<String, String> = assoc_entries(&entries).into_iter().collect();
                     if assignment.append {
                         self.assoc
                             .entry(assignment.name.clone())
@@ -1680,7 +1675,7 @@ impl Shell {
                         self.assoc.insert(assignment.name.clone(), map);
                     }
                 } else {
-                    self.set_array(&assignment.name, values, assignment.append);
+                    self.assign_array_entries(&assignment.name, &entries, assignment.append);
                 }
             }
             AssignmentValue::Word(word) => {
@@ -1705,20 +1700,66 @@ impl Shell {
         }
     }
 
-    fn expand_array_elements(&mut self, elements: &[Word]) -> Vec<String> {
-        let mut values = Vec::new();
+    /// Expanded array literal elements, each carrying the expanded subscript
+    /// text of its `[sub]=value` form, if any.
+    fn expand_array_entries(&mut self, elements: &[Word]) -> Vec<(Option<String>, String)> {
+        let mut entries = Vec::new();
         for element in elements {
-            let expanded = self.expand_word(element);
-            if expanded.is_empty()
-                && element.parts.len() == 1
-                && matches!(&element.parts[0], Part::Double(inner) if inner.is_empty())
-            {
-                values.push(String::new());
-            } else {
-                values.extend(expanded);
+            let (index, value) = match split_indexed_element(element) {
+                Some((index, value)) => (Some(self.expand_assignment(&index)), value),
+                None => (None, element.clone()),
+            };
+            for (position, value) in self.expand_array_element(&value).into_iter().enumerate() {
+                let index = if position == 0 { index.clone() } else { None };
+                entries.push((index, value));
             }
         }
-        values
+        entries
+    }
+
+    fn expand_array_element(&mut self, element: &Word) -> Vec<String> {
+        let expanded = self.expand_word(element);
+        let empty_value = element.parts.is_empty()
+            || (element.parts.len() == 1
+                && matches!(&element.parts[0], Part::Double(inner) if inner.is_empty()));
+        if expanded.is_empty() && empty_value {
+            return vec![String::new()];
+        }
+        expanded
+    }
+
+    /// Store array literal entries: an element with a subscript lands on that
+    /// index and the following plain elements continue after it.
+    fn assign_array_entries(
+        &mut self,
+        name: &str,
+        entries: &[(Option<String>, String)],
+        append: bool,
+    ) {
+        let resolved: Vec<(Option<usize>, String)> = entries
+            .iter()
+            .map(|(index, value)| {
+                (
+                    index
+                        .as_deref()
+                        .map(|text| self.resolve_array_index(text)),
+                    value.clone(),
+                )
+            })
+            .collect();
+        if !append {
+            self.arrays.insert(name.to_string(), Vec::new());
+        }
+        let values = self.arrays.entry(name.to_string()).or_default();
+        let mut next = values.len();
+        for (index, value) in resolved {
+            let position = index.unwrap_or(next);
+            while values.len() <= position {
+                values.push(None);
+            }
+            values[position] = Some(value);
+            next = position + 1;
+        }
     }
 
     fn declaration(
@@ -1796,9 +1837,9 @@ impl Shell {
                         self.env.retain(|(key, _)| key != name);
                     }
                     let previous = self.arrays.remove(name).unwrap_or_default();
-                    let literal_values = match literal.map(|declaration| &declaration.value) {
+                    let entries = match literal.map(|declaration| &declaration.value) {
                         Some(AssignmentValue::Array(elements)) => {
-                            Some(self.expand_array_elements(elements))
+                            Some(self.expand_array_entries(elements))
                         }
                         _ => None,
                     };
@@ -1809,14 +1850,12 @@ impl Shell {
                             map.insert(key, value);
                         }
                     }
-                    if let Some(values) = literal_values {
+                    if let Some(entries) = entries {
                         if !append {
                             map.clear();
                         }
-                        for value in values {
-                            if let Some((key, value)) = assoc_literal(&value) {
-                                map.insert(key, value);
-                            }
+                        for (key, value) in assoc_entries(&entries) {
+                            map.insert(key, value);
                         }
                     }
                 }
@@ -1828,8 +1867,8 @@ impl Shell {
                     self.arrays.entry(name.to_string()).or_default();
                     match literal.map(|declaration| (&declaration.value, declaration.append)) {
                         Some((AssignmentValue::Array(elements), append)) => {
-                            let values = self.expand_array_elements(elements);
-                            self.set_array(name, values, append);
+                            let entries = self.expand_array_entries(elements);
+                            self.assign_array_entries(name, &entries, append);
                         }
                         _ => {
                             if let Some(value) = value {
@@ -3894,6 +3933,61 @@ fn bound_slice(len: usize, offset: i64, length: Option<i64>) -> Option<(usize, u
         None => len,
     };
     Some((start as usize, end.max(start) as usize))
+}
+
+/// Split a `[subscript]=value` element of an array literal into its subscript
+/// word and its value word. A quoted or escaped leading bracket is not a
+/// subscript, matching the value bash stores for it.
+fn split_indexed_element(word: &Word) -> Option<(Word, Word)> {
+    let mut index_parts = Vec::new();
+    for (position, part) in word.parts.iter().enumerate() {
+        let Part::Literal(text) = part else {
+            index_parts.push(part.clone());
+            continue;
+        };
+        let text = match position {
+            0 => text.strip_prefix('[')?,
+            _ => text.as_str(),
+        };
+        let Some(close) = text.find("]=") else {
+            if !text.is_empty() {
+                index_parts.push(Part::Literal(text.to_string()));
+            }
+            continue;
+        };
+        let subscript = &text[..close];
+        if subscript.is_empty() && index_parts.is_empty() {
+            return None;
+        }
+        if !subscript.is_empty() {
+            index_parts.push(Part::Literal(subscript.to_string()));
+        }
+        let mut value_parts = Vec::new();
+        let rest = &text[close + 2..];
+        if !rest.is_empty() {
+            value_parts.push(Part::Literal(rest.to_string()));
+        }
+        value_parts.extend(word.parts[position + 1..].iter().cloned());
+        return Some((Word { parts: index_parts }, Word { parts: value_parts }));
+    }
+    None
+}
+
+/// Pairs for an associative array literal: an explicit subscript keeps its
+/// expanded text, while a bare value falls back to the `[key]=value` form.
+fn assoc_entries(entries: &[(Option<String>, String)]) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    for (index, value) in entries {
+        match index {
+            Some(index) => pairs.push((index.clone(), value.clone())),
+            None => {
+                if let Some(pair) = assoc_literal(value) {
+                    pairs.push(pair);
+                }
+            }
+        }
+    }
+    pairs
 }
 
 fn assoc_literal(text: &str) -> Option<(String, String)> {
