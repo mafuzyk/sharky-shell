@@ -68,6 +68,14 @@ pub struct Shell {
     last_bg_pid: Option<Pid>,
     colors: HashMap<String, String>,
     styles: HashMap<String, String>,
+    local_scopes: Vec<Vec<SavedLocal>>,
+}
+
+struct SavedLocal {
+    name: String,
+    var: Option<String>,
+    array: Option<Vec<Option<String>>>,
+    assoc: Option<BTreeMap<String, String>>,
 }
 
 struct Job {
@@ -175,6 +183,7 @@ impl Shell {
             last_bg_pid: None,
             colors: HashMap::new(),
             styles: HashMap::new(),
+            local_scopes: Vec::new(),
         };
         shell.set_var("PWD", cwd.display().to_string());
         shell
@@ -404,7 +413,7 @@ impl Shell {
     pub fn command_words(&self) -> Vec<String> {
         let mut words: Vec<String> = [
             ":", "true", "false", "cd", "exit", "export", "unset", "set", "source", ".",
-            "break", "continue", "return", "jobs", "fg", "bg", "declare", "pwd", "type",
+            "break", "continue", "return", "jobs", "fg", "bg", "declare", "local", "pwd", "type",
             "alias", "abbr", "unabbr", "unalias", "history", "wait", "kill", "z", "zi",
             "reload", "trap", "read", "shift", "wake", "exec", "time", "shopt",
             "mapfile", "readarray",
@@ -876,7 +885,9 @@ impl Shell {
     fn run_in_shell(&mut self, argv: &[String]) -> Flow {
         if let Some(body) = self.funcs.get(&argv[0]).cloned() {
             let saved = std::mem::replace(&mut self.positional, argv[1..].to_vec());
+            self.local_scopes.push(Vec::new());
             let flow = self.run_list(&body);
+            self.restore_locals();
             self.positional = saved;
             return match flow {
                 Flow::Return(code) => Flow::Status(code),
@@ -946,7 +957,9 @@ impl Shell {
 
         if let Some(body) = self.funcs.get(&prepared.argv[0]).cloned() {
             let saved = std::mem::replace(&mut self.positional, prepared.argv[1..].to_vec());
+            self.local_scopes.push(Vec::new());
             let flow = self.run_list(&body);
+            self.restore_locals();
             self.positional = saved;
             return match flow {
                 Flow::Return(code) => code,
@@ -1502,6 +1515,7 @@ impl Shell {
             "wait" => Some(Flow::Status(self.wait_builtin(&words[1..]))),
             "kill" => Some(Flow::Status(self.kill_builtin(&words[1..]))),
             "declare" => Some(Flow::Status(self.declare(&words[1..]))),
+            "local" => Some(Flow::Status(self.local(&words[1..]))),
             "z" => Some(Flow::Status(self.z_builtin(&words[1..], false))),
             "zi" => Some(Flow::Status(self.z_builtin(&words[1..], true))),
             "reload" => Some(Flow::Status(self.reload())),
@@ -1680,6 +1694,120 @@ impl Shell {
             }
         }
         0
+    }
+
+    fn local(&mut self, args: &[String]) -> i32 {
+        if self.local_scopes.is_empty() {
+            eprintln!("sharky: local: can only be used in a function");
+            return 1;
+        }
+
+        let mut kind = None;
+        let mut index = 0;
+        while index < args.len() {
+            let argument = args[index].as_str();
+            if argument == "--" {
+                index += 1;
+                break;
+            }
+            let Some(option) = argument.strip_prefix('-') else {
+                break;
+            };
+            if option.is_empty() {
+                break;
+            }
+            match option {
+                "a" => kind = Some(false),
+                "A" => kind = Some(true),
+                other => {
+                    eprintln!("sharky: local: -{other}: unsupported option");
+                    return 2;
+                }
+            }
+            index += 1;
+        }
+
+        if index >= args.len() {
+            eprintln!("sharky: local: usage: local [-a|-A] name[=value] ...");
+            return 2;
+        }
+
+        let mut status = 0;
+        for argument in &args[index..] {
+            let (name, value) = match argument.split_once('=') {
+                Some((name, value)) => (name, Some(value.to_string())),
+                None => (argument.as_str(), None),
+            };
+            if !is_valid_array_name(name) {
+                eprintln!("sharky: local: {name}: not a valid identifier");
+                status = 1;
+                continue;
+            }
+
+            self.save_local(name);
+            self.env.retain(|(key, _)| key != name);
+            self.arrays.remove(name);
+            self.assoc.remove(name);
+            match kind {
+                Some(assoc) => {
+                    if assoc {
+                        self.assoc.insert(name.to_string(), BTreeMap::new());
+                    } else {
+                        self.arrays.insert(name.to_string(), Vec::new());
+                        if let Some(value) = value {
+                            self.set_array_element(name, "0", value);
+                        }
+                    }
+                }
+                None => self.set_var(name, value.unwrap_or_default()),
+            }
+        }
+        status
+    }
+
+    fn save_local(&mut self, name: &str) {
+        let already_saved = self
+            .local_scopes
+            .last()
+            .is_some_and(|frame| frame.iter().any(|saved| saved.name == name));
+        if already_saved {
+            return;
+        }
+
+        let var = self
+            .env
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone());
+        let saved = SavedLocal {
+            name: name.to_string(),
+            var,
+            array: self.arrays.get(name).cloned(),
+            assoc: self.assoc.get(name).cloned(),
+        };
+        if let Some(frame) = self.local_scopes.last_mut() {
+            frame.push(saved);
+        }
+    }
+
+    fn restore_locals(&mut self) {
+        let Some(frame) = self.local_scopes.pop() else {
+            return;
+        };
+        for saved in frame.into_iter().rev() {
+            self.env.retain(|(key, _)| key != &saved.name);
+            self.arrays.remove(&saved.name);
+            self.assoc.remove(&saved.name);
+            if let Some(value) = saved.var {
+                self.env.push((saved.name.clone(), value));
+            }
+            if let Some(values) = saved.array {
+                self.arrays.insert(saved.name.clone(), values);
+            }
+            if let Some(values) = saved.assoc {
+                self.assoc.insert(saved.name.clone(), values);
+            }
+        }
     }
 
     fn set_array(&mut self, name: &str, values: Vec<String>, append: bool) {
@@ -4022,6 +4150,7 @@ fn is_builtin_name(name: &str) -> bool {
             | "reload"
             | "shift"
             | "declare"
+            | "local"
             | "shopt"
     )
 }

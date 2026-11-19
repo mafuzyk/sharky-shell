@@ -184,3 +184,67 @@ fn nounset_errors_on_an_unset_expansion() {
     assert_eq!(status(&out), 1);
     assert!(String::from_utf8_lossy(&out.stderr).contains("unbound"));
 }
+
+// local: function-scoped variables with dynamic scope.
+
+#[test]
+fn local_restores_the_previous_value_on_return() {
+    let out = sharky(r#"v=outer; f() { local v=inner; printf '%s;' "$v"; }; f; printf '%s' "$v""#);
+    assert_eq!(stdout(&out), "inner;outer");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn local_without_a_value_starts_empty() {
+    let out = sharky(r#"v=outer; f() { local v; printf '[%s]' "$v"; }; f"#);
+    assert_eq!(stdout(&out), "[]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn local_is_visible_to_called_functions() {
+    let out = sharky(
+        r#"g() { printf '%s;' "$v"; }; f() { local v=inner; g; }; v=outer; f; printf '%s' "$v""#,
+    );
+    assert_eq!(stdout(&out), "inner;outer");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn local_unsets_a_previously_unset_binding_on_return() {
+    let out = sharky(
+        r#"unset SHARKY_NEW_A; f() { local SHARKY_NEW_A=x; printf '%s;' "$SHARKY_NEW_A"; }; f; printf '[%s]' "${SHARKY_NEW_A-unset}""#,
+    );
+    assert_eq!(stdout(&out), "x;[unset]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn local_outside_a_function_fails() {
+    let out = sharky("local SHARKY_OUT_A=1");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("local"));
+}
+
+#[test]
+fn local_rejects_an_invalid_name() {
+    let out = sharky("f() { local 1bad=x; }; f");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("local"));
+}
+
+#[test]
+fn local_rejects_an_unsupported_option() {
+    let out = sharky("f() { local -r v=1; }; f");
+    assert_eq!(status(&out), 2);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("local"));
+}
+
+#[test]
+fn local_restores_a_shadowed_array_on_return() {
+    let out = sharky(
+        r#"declare -a a; a[0]=outer; f() { local -a a; a[0]=inner; printf '%s;' "${a[0]}"; }; f; printf '%s' "${a[0]}""#,
+    );
+    assert_eq!(stdout(&out), "inner;outer");
+    assert_eq!(status(&out), 0);
+}
