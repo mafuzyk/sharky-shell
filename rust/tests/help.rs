@@ -23,9 +23,16 @@ fn sharky(args: &[&str]) -> std::process::Output {
         .expect("failed to run sharky")
 }
 
+/// Run the binary with caller-supplied environment overrides.
+///
+/// Deliberately does *not* set `SHARKY_CONFIG`: that variable takes precedence
+/// over `XDG_CONFIG_HOME`/`HOME` in `config_dir()`, so setting it here would
+/// mask any config planted in the XDG location and make config-related
+/// assertions vacuous. Callers that want the legacy isolation pass
+/// `SHARKY_CONFIG` explicitly in `envs`.
 fn sharky_env(args: &[&str], envs: &[(&str, &Path)]) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_sharky"));
-    command.args(args).env("SHARKY_CONFIG", NO_CONFIG);
+    command.args(args);
     for (key, value) in envs {
         command.env(key, value);
     }
@@ -301,23 +308,35 @@ fn cli_help_reads_and_creates_no_configuration() {
     let root = scratch("cli-no-config");
     let config_dir = root.join(".config/sharky");
     std::fs::create_dir_all(&config_dir).unwrap();
-    // Deliberately unparsable configuration in the default location.
+    // Deliberately unparsable configuration in the XDG location. No
+    // SHARKY_CONFIG is set, so config_dir() resolves to this directory.
     std::fs::write(
         config_dir.join("config.sharky"),
         "reef = broken\nnot a directive at all\n",
     )
     .unwrap();
     std::fs::write(config_dir.join("theme.sharky"), "coral\nwave {\n").unwrap();
-    let before = tree(&root);
+    let xdg_config = root.join(".config");
+    let xdg_data = root.join(".local/share");
+    let envs = [
+        ("HOME", root.as_path()),
+        ("XDG_CONFIG_HOME", xdg_config.as_path()),
+        ("XDG_DATA_HOME", xdg_data.as_path()),
+    ];
 
-    let out = sharky_env(
-        &["help"],
-        &[
-            ("HOME", &root),
-            ("XDG_CONFIG_HOME", &root.join(".config")),
-            ("XDG_DATA_HOME", &root.join(".local/share")),
-        ],
+    // Prove the fixture is live: the builtin `-c help` path *does* load
+    // configuration, so the same broken file must surface a config error on
+    // stderr there. If this fails, the "help must not read configuration"
+    // assertion below could pass simply because nothing would be detected.
+    let loaded = sharky_env(&["-c", "help"], &envs);
+    assert!(
+        stderr(&loaded).contains("config error"),
+        "broken config was not detected when loaded: {}",
+        stderr(&loaded)
     );
+
+    let before = tree(&root);
+    let out = sharky_env(&["help"], &envs);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert_eq!(out.stdout, sharky(&["--help"]).stdout);
     assert!(
@@ -327,14 +346,7 @@ fn cli_help_reads_and_creates_no_configuration() {
     );
     assert_eq!(before, tree(&root), "help created files");
 
-    let out = sharky_env(
-        &["help", "cd"],
-        &[
-            ("HOME", &root),
-            ("XDG_CONFIG_HOME", &root.join(".config")),
-            ("XDG_DATA_HOME", &root.join(".local/share")),
-        ],
-    );
+    let out = sharky_env(&["help", "cd"], &envs);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert_eq!(before, tree(&root), "help TOPIC created files");
     std::fs::remove_dir_all(&root).ok();
