@@ -1,4 +1,4 @@
-.TH SHARKY 1 "2026-11-02" "sharky 3.5.4" "User Commands"
+.TH SHARKY 1 "2026-11-19" "sharky 3.6.0" "User Commands"
 .SH NAME
 sharky \- Unix-first interactive shell
 .SH SYNOPSIS
@@ -86,8 +86,9 @@ and theme paths with whether each file exists, the history path with whether it
 exists, and the active compile-time feature flags (\fBnone\fR in this release).
 The paths follow \fBSHARKY_CONFIG\fR, \fBXDG_CONFIG_HOME\fR and \fBHOME\fR for
 configuration and \fBSHARKY_HISTORY\fR, \fBXDG_DATA_HOME\fR and \fBHOME\fR for
-history. Always exits 0. Never prints environment values, configuration values
-or \fBpearl\fR directives, and never writes files.
+history. Exits 0 when its arguments are valid; malformed arguments exit 2. Never
+prints environment values, configuration values or \fBpearl\fR directives, and
+never writes files.
 .TP
 .B doctor
 Run read-only local checks and print one \fBOK\fR or \fBFAIL\fR line per check:
@@ -111,10 +112,12 @@ Print a short usage summary and exit.
 .TP
 .B help \fI[TOPIC [WORD...]]\fR
 With no \fITOPIC\fR, print the same text as \fB\-\-help\fR. With one, join the
-words after \fBhelp\fR with spaces and print that topic. Topics are builtin
-names, command-line flags and subcommands, and the configuration topics of
-\fBconfig explain\fR. An unknown topic exits 1. Runs before the shell starts, so
-no configuration is read or created.
+words after \fBhelp\fR with spaces and print that topic. Topics cover every
+builtin, the \fBstate\fR, \fBconfig explain\fR, \fBstatus\fR and \fBdoctor\fR
+subcommands and the \fB\-c\fR, \fB\-\-check\fR, \fB\-\-json\fR and \fB\-i\fR
+flags, plus the configuration topics of \fBconfig explain\fR. The \fBhelp\fR
+builtin in the shell uses the same registry. An unknown topic exits 1. The
+subcommand runs before the shell starts, so no configuration is read or created.
 .SH LANGUAGE
 The prompt, \fB\-c\fR and script files share one grammar:
 .IP \(bu 2
@@ -133,6 +136,16 @@ tilde expansion and glob patterns;
 \fBshopt \-s globstar\fR enables recursive \fB**\fR matching (off by default),
 \fBshopt \-u globstar\fR restores single\-level globbing, and
 \fBshopt globstar\fR reports \fBon\fR or \fBoff\fR;
+.IP \(bu 2
+\fBlocal\fR declares variables local to a function, with the same
+\fB\-a\fR/\fB\-A\fR forms as \fBdeclare\fR;
+.IP \(bu 2
+\fBmapfile\fR (or its synonym \fBreadarray\fR) reads standard input into an
+indexed array, with \fB\-t\fR stripping the trailing newline;
+.IP \(bu 2
+\fBcommand\fR runs a command while bypassing functions (\fB\-p\fR, \fB\-v\fR and
+\fB\-V\fR control the path search and how a name is reported); the \fBhelp\fR
+builtin prints help for a topic;
 .IP \(bu 2
 pipelines, redirections (\fB>\fR, \fB>>\fR, \fB<\fR, \fB2>&1\fR), \fB;\fR,
 \fB&&\fR and \fB||\fR lists, process substitution (\fB<(list)\fR,
@@ -310,9 +323,9 @@ Searched for commands, extended by \fBcurrent\fR entries.
 .SH EXIT STATUS
 The status of the last command, or the argument of \fBexit\fR. A syntax error
 exits with 2; a command that cannot be found exits with 127; a command that
-cannot be executed exits with 126. \fBstatus\fR always exits 0, \fBdoctor\fR
-exits 1 when a check fails, and malformed subcommand arguments exit 2. An
-unknown \fBhelp\fR topic exits 1.
+cannot be executed exits with 126. \fBstatus\fR exits 0 when its arguments are
+valid, \fBdoctor\fR exits 1 when a check fails, and malformed subcommand
+arguments exit 2. An unknown \fBhelp\fR topic exits 1.
 .SH EXAMPLES
 .nf
     sharky -c 'printf "a b\\n" | wc -w'
