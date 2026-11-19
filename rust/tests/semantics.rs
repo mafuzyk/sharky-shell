@@ -429,3 +429,19 @@ fn default_word_keeps_leading_whitespace() {
     assert_eq!(stdout(&out), "[ a  b]");
     assert_eq!(status(&out), 0);
 }
+
+// Letters after an o in an option cluster are still applied.
+
+#[test]
+fn option_cluster_letters_after_o_are_still_applied() {
+    let out = sharky("set -oe pipefail; false; printf no");
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+}
+
+#[test]
+fn option_cluster_after_o_keeps_pipefail_enabled() {
+    let out = sharky(r#"set -oe pipefail; set +e; false | true; printf '[%s]' "$?""#);
+    assert_eq!(stdout(&out), "[1]");
+    assert_eq!(status(&out), 0);
+}

@@ -2696,6 +2696,8 @@ impl Shell {
                     'x' => self.xtrace = on,
                     'H' => self.histexpand = on,
                     'o' => {
+                        // Like bash, o consumes the next argument as the option
+                        // name and any remaining cluster letters still apply.
                         index += 1;
                         match args.get(index).map(String::as_str) {
                             Some(name) => {
@@ -2707,7 +2709,6 @@ impl Shell {
                             None if on => self.list_options(),
                             None => self.list_option_commands(),
                         }
-                        break;
                     }
                     other => {
                         eprintln!("sharky: set: {sign}{other}: invalid option");
