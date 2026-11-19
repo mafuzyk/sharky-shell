@@ -3499,7 +3499,16 @@ impl Shell {
         if let Some(assoc) = self.assoc.get(&parameter.name) {
             return assoc.keys().cloned().collect::<Vec<_>>().join(&separator);
         }
-        String::new()
+        self.scalar_key(&parameter.name).unwrap_or_default()
+    }
+
+    /// A defined scalar behaves like a one-element array whose only key is 0.
+    /// An undefined name has no keys at all.
+    fn scalar_key(&self, name: &str) -> Option<String> {
+        self.env
+            .iter()
+            .any(|(key, _)| key == name)
+            .then(|| "0".to_string())
     }
 
     /// A parameter expansion that appears inside double quotes in a context
@@ -3802,7 +3811,7 @@ impl Shell {
                             .collect(),
                     );
                 }
-                return Some(Vec::new());
+                return Some(self.scalar_key(&parameter.name).into_iter().collect());
             }
             Some(ParamOp::Names) => {
                 let mut names: Vec<String> = self

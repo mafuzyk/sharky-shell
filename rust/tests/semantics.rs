@@ -500,6 +500,44 @@ fn unset_array_has_no_keys() {
     assert_eq!(status(&out), 0);
 }
 
+// A defined scalar is a one-element array whose only key is 0; an undefined
+// name, or an empty array, has no keys at all.
+
+#[test]
+fn keys_of_a_defined_scalar_are_zero() {
+    let out = sharky(r#"x=hi; printf '[%s][%s]' "${!x[@]}" "${!x[*]}""#);
+    assert_eq!(stdout(&out), "[0][0]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn keys_of_an_empty_scalar_are_still_zero() {
+    let out = sharky(r#"x=; printf '[%s]' "${!x[@]}""#);
+    assert_eq!(stdout(&out), "[0]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn unquoted_keys_of_a_defined_scalar_expand_to_one_word() {
+    let out = sharky(r#"x=hi; set -- ${!x[@]}; printf 'n=%s<%s>' "$#" "$1""#);
+    assert_eq!(stdout(&out), "n=1<0>");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn assigned_keys_of_a_defined_scalar_are_zero() {
+    let out = sharky(r#"x=hi; v="${!x[@]}"; printf '[%s]' "$v""#);
+    assert_eq!(stdout(&out), "[0]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn keys_of_an_undefined_name_expand_to_nothing() {
+    let out = sharky(r#"unset u; set -- ${!u[@]}; printf 'n=%s[%s]' "$#" "${!u[*]}""#);
+    assert_eq!(stdout(&out), "n=0[]");
+    assert_eq!(status(&out), 0);
+}
+
 #[test]
 fn array_key_counts_match_the_element_counts() {
     let out = sharky(r#"IFS=:; a=(x y); printf '%s%s' "${#a[*]}" "${#a[@]}""#);
