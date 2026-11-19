@@ -599,6 +599,10 @@ impl Shell {
 
         let mut pids = Vec::with_capacity(pipeline.commands.len());
         let mut leader: Option<Pid> = None;
+        let pipe_fds: Vec<RawFd> = pipes
+            .iter()
+            .flat_map(|pair| [pair.0.as_raw_fd(), pair.1.as_raw_fd()])
+            .collect();
         for (index, command) in pipeline.commands.iter().enumerate() {
             let stdin = index.checked_sub(1).map(|i| pipes[i].0.as_raw_fd());
             let stdout = pipes.get(index).map(|pair| pair.1.as_raw_fd());
@@ -637,6 +641,18 @@ impl Shell {
                         && move_fd(fd, 1).is_err()
                     {
                         unsafe { _exit(126) }
+                    }
+                    // Shell code in this child never execs, so O_CLOEXEC never
+                    // fires: close every pipeline end except the ones dup'd
+                    // onto 0 and 1, or the child keeps its own pipe open and
+                    // `read` never sees EOF. Matching on the source fd number
+                    // keeps this exact if pipe2 ever hands out 0 or 1.
+                    for fd in &pipe_fds {
+                        let kept = (*fd == 0 && stdin == Some(*fd))
+                            || (*fd == 1 && stdout == Some(*fd));
+                        if !kept {
+                            let _ = close(*fd);
+                        }
                     }
                     let code = self.run_command_child(command);
                     unsafe { _exit(code) }
