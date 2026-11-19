@@ -867,3 +867,143 @@ fn here_document_joins_array_elements_with_a_space() {
     assert_eq!(stdout(&out), "[k1 k2]\n");
     assert_eq!(status(&out), 0);
 }
+
+// `read` splits on IFS like word splitting, except that the last name receives
+// the remainder of the line with its delimiters. Leading IFS whitespace is
+// skipped and trailing IFS whitespace is dropped.
+
+#[test]
+fn read_splits_on_a_custom_ifs_delimiter() {
+    let out = sharky(r#"IFS=,; printf 'a,b\n' | { read x y; printf '%s|%s' "$x" "$y"; }"#);
+    assert_eq!(stdout(&out), "a|b");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn read_gives_the_last_name_the_remainder_with_delimiters() {
+    let out = sharky(r#"IFS=,; printf 'a,b,c\n' | { read x y; printf '[%s][%s]' "$x" "$y"; }"#);
+    assert_eq!(stdout(&out), "[a][b,c]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn read_keeps_empty_fields_between_non_whitespace_delimiters() {
+    let out = sharky(
+        r#"IFS=:; printf 'a::b:\n' | { read x y z; printf '[%s][%s][%s]' "$x" "$y" "$z"; }"#,
+    );
+    assert_eq!(stdout(&out), "[a][][b]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn read_drops_trailing_ifs_whitespace_from_the_last_name() {
+    let out = sharky(r#"printf '  a  b  c  \n' | { read x y; printf '[%s][%s]' "$x" "$y"; }"#);
+    assert_eq!(stdout(&out), "[a][b  c]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn read_treats_ifs_whitespace_next_to_a_delimiter_as_one_separator() {
+    let out = sharky(r#"IFS=' ,'; printf 'a , b\n' | { read x y; printf '[%s][%s]' "$x" "$y"; }"#);
+    assert_eq!(stdout(&out), "[a][b]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn read_with_a_leading_delimiter_produces_an_empty_field() {
+    let out = sharky(r#"IFS=' ,'; printf ', a,b\n' | { read x y; printf '[%s][%s]' "$x" "$y"; }"#);
+    assert_eq!(stdout(&out), "[][a,b]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn read_with_an_empty_ifs_keeps_the_line_whole() {
+    let out = sharky(r#"IFS=; printf ' a b \n' | { read x y; printf '[%s][%s]' "$x" "$y"; }"#);
+    assert_eq!(stdout(&out), "[ a b ][]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn read_without_names_keeps_the_line_verbatim_in_reply() {
+    let out = sharky(r#"printf '  a  \n' | { read; printf '[%s]' "$REPLY"; }"#);
+    assert_eq!(stdout(&out), "[  a  ]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn read_into_a_named_reply_still_splits() {
+    let out = sharky(r#"printf '  a  \n' | { read REPLY; printf '[%s]' "$REPLY"; }"#);
+    assert_eq!(stdout(&out), "[a]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn read_consumes_one_trailing_delimiter_of_the_remainder() {
+    let out = sharky(r#"IFS=,; printf 'a,b,\n' | { read x y; printf '[%s][%s]' "$x" "$y"; }"#);
+    assert_eq!(stdout(&out), "[a][b]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn read_keeps_a_remainder_that_does_not_end_in_a_delimiter() {
+    let out = sharky(r#"IFS=,; printf 'a,b,,\n' | { read x y; printf '[%s][%s]' "$x" "$y"; }"#);
+    assert_eq!(stdout(&out), "[a][b,,]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn read_fills_every_name_when_fields_run_out() {
+    let out = sharky(
+        r#"IFS=,; printf 'a,b,c\n' | { read w x y z; printf '[%s][%s][%s][%s]' "$w" "$x" "$y" "$z"; }"#,
+    );
+    assert_eq!(stdout(&out), "[a][b][c][]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn read_keeps_a_tab_when_it_is_not_in_ifs() {
+    let out = sharky(
+        r#"IFS=' '; printf 'x\t y\n' | { read a b; printf '[%s][%s]' "$a" "$b"; }"#,
+    );
+    assert_eq!(stdout(&out), "[x\t][y]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn read_keeps_a_space_that_is_not_an_ifs_delimiter() {
+    let out = sharky(r#"IFS=,; printf 'a, b\n' | { read x y; printf '[%s][%s]' "$x" "$y"; }"#);
+    assert_eq!(stdout(&out), "[a][ b]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn read_with_one_name_keeps_the_line_but_trims_ifs_whitespace() {
+    let out = sharky(r#"IFS=:; printf 'a:\n' | { read x; printf '[%s]' "$x"; }"#);
+    assert_eq!(stdout(&out), "[a]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn read_r_splits_on_ifs_without_escapes() {
+    let out = sharky(r#"IFS=,; printf 'a,b\n' | { read -r x y; printf '[%s][%s]' "$x" "$y"; }"#);
+    assert_eq!(stdout(&out), "[a][b]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn read_keeps_an_escaped_delimiter_in_the_field() {
+    let out = sharky(
+        r#"IFS=,; printf 'a\\,b\n' | { read x y; printf '[%s][%s]' "$x" "$y"; }"#,
+    );
+    assert_eq!(stdout(&out), "[a,b][]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn mapfile_stays_line_based_with_a_custom_ifs() {
+    let out = sharky(
+        r#"IFS=,; printf 'a,b\nc,d\n' | { mapfile -t arr; printf '[%s][%s]' "${arr[0]}" "${arr[1]}"; }"#,
+    );
+    assert_eq!(stdout(&out), "[a,b][c,d]");
+    assert_eq!(status(&out), 0);
+}

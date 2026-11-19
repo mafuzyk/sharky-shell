@@ -2619,7 +2619,10 @@ impl Shell {
         } else {
             args.to_vec()
         };
-        let names = if names.is_empty() {
+        // Without names the whole line is stored in REPLY untrimmed; a named
+        // REPLY goes through the usual splitting path.
+        let implicit_reply = names.is_empty();
+        let names = if implicit_reply {
             vec!["REPLY".to_string()]
         } else {
             names
@@ -2639,7 +2642,14 @@ impl Shell {
         }
 
         let ended = line.ends_with('\n');
-        let fields = split_read_fields(&line, !raw, names.len());
+        if ended {
+            line.pop();
+        }
+        let fields = if implicit_reply {
+            vec![dequote_read_line(&line, !raw)]
+        } else {
+            split_read_fields(&line, &self.field_separators(), !raw, names.len())
+        };
         for (name, value) in names.iter().zip(fields) {
             self.set_var(name, value);
         }
@@ -4521,58 +4531,123 @@ fn read_stdin_line() -> Option<String> {
     }
 }
 
-fn split_read_fields(line: &str, escapes: bool, count: usize) -> Vec<String> {
-    let mut chars = line.chars().peekable();
-    let mut fields = Vec::new();
-    let mut current = String::new();
-    let mut started = false;
-
-    while let Some(&char) = chars.peek() {
-        if char == ' ' || char == '\t' || char == '\n' {
-            chars.next();
+fn dequote_read_line(line: &str, escapes: bool) -> String {
+    if !escapes {
+        return line.to_string();
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(char) = chars.next() {
+        if char == '\\' {
+            if let Some(next) = chars.next() {
+                out.push(next);
+            }
         } else {
+            out.push(char);
+        }
+    }
+    out
+}
+
+/// Split a line for `read` as bash does: leading IFS whitespace is skipped,
+/// every name but the last takes a field, and the last name receives the rest of
+/// the line with its delimiters. A trailing IFS character ends the remainder.
+fn split_read_fields(line: &str, ifs: &str, escapes: bool, count: usize) -> Vec<String> {
+    // Mark escaped characters so they never act as delimiters.
+    let mut chars: Vec<(char, bool)> = Vec::with_capacity(line.len());
+    let mut source = line.chars();
+    while let Some(char) = source.next() {
+        if escapes && char == '\\' {
+            if let Some(next) = source.next() {
+                chars.push((next, true));
+            }
+            continue;
+        }
+        chars.push((char, false));
+    }
+
+    let ifs: Vec<char> = ifs.chars().collect();
+    let is_ifs = |char: char| ifs.contains(&char);
+    let is_ifs_space = |char: char| is_ifs(char) && matches!(char, ' ' | '\t' | '\n');
+
+    let mut start = 0;
+    while start < chars.len() && !chars[start].1 && is_ifs_space(chars[start].0) {
+        start += 1;
+    }
+
+    let mut fields = Vec::new();
+    let mut position = start;
+    for _ in 0..count.saturating_sub(1) {
+        if position >= chars.len() {
+            fields.push(String::new());
+            continue;
+        }
+        let (word, next) = read_word(&chars, position, &is_ifs, &is_ifs_space);
+        fields.push(word);
+        position = next;
+    }
+
+    let last = if position >= chars.len() {
+        String::new()
+    } else {
+        let (word, next) = read_word(&chars, position, &is_ifs, &is_ifs_space);
+        if next >= chars.len() {
+            word
+        } else {
+            strip_trailing_ifs_space(&chars[position..], &is_ifs_space)
+        }
+    };
+    fields.push(last);
+    fields
+}
+
+/// Take one IFS-delimited word and advance past its delimiter. A delimiter is a
+/// run of IFS whitespace, at most one non-whitespace IFS character, and the IFS
+/// whitespace after it.
+fn read_word(
+    chars: &[(char, bool)],
+    start: usize,
+    is_ifs: &impl Fn(char) -> bool,
+    is_ifs_space: &impl Fn(char) -> bool,
+) -> (String, usize) {
+    let mut end = start;
+    while end < chars.len() && (chars[end].1 || !is_ifs(chars[end].0)) {
+        end += 1;
+    }
+    let word = chars[start..end].iter().map(|(char, _)| *char).collect();
+
+    let mut next = end;
+    if next >= chars.len() || chars[next].1 {
+        return (word, next);
+    }
+    let delimiter = chars[next].0;
+    if is_ifs_space(delimiter) {
+        while next < chars.len() && !chars[next].1 && is_ifs_space(chars[next].0) {
+            next += 1;
+        }
+        if next >= chars.len() || chars[next].1 || !is_ifs(chars[next].0) {
+            return (word, next);
+        }
+    } else if !is_ifs(delimiter) {
+        return (word, next);
+    }
+    next += 1;
+    while next < chars.len() && !chars[next].1 && is_ifs_space(chars[next].0) {
+        next += 1;
+    }
+    (word, next)
+}
+
+fn strip_trailing_ifs_space(chars: &[(char, bool)], is_ifs_space: &impl Fn(char) -> bool) -> String {
+    let mut end = chars.len();
+    while end > 0 {
+        let (char, escaped) = chars[end - 1];
+        if escaped || !is_ifs_space(char) {
             break;
         }
+        end -= 1;
     }
-
-    while let Some(char) = chars.next() {
-        if escapes && char == '\\' {
-            if let Some(next) = chars.next() {
-                current.push(next);
-                started = true;
-            }
-            continue;
-        }
-
-        if (char == ' ' || char == '\t' || char == '\n') && fields.len() + 1 < count {
-            if started {
-                fields.push(std::mem::take(&mut current));
-                started = false;
-            }
-            while let Some(&next) = chars.peek() {
-                if next == ' ' || next == '\t' || next == '\n' {
-                    chars.next();
-                } else {
-                    break;
-                }
-            }
-            continue;
-        }
-
-        current.push(char);
-        started = true;
-    }
-
-    if started || fields.len() < count {
-        while current.ends_with([' ', '\t', '\n']) {
-            current.pop();
-        }
-        fields.push(current);
-    }
-    while fields.len() < count {
-        fields.push(String::new());
-    }
-    fields
+    chars[..end].iter().map(|(char, _)| *char).collect()
 }
 
 fn temp_file(text: &str) -> Result<std::fs::File, String> {
