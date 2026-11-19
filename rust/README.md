@@ -1,8 +1,9 @@
 # sharky (Rust)
 
-An interactive Unix shell written in Rust. This directory is the v3
-implementation; the Ruby v1 tree at the repository root is frozen at tag
-`v1-ruby` and only serves as the behavioural oracle for the differential tests.
+An interactive Unix shell written in Rust. This is the v3 implementation and
+the source of truth. The Ruby v1 tree is frozen at tag `v1-ruby` and is not
+published here; keep a local checkout at `../.ruby-oracle/` only when you need
+the behavioural oracle for the differential tests.
 
 Status: alpha, an ongoing stage of maturity shipped through the normal release
 channel; using sharky as a login shell is not recommended during alpha. 3.5 adds
