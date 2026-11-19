@@ -8,8 +8,29 @@ permissions:
   contents: write
 
 jobs:
+  version-guard:
+    name: Version guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check tag matches manifest version
+        run: |
+          expected="${GITHUB_REF_NAME#v}"
+          manifest="$(awk -F'"' '/^version[[:space:]]*=/ { print $2; exit }' rust/Cargo.toml)"
+          if [ -z "$manifest" ]; then
+            echo "::error::Could not parse version from rust/Cargo.toml"
+            exit 1
+          fi
+          if [ "$expected" != "$manifest" ]; then
+            echo "::error::Tag version '$expected' does not match rust/Cargo.toml version '$manifest'"
+            exit 1
+          fi
+          echo "Tag version '$expected' matches rust/Cargo.toml version '$manifest'"
+
   test:
     name: Test gate
+    needs: version-guard
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -25,7 +46,7 @@ jobs:
 
   binary:
     name: Static binary
-    needs: test
+    needs: [version-guard, test]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
