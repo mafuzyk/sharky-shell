@@ -171,3 +171,217 @@ fn globstar_does_not_descend_into_symlinked_dirs() {
         ]
     );
 }
+
+fn nested_fixture() -> std::path::PathBuf {
+    let dir = temp_dir();
+    std::fs::create_dir_all(dir.join("topdir/sub")).unwrap();
+    std::fs::create_dir_all(dir.join("realdir")).unwrap();
+    std::fs::create_dir_all(dir.join("work")).unwrap();
+    std::fs::write(dir.join("a.txt"), "").unwrap();
+    std::fs::write(dir.join("topdir/b.txt"), "").unwrap();
+    std::fs::write(dir.join("topdir/sub/c.txt"), "").unwrap();
+    std::fs::write(dir.join("realdir/d.txt"), "").unwrap();
+    std::os::unix::fs::symlink("a.txt", dir.join("link.txt")).unwrap();
+    std::os::unix::fs::symlink("topdir", dir.join("linkdir")).unwrap();
+    std::os::unix::fs::symlink("a.txt", dir.join("literal")).unwrap();
+    std::os::unix::fs::symlink("../realdir", dir.join("topdir/sym")).unwrap();
+    dir
+}
+
+// Bash 5.3.20 reference observations encoded below:
+// - a leading ** never descends symlinked dirs, but a final component still matches symlink entries;
+// - ** after a prefix (topdir/, ./, ../) does descend symlinked dirs;
+// - terminal ** includes the base dir, while **/** drops its trailing slash unless followed by /.
+#[test]
+fn dot_prefixed_globstar_keeps_prefix_and_follows_symlink_dirs() {
+    let dir = nested_fixture();
+    let out = sharky_in(
+        &dir,
+        &["-c", r#"shopt -s globstar; printf '%s\n' ./**/*.txt"#],
+    );
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        sorted_lines(&out),
+        vec![
+            "./a.txt",
+            "./link.txt",
+            "./linkdir/b.txt",
+            "./realdir/d.txt",
+            "./topdir/b.txt",
+            "./topdir/sub/c.txt",
+            "./topdir/sym/d.txt",
+        ]
+    );
+}
+
+#[test]
+fn parent_prefixed_globstar_keeps_prefix_and_follows_symlink_dirs() {
+    let dir = nested_fixture();
+    let out = sharky_in(
+        &dir.join("work"),
+        &["-c", r#"shopt -s globstar; printf '%s\n' ../**/*.txt"#],
+    );
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        sorted_lines(&out),
+        vec![
+            "../a.txt",
+            "../link.txt",
+            "../linkdir/b.txt",
+            "../realdir/d.txt",
+            "../topdir/b.txt",
+            "../topdir/sub/c.txt",
+            "../topdir/sym/d.txt",
+        ]
+    );
+}
+
+#[test]
+fn terminal_globstar_includes_the_base_directory() {
+    let dir = nested_fixture();
+    let out = sharky_in(&dir, &["-c", r#"shopt -s globstar; printf '%s\n' topdir/**"#]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        sorted_lines(&out),
+        vec![
+            "topdir/",
+            "topdir/b.txt",
+            "topdir/sub",
+            "topdir/sub/c.txt",
+            "topdir/sym",
+        ]
+    );
+
+    let out = sharky_in(&dir, &["-c", r#"shopt -s globstar; printf '%s\n' topdir/**/"#]);
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        sorted_lines(&out),
+        vec!["topdir/", "topdir/sub/", "topdir/sym/"]
+    );
+}
+
+#[test]
+fn leading_globstar_slash_lists_symlink_dirs_without_descending() {
+    let dir = nested_fixture();
+    let out = sharky_in(&dir, &["-c", r#"shopt -s globstar; printf '%s\n' **/"#]);
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        sorted_lines(&out),
+        vec![
+            "linkdir/",
+            "realdir/",
+            "topdir/",
+            "topdir/sub/",
+            "topdir/sym/",
+            "work/",
+        ]
+    );
+}
+
+#[test]
+fn symlink_entries_match_but_leading_globstar_does_not_descend_them() {
+    let dir = nested_fixture();
+    let out = sharky_in(&dir, &["-c", r#"shopt -s globstar; printf '%s\n' **/literal"#]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(sorted_lines(&out), vec!["literal"]);
+
+    let out = sharky_in(&dir, &["-c", r#"shopt -s globstar; printf '%s\n' **/*.txt"#]);
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        sorted_lines(&out),
+        vec![
+            "a.txt",
+            "link.txt",
+            "realdir/d.txt",
+            "topdir/b.txt",
+            "topdir/sub/c.txt",
+        ]
+    );
+}
+
+#[test]
+fn consecutive_globstars_match_the_single_star_set() {
+    let dir = nested_fixture();
+    let cases = [
+        (
+            r#"shopt -s globstar; printf '%s\n' **/**/*.txt"#,
+            vec![
+                "a.txt",
+                "link.txt",
+                "realdir/d.txt",
+                "topdir/b.txt",
+                "topdir/sub/c.txt",
+            ],
+        ),
+        (
+            r#"shopt -s globstar; printf '%s\n' **/**/"#,
+            vec![
+                "linkdir/",
+                "realdir/",
+                "topdir/",
+                "topdir/sub/",
+                "topdir/sym/",
+                "work/",
+            ],
+        ),
+        (
+            r#"shopt -s globstar; printf '%s\n' **/**"#,
+            vec![
+                "a.txt",
+                "link.txt",
+                "linkdir",
+                "literal",
+                "realdir",
+                "realdir/d.txt",
+                "topdir",
+                "topdir/b.txt",
+                "topdir/sub",
+                "topdir/sub/c.txt",
+                "topdir/sym",
+                "work",
+            ],
+        ),
+    ];
+    for (script, expected) in cases {
+        let out = sharky_in(&dir, &["-c", script]);
+        assert_eq!(out.status.code(), Some(0), "{script}: {out:?}");
+        assert_eq!(sorted_lines(&out), expected, "{script}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn consecutive_terminal_globstar_drops_the_base_slash() {
+    let dir = nested_fixture();
+    let out = sharky_in(
+        &dir,
+        &["-c", r#"shopt -s globstar; printf '%s\n' topdir/**/**"#],
+    );
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        sorted_lines(&out),
+        vec![
+            "topdir",
+            "topdir/b.txt",
+            "topdir/sub",
+            "topdir/sub/c.txt",
+            "topdir/sym",
+        ]
+    );
+
+    let out = sharky_in(
+        &dir,
+        &["-c", r#"shopt -s globstar; printf '%s\n' topdir/**/**/"#],
+    );
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        sorted_lines(&out),
+        vec!["topdir/", "topdir/sub/", "topdir/sym/"]
+    );
+}
