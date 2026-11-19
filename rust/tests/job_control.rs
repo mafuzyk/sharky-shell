@@ -9,6 +9,8 @@ use nix::sys::termios::Termios;
 use nix::sys::wait::waitpid;
 use nix::unistd::{Pid, execve};
 
+mod common;
+
 struct Session {
     child: Pid,
     master: std::os::fd::OwnedFd,
@@ -18,10 +20,12 @@ impl Session {
     fn start() -> Self {
         let path = CString::new(env!("CARGO_BIN_EXE_sharky")).unwrap();
         let argv = [CString::new("sharky").unwrap()];
+        let search_path = CString::new(format!("PATH={}", common::tool_path().to_string_lossy()))
+            .expect("PATH must not contain NUL bytes");
         let env = [
             CString::new("SHARKY_CONFIG=/nonexistent/sharky-test").unwrap(),
             CString::new("HOME=/tmp").unwrap(),
-            CString::new("PATH=/usr/bin:/bin").unwrap(),
+            search_path,
             CString::new("TERM=xterm").unwrap(),
         ];
 
