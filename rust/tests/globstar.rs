@@ -356,6 +356,37 @@ fn consecutive_globstars_match_the_single_star_set() {
 }
 
 #[test]
+fn non_directory_terminal_base_stays_literal() {
+    let dir = nested_fixture();
+    for pattern in ["a.txt/**", "a.txt/**/", "link.txt/**", "literal/**"] {
+        let script = format!("shopt -s globstar; printf '<%s>' {pattern}");
+        let out = sharky_in(&dir, &["-c", &script]);
+        assert_eq!(out.status.code(), Some(0), "{script}: {out:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!("<{pattern}>"),
+            "{script}"
+        );
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn nonconsecutive_globstars_descend_symlink_dirs_after_a_prefix() {
+    let dir = nested_fixture();
+    let out = sharky_in(
+        &dir,
+        &["-c", r#"shopt -s globstar; printf '%s\n' **/topdir/**/*.txt"#],
+    );
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        sorted_lines(&out),
+        vec!["topdir/b.txt", "topdir/sub/c.txt", "topdir/sym/d.txt"]
+    );
+}
+
+#[test]
 fn terminal_globstar_base_slash_requires_a_literal_prefix() {
     let dir = nested_fixture();
     let cases = [
