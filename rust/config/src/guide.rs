@@ -8,13 +8,30 @@ use crate::{ACTIONS, INSTRUCTIONS, KEY_PREFIXES, NAMED_KEYS, TIDE_FLAGS, TIDE_NU
 pub const INDEX: &[(&str, &str)] = &[
     ("index", "Configuration guide"),
     ("directives", "Parser directives"),
-    ("tide", "Tide settings and defaults"),
+    ("tide", "tide — shell preferences and defaults"),
+    ("pearl", "pearl — environment variable"),
+    ("current", "current — PATH entry"),
+    ("reef", "reef — alias"),
+    ("shoal", "shoal — abbreviation"),
+    ("anchor", "anchor — key binding"),
+    ("coral", "coral — colour definition"),
+    ("wave", "wave — prompt or style"),
+    ("wake", "wake — startup command"),
     ("tide history", "tide history"),
-    ("anchor", "Key bindings and actions"),
     ("files", "config.sharky and theme.sharky"),
     ("theme", "Palette, prompt and styles"),
     ("overwrite", "Overwrite target styling"),
 ];
+
+/// Plain-text index: one `id  title` line per topic, for `sharky explain`.
+pub fn index_text() -> String {
+    let width = INDEX.iter().map(|(id, _)| id.len()).max().unwrap_or(0);
+    let mut out = String::from("Configuration guide topics (sharky explain TOPIC):\n");
+    for (id, title) in INDEX {
+        out.push_str(&format!("{id:<width$}  {title}\n"));
+    }
+    out
+}
 
 /// Human text for a topic id from [`INDEX`], or `None` for an unknown id.
 pub fn topic(id: &str) -> Option<String> {
@@ -87,6 +104,48 @@ pub fn topic(id: &str) -> Option<String> {
                 key = TIDE_NUMBER
             ))
         }
+        "pearl" => Some(
+            "`pearl NAME value` sets an environment variable for the shell and its children. \
+             NAME is a bare word and the value may be double quoted. A line with no name is \
+             rejected; several pearl lines set several variables."
+                .to_string(),
+        ),
+        "current" => Some(
+            "`current directory` prepends one directory to PATH. Quote a directory that contains \
+             spaces. Multiple current lines are applied in order, so the last directory listed \
+             ends up first in PATH."
+                .to_string(),
+        ),
+        "reef" => Some(
+            "`reef name command` defines an alias. The command may be double quoted when it \
+             contains spaces. Aliases expand when the name is used as a command."
+                .to_string(),
+        ),
+        "shoal" => Some(
+            "`shoal abbreviation expansion` defines an abbreviation for the line editor: typing \
+             the abbreviation and then pressing space or Enter expands it. Quote an expansion \
+             that contains spaces. Abbreviations affect typed input, not scripts."
+                .to_string(),
+        ),
+        "wake" => Some(
+            "`wake command` registers one command to run at interactive startup, before the first \
+             prompt. Quote a command that contains spaces. Multiple wake lines append and all run; \
+             a non-interactive shell does not run them."
+                .to_string(),
+        ),
+        "coral" => Some(
+            "`coral name #RRGGBB` defines a colour, normally in theme.sharky. The value must be six \
+             hexadecimal digits after #; the name can then be used as @name in a wave style. \
+             Defining a colour twice keeps the last value."
+                .to_string(),
+        ),
+        "wave" => Some(
+            "`wave key value` sets a prompt template or a style, normally in theme.sharky. Styles \
+             reference a colour with @name and an undefined reference is an error. Prompt \
+             placeholders are {cwd}, {symbol}, {status}, {user} and {host}. `wave overwrite` is the \
+             optional style for redirect targets."
+                .to_string(),
+        ),
         "tide history" => Some(format!(
             "`tide {key} N` sets how many command lines Sharky keeps. N must be a non-negative \
              integer; an unset key or 0 falls back to 1000.\n\
@@ -145,6 +204,27 @@ mod tests {
             assert!(!title.is_empty(), "{id} has no title");
             let text = topic(id).unwrap_or_else(|| panic!("no text for {id}"));
             assert!(!text.trim().is_empty(), "{id} has no text");
+        }
+    }
+
+    #[test]
+    fn index_text_is_plain_text_and_lists_every_topic() {
+        let index = index_text();
+        assert!(!index.contains('{'), "index must not be JSON: {index}");
+        for (id, title) in INDEX {
+            assert!(index.contains(id), "index missing id {id}");
+            assert!(index.contains(title), "index missing title {title}");
+        }
+    }
+
+    #[test]
+    fn every_recognized_directive_has_a_discoverable_topic() {
+        for name in INSTRUCTIONS {
+            assert!(
+                INDEX.iter().any(|(id, _)| id == name),
+                "{name} is missing from the index"
+            );
+            assert!(topic(name).is_some(), "{name} has no topic text");
         }
     }
 
