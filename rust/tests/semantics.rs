@@ -74,3 +74,51 @@ fn unset_parameter_error_without_a_colon_aborts() {
     assert_eq!(status(&out), 1);
     assert!(String::from_utf8_lossy(&out.stderr).contains("boom"));
 }
+
+// Unquoted expansions split their result on IFS; quoted expansions never do.
+
+#[test]
+fn unquoted_parameter_splits_on_ifs() {
+    let out = sharky(
+        r#"IFS=,; v=a,b,c; set -- $v; printf '%s' "$#"; printf '<%s>' "$@""#,
+    );
+    assert_eq!(stdout(&out), "3<a><b><c>");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn quoted_parameter_does_not_split_on_ifs() {
+    let out = sharky(r#"IFS=,; v=a,b; set -- "$v"; printf '%s' "$#"; printf '<%s>' "$@""#);
+    assert_eq!(stdout(&out), "1<a,b>");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn empty_ifs_disables_field_splitting() {
+    let out = sharky(r#"IFS=; v='a b'; set -- $v; printf '%s' "$#"; printf '<%s>' "$@""#);
+    assert_eq!(stdout(&out), "1<a b>");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn ifs_keeps_empty_fields_between_repeated_delimiters() {
+    let out = sharky(
+        r#"IFS=,; v=a,,b; set -- $v; printf '%s' "$#"; printf '<%s>' "$@""#,
+    );
+    assert_eq!(stdout(&out), "3<a><><b>");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn default_ifs_still_splits_on_whitespace() {
+    let out = sharky(r#"v='a b'; set -- $v; printf '%s' "$#"; printf '<%s>' "$@""#);
+    assert_eq!(stdout(&out), "2<a><b>");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn literal_text_is_not_split_on_ifs() {
+    let out = sharky(r#"IFS=,; printf '<%s>' a,b"#);
+    assert_eq!(stdout(&out), "<a,b>");
+    assert_eq!(status(&out), 0);
+}

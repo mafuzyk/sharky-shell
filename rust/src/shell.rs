@@ -1529,6 +1529,20 @@ impl Shell {
         self.var(name)
     }
 
+    fn field_separators(&self) -> String {
+        match self.env.iter().find(|(key, _)| key == "IFS") {
+            Some((_, value)) => value.clone(),
+            None => " \t\n".to_string(),
+        }
+    }
+
+    fn ifs_first_char(&self) -> char {
+        match self.env.iter().find(|(key, _)| key == "IFS") {
+            Some((_, value)) => value.chars().next().unwrap_or(' '),
+            None => ' ',
+        }
+    }
+
     pub fn var(&self, name: &str) -> String {
         if !name.is_empty() && name.chars().all(|char| char.is_ascii_digit()) {
             if name == "0" {
@@ -1555,7 +1569,8 @@ impl Shell {
                     .map(|pid| pid.to_string())
                     .unwrap_or_default();
             }
-            "@" | "*" => return self.positional.join(" "),
+            "@" => return self.positional.join(" "),
+            "*" => return self.positional.join(&self.ifs_first_char().to_string()),
             _ => {}
         }
 
@@ -2608,11 +2623,11 @@ impl Shell {
             return fields;
         }
 
-        let mut fields = Fields::new();
+        let mut fields = Fields::new(&self.field_separators());
 
         for part in &word.parts {
             match part {
-                Part::Literal(text) => fields.push(text, false),
+                Part::Literal(text) => fields.literal(text),
                 Part::Single(text) | Part::Escaped(text) => fields.push(text, true),
                 Part::Tilde => {
                     let home = self.var("HOME");
@@ -2649,7 +2664,8 @@ impl Shell {
                     fields.field_multi(&self.positional, false);
                 }
                 Part::Variable(name) if name == "*" => {
-                    fields.push(&self.positional.join(" "), false);
+                    let value = self.var("*");
+                    fields.push(&value, false);
                 }
                 Part::Variable(name) => {
                     let value = self.expansion_var(name);
@@ -4269,15 +4285,46 @@ struct Fields {
     current: String,
     started: bool,
     glob: bool,
+    split: bool,
+    whitespace: Vec<char>,
+    separators: Vec<char>,
 }
 
 impl Fields {
-    fn new() -> Self {
+    fn new(ifs: &str) -> Self {
+        let mut whitespace = Vec::new();
+        let mut separators = Vec::new();
+        for separator in ifs.chars() {
+            if separator.is_whitespace() {
+                whitespace.push(separator);
+            } else {
+                separators.push(separator);
+            }
+        }
         Fields {
             done: Vec::new(),
             current: String::new(),
             started: false,
             glob: false,
+            split: !ifs.is_empty(),
+            whitespace,
+            separators,
+        }
+    }
+
+    // Literal source text is not subject to field splitting: only expansion
+    // results are.
+    fn literal(&mut self, text: &str) {
+        for char in text.chars() {
+            self.current.push(char);
+            self.started = true;
+            self.mark_glob(char);
+        }
+    }
+
+    fn mark_glob(&mut self, char: char) {
+        if matches!(char, '*' | '?' | '[' | '@' | '+' | '!' | '(') {
+            self.glob = true;
         }
     }
 
@@ -4287,18 +4334,49 @@ impl Fields {
             return;
         }
 
-        for char in text.chars() {
-            if matches!(char, ' ' | '\t' | '\n') {
-                if self.started {
+        if !self.split {
+            self.literal(text);
+            return;
+        }
+
+        let chars: Vec<char> = text.chars().collect();
+        let mut index = 0;
+        while index < chars.len() {
+            let char = chars[index];
+            if self.whitespace.contains(&char) {
+                let mut next = index + 1;
+                while next < chars.len() && self.whitespace.contains(&chars[next]) {
+                    next += 1;
+                }
+                // IFS whitespace glued to a non-whitespace separator belongs to
+                // that separator; on its own it only terminates a started field.
+                let glued = chars
+                    .get(next)
+                    .is_some_and(|char| self.separators.contains(char));
+                if !glued {
                     self.flush();
                 }
-            } else {
-                self.current.push(char);
-                self.started = true;
-                if matches!(char, '*' | '?' | '[' | '@' | '+' | '!' | '(') {
-                    self.glob = true;
-                }
+                index = next;
+                continue;
             }
+            if self.separators.contains(&char) {
+                // A non-whitespace separator always ends a field, producing an
+                // empty one when nothing had started since the last delimiter.
+                if self.started {
+                    self.flush();
+                } else {
+                    self.done.push((String::new(), false));
+                }
+                index += 1;
+                while index < chars.len() && self.whitespace.contains(&chars[index]) {
+                    index += 1;
+                }
+                continue;
+            }
+            self.current.push(char);
+            self.started = true;
+            self.mark_glob(char);
+            index += 1;
         }
     }
 
