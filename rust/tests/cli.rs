@@ -1141,8 +1141,8 @@ fn set_e_propagates_out_of_functions() {
 fn type_reports_aliases_builtins_and_paths() {
     let out = sharky(&["-c", "type cd; type printf"]);
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("cd: shell builtin"), "{text:?}");
-    assert!(text.contains("printf: /"), "{text:?}");
+    assert!(text.contains("cd is a shell builtin"), "{text:?}");
+    assert!(text.contains("printf is /"), "{text:?}");
     let out = sharky(&["-c", "type definitely-not-a-command"]);
     assert_eq!(out.status.code(), Some(1));
 }

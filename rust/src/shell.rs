@@ -2661,6 +2661,9 @@ impl Shell {
         1
     }
 
+    // Bash describes a name with the wording `command -V` uses, whether or not
+    // a flag was given: plain `type` never prints the short form. A function is
+    // followed by its definition, in the layout `declare -f` uses.
     fn type_builtin(&mut self, args: &[String]) -> i32 {
         if args.is_empty() {
             eprintln!("sharky: type: usage: type name ...");
@@ -2670,10 +2673,15 @@ impl Shell {
         let mut status = 0;
         for name in args {
             match self.resolve_name(name, None) {
-                Some(Resolution::Alias(value)) => println!("{name}: aliased to {value}"),
-                Some(Resolution::Function) => println!("{name}: function"),
-                Some(Resolution::Builtin) => println!("{name}: shell builtin"),
-                Some(Resolution::External(path)) => println!("{name}: {}", path.display()),
+                Some(Resolution::Alias(value)) => println!("{name} is aliased to `{value}'"),
+                Some(Resolution::Function) => {
+                    println!("{name} is a function");
+                    if let Some(body) = self.funcs.get(name) {
+                        print!("{}", format_function_definition(name, body));
+                    }
+                }
+                Some(Resolution::Builtin) => println!("{name} is a shell builtin"),
+                Some(Resolution::External(path)) => println!("{name} is {}", path.display()),
                 None => {
                     eprintln!("sharky: type: {name}: not found");
                     status = 1;

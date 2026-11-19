@@ -2277,7 +2277,7 @@ fn command_bypasses_a_function_of_the_same_name() {
 #[test]
 fn command_falls_back_to_a_builtin_hidden_by_a_function() {
     let out = sharky("type() { echo FUNC; }; type cd; command type cd");
-    assert_eq!(stdout(&out), "FUNC\ncd: shell builtin\n");
+    assert_eq!(stdout(&out), "FUNC\ncd is a shell builtin\n");
     assert_eq!(status(&out), 0);
 }
 
@@ -2387,24 +2387,39 @@ fn command_dash_p_still_runs_builtins_under_a_hostile_path() {
     assert_eq!(status(&out), 0);
 }
 
-// `type` keeps its own formatting even though it now shares the resolution
-// helper with `command`.
+// `type` describes a name the way `command -V` does; for a function it also
+// prints the definition in the layout `declare -f` uses.
 
 #[test]
 fn type_keeps_its_formatting_for_every_kind_of_name() {
     let out = sharky(
-        r#"probe() { :; }; alias hi='echo hello'; type cd; type probe; type hi; type printf; type definitely-not-a-command; echo "st=$?""#,
+        r#"probe() { printf '%s' one; printf '%s' two; }; alias hi='echo hello'; type cd; type probe; type hi; type printf; type definitely-not-a-command; echo "st=$?""#,
     );
     let text = stdout(&out);
     let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(lines[0], "cd: shell builtin");
-    assert_eq!(lines[1], "probe: function");
-    assert_eq!(lines[2], "hi: aliased to echo hello");
-    assert!(lines[3].starts_with("printf: /"), "{text:?}");
-    assert_eq!(lines[4], "st=1");
+    assert_eq!(lines[0], "cd is a shell builtin");
+    assert_eq!(lines[1], "probe is a function");
+    assert_eq!(lines[2], "probe () ");
+    assert_eq!(lines[3], "{ ");
+    assert_eq!(lines[4], "    printf '%s' one;");
+    assert_eq!(lines[5], "    printf '%s' two");
+    assert_eq!(lines[6], "}");
+    assert_eq!(lines[7], "hi is aliased to `echo hello'");
+    assert!(lines[8].starts_with("printf is /"), "{text:?}");
+    assert_eq!(lines[9], "st=1");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("type: definitely-not-a-command: not found"),
         "{stderr:?}"
     );
+}
+
+#[test]
+fn type_prints_a_function_definition_after_the_description() {
+    let out = sharky("probe() { :; }; type probe");
+    assert_eq!(
+        stdout(&out),
+        "probe is a function\nprobe () \n{ \n    :\n}\n"
+    );
+    assert_eq!(status(&out), 0);
 }
