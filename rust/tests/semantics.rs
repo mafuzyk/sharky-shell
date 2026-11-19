@@ -1114,6 +1114,61 @@ fn interactive_shell_survives_a_failing_if_condition() {
     assert!(seen.contains("AFTER-I-99"), "shell died on the condition: {seen:?}");
 }
 
+// An interactive shell keeps running after an expansion error, but the error
+// still discards the whole compound command: bash runs no branch, not even
+// else, and the if reports the error status.
+
+#[test]
+fn interactive_if_expansion_error_discards_the_else_branch() {
+    let seen = run_interactive(
+        &[
+            "unset v",
+            r#"if printf '%s' "${v?boom}"; then :; else printf 'ELSE-%s' 77; fi"#,
+            r#"printf 'ST-%s' "$?""#,
+            r#"printf 'AFTER-%s' 99"#,
+        ],
+        "AFTER-99",
+    );
+    assert!(seen.contains("v: boom"), "missing error: {seen:?}");
+    assert!(!seen.contains("ELSE-77"), "else branch ran: {seen:?}");
+    assert!(seen.contains("ST-1"), "wrong status: {seen:?}");
+    assert!(seen.contains("AFTER-99"), "shell died: {seen:?}");
+}
+
+#[test]
+fn interactive_elif_expansion_error_discards_the_else_branch() {
+    let seen = run_interactive(
+        &[
+            "unset v",
+            r#"if false; then :; elif printf '%s' "${v?boom}"; then printf 'THEN-%s' 55; else printf 'ELSE-%s' 77; fi"#,
+            r#"printf 'ST-%s' "$?""#,
+            r#"printf 'AFTER-%s' 99"#,
+        ],
+        "AFTER-99",
+    );
+    assert!(seen.contains("v: boom"), "missing error: {seen:?}");
+    assert!(!seen.contains("THEN-55"), "then branch ran: {seen:?}");
+    assert!(!seen.contains("ELSE-77"), "else branch ran: {seen:?}");
+    assert!(seen.contains("ST-1"), "wrong status: {seen:?}");
+    assert!(seen.contains("AFTER-99"), "shell died: {seen:?}");
+}
+
+#[test]
+fn interactive_false_if_condition_still_runs_the_else_branch() {
+    let seen = run_interactive(
+        &[
+            r#"if false; then printf 'THEN-%s' 55; else printf 'ELSE-%s' 77; fi"#,
+            r#"printf 'ST-%s' "$?""#,
+            r#"printf 'AFTER-%s' 99"#,
+        ],
+        "AFTER-99",
+    );
+    assert!(!seen.contains("THEN-55"), "then branch ran: {seen:?}");
+    assert!(seen.contains("ELSE-77"), "else branch did not run: {seen:?}");
+    assert!(seen.contains("ST-0"), "wrong status: {seen:?}");
+    assert!(seen.contains("AFTER-99"), "shell died: {seen:?}");
+}
+
 // ${!a[0]} and ${!a[$i]} indirect through the value held by the element, while
 // ${!a[@]} and ${!a[*]} keep expanding to the array keys. An unset element
 // indirection is empty; an unset plain name, or a value that is not a name,

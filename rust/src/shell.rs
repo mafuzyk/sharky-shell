@@ -70,6 +70,10 @@ pub struct Shell {
     substitution_ready: Vec<i32>,
     json_exec: Option<(RawFd, Vec<(String, String)>)>,
     expansion_error: bool,
+    // Counts expansion failures so a condition can tell a discarded command
+    // from a genuinely false one, which both reach it as a plain status in an
+    // interactive shell.
+    expansion_failures: u64,
     substitution_status: Option<i32>,
     pub exit_requested: Option<i32>,
     jobs: Vec<Job>,
@@ -209,6 +213,7 @@ impl Shell {
             substitution_ready: Vec::new(),
             json_exec: None,
             expansion_error: false,
+            expansion_failures: 0,
             substitution_status: None,
             exit_requested: None,
             jobs: Vec::new(),
@@ -1142,6 +1147,7 @@ impl Shell {
         let code = self.unset_parameter_status();
         self.nounset_failed = false;
         self.null_parameter_error = false;
+        self.expansion_failures += 1;
         if self.interactive {
             Flow::Status(code)
         } else {
@@ -1158,6 +1164,7 @@ impl Shell {
         };
         self.null_parameter_error = false;
         self.expansion_error = false;
+        self.expansion_failures += 1;
         if self.interactive {
             Flow::Status(code)
         } else {
@@ -1264,9 +1271,16 @@ impl Shell {
 
     fn run_if(&mut self, branches: &[(List, List)], else_body: Option<&List>) -> Flow {
         for (condition, body) in branches {
-            // A condition that fails an expansion aborts the whole shell, so
-            // its exit flow must not be mistaken for a false condition.
+            // A condition that fails an expansion reports a status in an
+            // interactive shell, where a status is all it can report, so the
+            // failure count tells it apart from a genuinely false condition.
+            // Bash discards the whole compound command in that case: no branch
+            // runs, not even else.
+            let failures = self.expansion_failures;
             match self.run_suppressed(condition) {
+                Flow::Status(code) if self.expansion_failures != failures => {
+                    return Flow::Status(code);
+                }
                 Flow::Status(0) => return self.run_list(body),
                 Flow::Status(_) => {}
                 other => return other,
