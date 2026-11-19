@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
@@ -4193,43 +4193,62 @@ fn gs_is_dir(entry: &std::fs::DirEntry, follow_symlink: bool) -> bool {
         .unwrap_or(false)
 }
 
+#[derive(Default)]
+struct GlobStats {
+    attempts: Vec<(String, usize)>,
+    expanded: HashSet<(String, usize)>,
+    skipped: usize,
+    entry_visits: HashSet<String>,
+    entries_skipped: usize,
+}
+
 fn gs_walk(
     prefix: &str,
     components: &[&str],
+    descend_at: &[bool],
     index: usize,
     trailing: bool,
     bare_run_multiple: bool,
     literal_prefix: bool,
-    descend_symlinks: bool,
-    out: &mut Vec<String>,
+    stats: &mut GlobStats,
+    out: &mut BTreeSet<String>,
 ) {
+    let key = (prefix.to_string(), index);
+    stats.attempts.push(key.clone());
+    if !stats.expanded.insert(key) {
+        stats.skipped += 1;
+        return;
+    }
+
     let Some(component) = components.get(index) else {
         if !prefix.is_empty() {
-            out.push(prefix.to_string());
+            out.insert(prefix.to_string());
         }
         return;
     };
 
     if component_is_globstar(component) {
         if index + 1 == components.len() {
-            if !prefix.is_empty() {
+            if !prefix.is_empty() && Path::new(gs_dir(prefix)).is_dir() {
                 if trailing || (literal_prefix && !bare_run_multiple) {
-                    out.push(gs_slash(prefix));
+                    out.insert(gs_slash(prefix));
                 } else {
-                    out.push(prefix.to_string());
+                    out.insert(prefix.to_string());
                 }
             }
-            gs_entries(prefix, trailing, out);
+            gs_entries(prefix, trailing, stats, out);
             return;
         }
+        let descend = descend_at[index];
         gs_walk(
             prefix,
             components,
+            descend_at,
             index + 1,
             trailing,
             bare_run_multiple,
             literal_prefix,
-            descend_symlinks,
+            stats,
             out,
         );
         // Bash 5.3.20: a symlinked dir is followed only for the next component, not for deeper ** levels.
@@ -4238,18 +4257,19 @@ fn gs_walk(
         };
         for entry in entries.filter_map(Result::ok) {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') || !gs_is_dir(&entry, descend_symlinks) {
+            if name.starts_with('.') || !gs_is_dir(&entry, descend) {
                 continue;
             }
             let resume = if gs_is_dir(&entry, false) { index } else { index + 1 };
             gs_walk(
                 &gs_join(prefix, &name),
                 components,
+                descend_at,
                 resume,
                 trailing,
                 bare_run_multiple,
                 literal_prefix,
-                descend_symlinks,
+                stats,
                 out,
             );
         }
@@ -4270,17 +4290,22 @@ fn gs_walk(
         gs_walk(
             &gs_join(prefix, &name),
             components,
+            descend_at,
             index + 1,
             trailing,
             bare_run_multiple,
             literal_prefix,
-            descend_symlinks,
+            stats,
             out,
         );
     }
 }
 
-fn gs_entries(prefix: &str, trailing: bool, out: &mut Vec<String>) {
+fn gs_entries(prefix: &str, trailing: bool, stats: &mut GlobStats, out: &mut BTreeSet<String>) {
+    if !stats.entry_visits.insert(prefix.to_string()) {
+        stats.entries_skipped += 1;
+        return;
+    }
     let Ok(entries) = std::fs::read_dir(gs_dir(prefix)) else {
         return;
     };
@@ -4293,20 +4318,25 @@ fn gs_entries(prefix: &str, trailing: bool, out: &mut Vec<String>) {
         let path = gs_join(prefix, &name);
         if trailing {
             if gs_is_dir(&entry, true) {
-                out.push(gs_slash(&path));
+                out.insert(gs_slash(&path));
             }
         } else {
-            out.push(path.clone());
+            out.insert(path.clone());
         }
         if real_dir {
-            gs_entries(&path, trailing, out);
+            gs_entries(&path, trailing, stats, out);
         }
     }
 }
 
 // Consecutive ** share one walk instead of re-traversing the tree and deduping afterwards.
-fn collapse_globstars(components: Vec<&str>, trailing: bool) -> (Vec<&str>, bool) {
-    let mut out = Vec::new();
+fn collapse_globstars(
+    components: Vec<&str>,
+    descend_flags: Vec<bool>,
+    trailing: bool,
+) -> (Vec<&str>, Vec<bool>, bool) {
+    let mut parts = Vec::new();
+    let mut descend_at = Vec::new();
     let mut bare_run_multiple = false;
     let mut index = 0;
     while index < components.len() {
@@ -4316,30 +4346,38 @@ fn collapse_globstars(components: Vec<&str>, trailing: bool) -> (Vec<&str>, bool
                 run += 1;
             }
             bare_run_multiple = index + run == components.len() && !trailing && run > 1;
-            out.push(components[index]);
+            parts.push(components[index]);
+            descend_at.push(descend_flags[index]);
             index += run;
         } else {
-            out.push(components[index]);
+            parts.push(components[index]);
+            descend_at.push(descend_flags[index]);
             index += 1;
         }
     }
-    (out, bare_run_multiple)
+    (parts, descend_at, bare_run_multiple)
 }
 
 fn globstar_glob(pattern: &str) -> Vec<String> {
+    globstar_glob_traced(pattern, &mut GlobStats::default())
+}
+
+fn globstar_glob_traced(pattern: &str, stats: &mut GlobStats) -> Vec<String> {
     let absolute = pattern.starts_with('/');
     let trailing = pattern.ends_with('/');
     let mut components: Vec<&str> = pattern.split('/').filter(|part| !part.is_empty()).collect();
-    let descend_symlinks = components
+    let mut descend_flags: Vec<bool> = components
         .iter()
-        .position(|part| component_is_globstar(part))
-        .is_some_and(|index| index > 0);
+        .enumerate()
+        .map(|(index, part)| component_is_globstar(part) && index > 0)
+        .collect();
     let mut dot_prefix = String::new();
     while components
         .first()
         .is_some_and(|part| *part == "." || *part == "..")
     {
         let part = components.remove(0);
+        descend_flags.remove(0);
         if !dot_prefix.is_empty() {
             dot_prefix.push('/');
         }
@@ -4348,7 +4386,8 @@ fn globstar_glob(pattern: &str) -> Vec<String> {
     if !dot_prefix.is_empty() {
         dot_prefix.push('/');
     }
-    let (components, bare_run_multiple) = collapse_globstars(components, trailing);
+    let (components, descend_at, bare_run_multiple) =
+        collapse_globstars(components, descend_flags, trailing);
     let literal_prefix = components
         .last()
         .is_some_and(|part| component_is_globstar(part))
@@ -4356,20 +4395,19 @@ fn globstar_glob(pattern: &str) -> Vec<String> {
             .iter()
             .all(|part| !has_glob(part));
     let prefix = if absolute { "/".to_string() } else { dot_prefix };
-    let mut matches = Vec::new();
+    let mut matches = BTreeSet::new();
     gs_walk(
         &prefix,
         &components,
+        &descend_at,
         0,
         trailing,
         bare_run_multiple,
         literal_prefix,
-        descend_symlinks,
+        stats,
         &mut matches,
     );
-    matches.sort();
-    matches.dedup();
-    matches
+    matches.into_iter().collect()
 }
 
 fn trim_prefix(value: &str, pattern: &str, longest: bool) -> String {
@@ -4618,5 +4656,58 @@ fn glob_chars(pattern: &[char], text: &[char]) -> bool {
             matched != negate && glob_chars(&pattern[index + 1..], &text[1..])
         }
         char => !text.is_empty() && char == text[0] && glob_chars(&pattern[1..], &text[1..]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stated_tree() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "sharky-gs-states-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(dir.join("d1/sub")).unwrap();
+        std::fs::create_dir_all(dir.join("d2")).unwrap();
+        std::fs::write(dir.join("d1/a.txt"), "").unwrap();
+        std::fs::write(dir.join("d1/sub/b.txt"), "").unwrap();
+        std::fs::write(dir.join("d2/c.txt"), "").unwrap();
+        dir
+    }
+
+    #[test]
+    fn globstar_expands_each_state_once() {
+        let dir = stated_tree();
+        let cases = [
+            ("**/*.txt", 0, 0),
+            ("**/**/*.txt", 0, 0),
+            ("**/*/**/*.txt", 1, 0),
+            ("**/**", 0, 0),
+            ("**/*/**", 0, 1),
+            ("**/*/**/", 0, 1),
+        ];
+        for (suffix, expected_skipped, expected_entries_skipped) in cases {
+            let pattern = format!("{}/{suffix}", dir.display());
+            let mut stats = GlobStats::default();
+            let out = globstar_glob_traced(&pattern, &mut stats);
+            let unique: HashSet<_> = stats.attempts.iter().cloned().collect();
+            assert_eq!(stats.expanded.len(), unique.len(), "{suffix}");
+            assert_eq!(
+                stats.skipped,
+                stats.attempts.len() - unique.len(),
+                "{suffix}"
+            );
+            assert_eq!(stats.skipped, expected_skipped, "{suffix}");
+            assert_eq!(stats.entries_skipped, expected_entries_skipped, "{suffix}");
+            let mut sorted = out.clone();
+            sorted.sort();
+            sorted.dedup();
+            assert_eq!(out, sorted, "{suffix}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
