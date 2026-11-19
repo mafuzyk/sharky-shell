@@ -156,7 +156,7 @@ The prompt, `-c` and script files share one grammar:
 | completion | Tab completes commands, variables, files and git branches; several matches open a menu (Tab/Shift-Tab, Enter, Esc) |
 | vi mode | `set -o vi`; Esc for normal mode, `h l 0 $ w b e j k`, `x dd dw d$ D cw C p P u r`, counts; `set +o vi` returns to emacs |
 | fuzzy files | Ctrl-T opens a ranked file list; type to filter, arrows to move, Enter inserts, Esc cancels |
-| syntax highlighting | `wave command`, `builtin`, `string`, `variable`, `operator`, `path`, `comment`, `error`; `tide highlight off` disables |
+| syntax highlighting | `wave command`, `builtin`, `string`, `variable`, `operator`, `path`, `comment`, `error`, `overwrite`; `tide highlight off` disables |
 | history expansion | `!!`, `!n`, `!-n`, `!prefix`, `!?text?`, `!$`, `!*`, `!^`, `^old^new^`; `set +H` disables |
 | job control | `cmd &`, `jobs`, `fg`, `bg`, Ctrl-Z |
 | scripts | `source lib.sh`, `sharky file.sh args` |
@@ -283,6 +283,11 @@ wave selection @sea
 `wave suggestion` colours the autosuggest ghost text. Leave it out and the ghost
 falls back to dim, so it never looks like text you typed. Set `NO_COLOR=1` to keep
 the prompt plain.
+
+`wave overwrite` colours the target of `>`, `2>` and `&>` when it is an existing
+literal path. Only unquoted static paths are matched: quotes, variables, tilde
+and other expansions are left plain, and no filesystem check runs when
+highlighting or colour is off.
 
 ### Errors
 
