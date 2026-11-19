@@ -28,6 +28,12 @@ impl Session {
         // SAFETY: the child only execs; every string it needs exists before the fork.
         match unsafe { forkpty(None::<&Winsize>, None::<&Termios>) }.expect("forkpty") {
             ForkptyResult::Child => {
+                // A terminal login starts with only the standard descriptors;
+                // fds inherited from the test harness would otherwise occupy
+                // the numbers a redirect can reuse.
+                for fd in 3..256 {
+                    let _ = unsafe { libc::close(fd) };
+                }
                 let _ = execve(&path, &argv, &env);
                 unsafe { libc::_exit(1) }
             }
@@ -112,7 +118,54 @@ fn background_job_runs_and_reports_done() {
 
 #[test]
 fn scoped_stdin_redirect_keeps_the_child_foreground() {
-    let base = std::env::temp_dir().join(format!("sharky-fg-{}", std::process::id()));
+    let (foreground, background) = foreground_marker("stdin", "f < /dev/null");
+    assert!(
+        foreground && !background,
+        "a scoped stdin redirect lost the foreground group (foreground={foreground}, background={background})"
+    );
+}
+
+// The shell's terminal must not be a descriptor number a redirect can take:
+// `exec 3> file` keeps fd 3 for the rest of the session.
+#[test]
+fn persistent_numbered_redirect_keeps_the_child_foreground() {
+    let target = std::env::temp_dir().join(format!("sharky-exec3-{}", std::process::id()));
+    let _ = std::fs::remove_file(&target);
+    let action = format!("exec 3> {}; f < /dev/null", target.display());
+    let (foreground, background) = foreground_marker("exec3", &action);
+    let _ = std::fs::remove_file(&target);
+
+    assert!(
+        foreground && !background,
+        "a persistent fd 3 redirect lost the foreground group (foreground={foreground}, background={background})"
+    );
+}
+
+#[test]
+fn scoped_numbered_redirect_keeps_the_child_foreground() {
+    let target = std::env::temp_dir().join(format!("sharky-fd3-{}", std::process::id()));
+    let _ = std::fs::remove_file(&target);
+    let action = format!("f 3> {}", target.display());
+    let (foreground, background) = foreground_marker("fd3", &action);
+    let _ = std::fs::remove_file(&target);
+
+    assert!(
+        foreground && !background,
+        "a scoped fd 3 redirect lost the foreground group (foreground={foreground}, background={background})"
+    );
+}
+
+// Runs `action` with a function that records whether the child it starts is in
+// the terminal's foreground process group.
+fn foreground_marker(name: &str, action: &str) -> (bool, bool) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    let base = std::env::temp_dir().join(format!(
+        "sharky-fg-{}-{name}-{count}",
+        std::process::id()
+    ));
     let foreground = base.with_extension("foreground");
     let background = base.with_extension("background");
     let _ = std::fs::remove_file(&foreground);
@@ -129,22 +182,19 @@ fn scoped_stdin_redirect_keeps_the_child_foreground() {
     ));
     session.read_until("❯", Duration::from_secs(5));
 
-    session.send("f < /dev/null\r");
+    session.send(&format!("{action}\r"));
     let seen = session.read_until("❯", Duration::from_secs(5));
-    assert!(seen.contains('❯'), "no prompt after the command: {seen:?}");
+    assert!(seen.contains('❯'), "no prompt after {action:?}: {seen:?}");
 
     let had_foreground = foreground.exists();
     let had_background = background.exists();
     let _ = std::fs::remove_file(&foreground);
     let _ = std::fs::remove_file(&background);
 
-    assert!(
-        had_foreground && !had_background,
-        "the child ran outside the terminal's foreground group (foreground={had_foreground}, background={had_background})"
-    );
-
     session.send("exit\r");
     assert_eq!(session.exit_status(), 0);
+
+    (had_foreground, had_background)
 }
 
 #[test]
