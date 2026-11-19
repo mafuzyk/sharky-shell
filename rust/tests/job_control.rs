@@ -179,8 +179,10 @@ fn foreground_marker(name: &str, action: &str) -> (bool, bool) {
     let prompt = session.read_until("❯", Duration::from_secs(5));
     assert!(prompt.contains('❯'), "no prompt: {prompt:?}");
 
+    let sh = common::resolve("sh");
     session.send(&format!(
-        "f() {{ /bin/sh -c 'read -r st < /proc/$$/stat; set -- $st; [ \"$5\" = \"$8\" ] && : > {} || : > {}'; }}\r",
+        "f() {{ {} -c 'read -r st < /proc/$$/stat; set -- $st; [ \"$5\" = \"$8\" ] && : > {} || : > {}'; }}\r",
+        sh.display(),
         foreground.display(),
         background.display()
     ));

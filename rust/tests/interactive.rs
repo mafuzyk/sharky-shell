@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 use nix::libc;
 use nix::pty::openpty;
 
+mod common;
+
 const NO_CONFIG: &str = "/nonexistent/sharky-test";
 
 fn read_until(fd: RawFd, needle: &str, timeout: Duration) -> String {
@@ -150,7 +152,8 @@ fn starship_can_provide_the_prompt() {
     std::fs::write(config.join("config.sharky"), "tide starship on\n").unwrap();
 
     let fake = bin.join("starship");
-    std::fs::write(&fake, "#!/bin/sh\nprintf 'STARSHIP-PROMPT> '\n").unwrap();
+    let sh = common::resolve("sh");
+    std::fs::write(&fake, format!("#!{}\nprintf 'STARSHIP-PROMPT> '\n", sh.display())).unwrap();
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let pty = openpty(None, None).expect("pty");
@@ -1735,7 +1738,8 @@ fn completion_escapes_path_executables() {
     let marker = dir.join("pwned");
     let name = "zz;touch pwned";
     let path = dir.join(name);
-    std::fs::write(&path, "#!/bin/sh\nprintf SAFE\n").unwrap();
+    let sh = common::resolve("sh");
+    std::fs::write(&path, format!("#!{}\nprintf SAFE\n", sh.display())).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     session.run(&format!("cd {}", dir.display()));
     session.run(&format!("PATH={}", dir.display()));
