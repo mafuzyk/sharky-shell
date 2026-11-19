@@ -97,9 +97,12 @@ each is a terminal; a pipe is fine), parsing of \fBconfig.sharky\fR through the
 configuration parser, parsing of \fBtheme.sharky\fR, history file permissions and
 writability, and availability of the baseline external tools \fBsh\fR, \fBls\fR
 and \fBcat\fR on \fBPATH\fR. Unreadable config files are reported separately
-because the parser silently skips them. The history file is only inspected via
-metadata: it is never opened for append and no lock is taken. Exits 0 when all
-checks pass and 1 when any fails. No fstab checks are performed.
+because the parser silently skips them. The configuration and theme files are
+parsed read-only: no \fBpearl\fR directive is applied, no profile is evaluated,
+no file is written and no configuration value is printed. The history file is
+only inspected via metadata: it is never opened for append and no lock is
+taken. Exits 0 when all checks pass and 1 when any fails. No fstab checks are
+performed.
 .TP
 .B \-\-no\-config
 Do not read the configuration files.

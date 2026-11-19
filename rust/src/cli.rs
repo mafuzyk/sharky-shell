@@ -20,9 +20,10 @@ pub fn run() -> i32 {
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect::<Vec<_>>();
 
-    // `config explain`, `status` and `doctor` are static, text-only
-    // subcommands. Handle them before any config/theme loading so they never
-    // build a Shell, load configuration or touch the filesystem.
+    // `config explain`, `status` and `doctor` are static, text-only subcommands
+    // handled before any Shell is built, so none of them applies `pearl`,
+    // evaluates profiles or writes files. `doctor` parses config/theme files
+    // read-only as part of its checks; no configuration values are printed.
     if let Some(code) = try_config_explain(&args) {
         return code;
     }

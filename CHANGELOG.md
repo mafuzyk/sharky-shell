@@ -22,9 +22,11 @@ rather than a separate preview track.
   load would silently skip, theme parsing, history permissions and writability
   by metadata only, and resolution of `sh`, `ls` and `cat` through
   `exec::resolve`. It prints one `OK`/`FAIL` line per check, exits 0 when all
-  pass and 1 when any fails, and performs no fstab checks. `status` runs before
-  the shell starts and neither subcommand loads configuration: no `pearl`, no
-  profiles, no writes and no printing of environment or configuration values.
+  pass and 1 when any fails, and performs no fstab checks. Both subcommands run
+  before the shell starts, so neither applies `pearl`, evaluates profiles,
+  writes files or prints environment or configuration values. `status` reads no
+  configuration files; `doctor` parses `config.sharky` and `theme.sharky`
+  read-only through the configuration parser.
 - Durable command history: each evaluated command is appended to one shared file
   under a lock, with failed writes kept only in memory and torn tails dropped on
   the next append. Sessions keep their own view until `history merge`, and

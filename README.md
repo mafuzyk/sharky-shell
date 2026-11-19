@@ -107,9 +107,11 @@ sharky status   # version, resolved config/theme/history paths and feature flags
 sharky doctor   # read-only local checks, exit 1 if any check fails
 ```
 
-Both subcommands run before the shell starts: they never load configuration,
-apply `pearl`, evaluate profiles or write files, and they never print environment
-values or configuration values. `status` exits 0 when its arguments are valid
+Both subcommands run before the shell starts, so neither builds a shell, applies
+`pearl`, evaluates profiles, writes files or prints environment or configuration
+values. `status` reads no configuration files; `doctor` parses `config.sharky`
+and `theme.sharky` read-only through the configuration parser and never applies
+what it parses. `status` exits 0 when its arguments are valid
 and prints one plain-text fact per line; the paths honour `SHARKY_CONFIG`,
 `XDG_CONFIG_HOME`, `HOME`, `SHARKY_HISTORY` and `XDG_DATA_HOME`. `doctor` prints
 an `OK` or `FAIL` line for stdin/stdout descriptor validity, config and theme
