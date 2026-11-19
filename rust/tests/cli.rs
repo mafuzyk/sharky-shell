@@ -2331,6 +2331,130 @@ fn nested_redirected_function_restores_the_enclosing_target() {
 // The temporary stdin redirect covers one read; the next one must reach the
 // shell's own stdin again.
 #[test]
+fn redirected_function_uses_the_fd_the_target_opened() {
+    let dir = temp_dir();
+    let out = sharky_in(
+        &dir,
+        &[
+            "-c",
+            "f() { printf x >&3; }; f 3> out; printf '<%s>' \"$?\"; cat out",
+        ],
+    );
+    let target = file_text(&dir.join("out"));
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "<0>x",
+        "fd 3 was not the redirection target inside the function (stderr: {})",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(target, "x");
+}
+
+// The opened file takes the lowest free descriptor, which can be the target
+// itself; it must stay open and stay inheritable.
+#[test]
+fn redirected_external_uses_the_fd_the_target_opened() {
+    let dir = temp_dir();
+    let out = sharky_in(
+        &dir,
+        &[
+            "-c",
+            "/bin/sh -c 'printf x >/dev/fd/3' 3> out; printf '<%s>' \"$?\"; cat out",
+        ],
+    );
+    let target = file_text(&dir.join("out"));
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "<0>x",
+        "fd 3 did not reach the child (stderr: {})",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(target, "x");
+}
+
+// The inner targets 10 and 11, the slots the outer save of fds 1 and 2 takes
+// in a shell that starts with only 0..2 open.
+#[test]
+fn nested_redirects_keep_the_enclosing_target() {
+    let dir = temp_dir();
+    let out = sharky_in(
+        &dir,
+        &[
+            "-c",
+            "f() { printf body >&10; printf errb >&11; }; g() { f 10> inner 11> innererr; printf g; }; g > outer 2> outerr; printf 'end\\n'",
+        ],
+    );
+    let outer = file_text(&dir.join("outer"));
+    let outerr = file_text(&dir.join("outerr"));
+    let inner = file_text(&dir.join("inner"));
+    let innererr = file_text(&dir.join("innererr"));
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "end\n",
+        "stdout was not restored (stderr: {})",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        outer, "g",
+        "the inner redirect corrupted the enclosing target"
+    );
+    assert_eq!(outerr, "");
+    assert_eq!(inner, "body");
+    assert_eq!(innererr, "errb");
+}
+
+// The numeric prefix saturates at i32::MAX; saving that descriptor must not
+// overflow, and the shell must report the invalid target and carry on.
+#[test]
+fn redirected_saturated_fd_does_not_overflow() {
+    let dir = temp_dir();
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    let out = sharky_in(
+        &dir,
+        &[
+            "-c",
+            "cd sub 2147483647> out; printf 'status=%s\\n' \"$?\"; pwd",
+        ],
+    );
+    let stray = dir.join("sub/out").exists();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+
+    let out = sharky_in(
+        &dir,
+        &["-c", "cd sub 1>&2147483647; printf 'status=%s\\n' \"$?\""],
+    );
+    let dup = String::from_utf8_lossy(&out.stdout).into_owned();
+    let dup_stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the shell aborted: {dup_stderr}"
+    );
+    assert!(!stderr.is_empty(), "no diagnostic for the invalid target");
+    let mut lines = stdout.lines();
+    assert_eq!(lines.next(), Some("status=1"), "stdout: {stdout:?}");
+    assert!(
+        lines.next().is_some_and(|line| !line.ends_with("/sub")),
+        "cd ran despite the failed redirection: {stdout:?}"
+    );
+    assert!(!stray, "the target must not move with the directory");
+    assert!(
+        !dup_stderr.is_empty(),
+        "no diagnostic for the invalid dup source"
+    );
+    assert_eq!(dup.trim_end(), "status=1", "stdout: {dup:?}");
+}
+
+#[test]
 fn redirected_read_restores_the_shell_stdin() {
     let dir = temp_dir();
     std::fs::write(dir.join("data"), "one\n").unwrap();
