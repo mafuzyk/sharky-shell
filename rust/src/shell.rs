@@ -52,6 +52,7 @@ pub struct Shell {
     history_load_error: Option<String>,
     histexpand: bool,
     vi: bool,
+    globstar: bool,
     z: Option<Z>,
     config_dir: Option<PathBuf>,
     substitution_fds: Vec<i32>,
@@ -145,6 +146,7 @@ impl Shell {
             history_load_error: None,
             histexpand: true,
             vi: false,
+            globstar: false,
             z: None,
             config_dir: None,
             substitution_fds: Vec::new(),
@@ -391,7 +393,7 @@ impl Shell {
             ":", "true", "false", "cd", "exit", "export", "unset", "set", "source", ".",
             "break", "continue", "return", "jobs", "fg", "bg", "declare", "pwd", "type",
             "alias", "abbr", "unabbr", "unalias", "history", "wait", "kill", "z", "zi",
-            "reload", "trap", "read", "shift", "wake", "exec", "time",
+            "reload", "trap", "read", "shift", "wake", "exec", "time", "shopt",
         ]
         .iter()
         .map(|word| word.to_string())
@@ -1395,6 +1397,7 @@ impl Shell {
             "export" => Some(Flow::Status(self.export(&words[1..]))),
             "unset" => Some(Flow::Status(self.unset(&words[1..]))),
             "set" => Some(Flow::Status(self.set(&words[1..]))),
+            "shopt" => Some(Flow::Status(self.shopt(&words[1..]))),
             "jobs" => Some(Flow::Status(self.list_jobs())),
             "pwd" => {
                 println!("{}", self.cwd.display());
@@ -2328,6 +2331,32 @@ impl Shell {
         active
     }
 
+    fn shopt(&mut self, args: &[String]) -> i32 {
+        let mut args = args;
+        let on = match args.first().map(String::as_str) {
+            Some("-s") => true,
+            Some("-u") => false,
+            Some(name) => {
+                if name == "globstar" {
+                    println!("globstar\t{}", if self.globstar { "on" } else { "off" });
+                    return i32::from(!self.globstar);
+                }
+                eprintln!("sharky: shopt: {name}: invalid option");
+                return 1;
+            }
+            None => return 1,
+        };
+        args = &args[1..];
+        for name in args {
+            if name != "globstar" {
+                eprintln!("sharky: shopt: {name}: invalid option name");
+                return 1;
+            }
+            self.globstar = on;
+        }
+        0
+    }
+
     fn set(&mut self, args: &[String]) -> i32 {
         if args.first().map(String::as_str) == Some("--") {
             self.positional = args[1..].to_vec();
@@ -3195,7 +3224,7 @@ impl Shell {
 
         for (text, eligible) in fields {
             if eligible && has_glob(&text) {
-                let matches = glob(&text);
+                let matches = glob(&text, self.globstar);
                 if !matches.is_empty() {
                     out.extend(matches);
                     continue;
@@ -3753,6 +3782,7 @@ fn is_builtin_name(name: &str) -> bool {
             | "reload"
             | "shift"
             | "declare"
+            | "shopt"
     )
 }
 
@@ -4076,7 +4106,10 @@ fn strip_quoted_glob_markers(text: &str) -> String {
     out
 }
 
-fn glob(pattern: &str) -> Vec<String> {
+fn glob(pattern: &str, globstar: bool) -> Vec<String> {
+    if globstar && pattern_has_globstar(pattern) {
+        return globstar_glob(pattern);
+    }
     let (dir, base) = match pattern.rfind('/') {
         Some(index) => (&pattern[..index], &pattern[index + 1..]),
         None => (".", pattern),
@@ -4087,7 +4120,7 @@ fn glob(pattern: &str) -> Vec<String> {
 
     let directory = if dir.is_empty() { "/" } else { dir };
     let directories = if has_glob(directory) {
-        glob(directory)
+        glob(directory, globstar)
     } else {
         vec![directory.to_string()]
     };
@@ -4113,6 +4146,121 @@ fn glob(pattern: &str) -> Vec<String> {
     }
 
     matches.sort();
+    matches
+}
+
+fn component_is_globstar(component: &str) -> bool {
+    let mut stars = 0;
+    for char in component.chars() {
+        if char == QUOTED_GLOB_MARKER || char != '*' {
+            return false;
+        }
+        stars += 1;
+    }
+    stars == 2
+}
+
+fn pattern_has_globstar(pattern: &str) -> bool {
+    pattern.split('/').any(component_is_globstar)
+}
+
+fn gs_join(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_string()
+    } else if prefix == "/" {
+        format!("/{name}")
+    } else {
+        format!("{prefix}/{name}")
+    }
+}
+
+fn gs_dir(prefix: &str) -> &str {
+    if prefix.is_empty() { "." } else { prefix }
+}
+
+// Deliberate bash gap: implicit ** skips symlinked dirs entirely; explicit symlink prefixes keep read_dir semantics.
+fn gs_subdirs(prefix: &str) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(gs_dir(prefix)) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            let name = entry.file_name();
+            !name.to_string_lossy().starts_with('.')
+                && entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false)
+        })
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+fn gs_walk(prefix: &str, components: &[&str], index: usize, trailing: bool, out: &mut Vec<String>) {
+    let Some(component) = components.get(index) else {
+        if !prefix.is_empty() {
+            out.push(prefix.to_string());
+        }
+        return;
+    };
+
+    if component_is_globstar(component) {
+        if index + 1 == components.len() {
+            gs_entries(prefix, trailing, out);
+            return;
+        }
+        gs_walk(prefix, components, index + 1, trailing, out);
+        for dir in gs_subdirs(prefix) {
+            gs_walk(&gs_join(prefix, &dir), components, index, trailing, out);
+        }
+        return;
+    }
+
+    let Ok(entries) = std::fs::read_dir(gs_dir(prefix)) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') && !component.starts_with('.') {
+            continue;
+        }
+        if !glob_match(component, &name) {
+            continue;
+        }
+        gs_walk(&gs_join(prefix, &name), components, index + 1, trailing, out);
+    }
+}
+
+fn gs_entries(prefix: &str, trailing: bool, out: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(gs_dir(prefix)) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
+        let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+        let path = gs_join(prefix, &name);
+        if trailing {
+            if is_dir {
+                out.push(format!("{path}/"));
+            }
+        } else {
+            out.push(path.clone());
+        }
+        if is_dir {
+            gs_entries(&path, trailing, out);
+        }
+    }
+}
+
+fn globstar_glob(pattern: &str) -> Vec<String> {
+    let components: Vec<&str> = pattern.split('/').filter(|part| !part.is_empty()).collect();
+    let prefix = if pattern.starts_with('/') { "/" } else { "" };
+    let trailing = pattern.ends_with('/');
+    let mut matches = Vec::new();
+    gs_walk(prefix, &components, 0, trailing, &mut matches);
+    matches.sort();
+    matches.dedup();
     matches
 }
 
