@@ -3502,3 +3502,12 @@ fn doctor_rejects_options_and_extra_arguments() {
         );
     }
 }
+
+#[test]
+fn help_lists_status_and_doctor_subcommands() {
+    let out = sharky(&["--help"]);
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("status"), "{text}");
+    assert!(text.contains("doctor"), "{text}");
+}

@@ -100,6 +100,24 @@ sharky -i                      # force the REPL; fails on a non-TTY
 `env_delta` contains only variables changed by the command; unset variables are
 `null`. Unlike the Ruby reference it never includes the `?` status pseudo-variable.
 
+## Diagnostics
+
+```sh
+sharky status   # version, resolved config/theme/history paths and feature flags
+sharky doctor   # read-only local checks, exit 1 if any check fails
+```
+
+Both subcommands run before the shell starts: they never load configuration,
+apply `pearl`, evaluate profiles or write files, and they never print environment
+values or configuration values. `status` always exits 0 and prints one plain-text
+fact per line; the paths honour `SHARKY_CONFIG`, `XDG_CONFIG_HOME`, `HOME`,
+`SHARKY_HISTORY` and `XDG_DATA_HOME`. `doctor` prints an `OK` or `FAIL` line for
+stdin/stdout descriptor validity, config and theme parsing, history permissions
+and writability, and the presence of `sh`, `ls` and `cat` on `PATH`. A missing
+TTY is reported but does not fail the check; history is inspected through
+metadata only, without opening it for append or taking a lock. There are no
+compile-time feature flags in this release, so `status` reports `features: none`.
+
 ## Login shell
 
 `sharky -l` (or an `argv[0]` beginning with `-`) reads

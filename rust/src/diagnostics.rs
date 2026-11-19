@@ -266,7 +266,11 @@ fn run_doctor() -> i32 {
         check_history(),
         check_tools(),
     ];
-    let ok = checks.into_iter().map(Check::report).fold(true, |all, one| all && one);
+    let mut ok = true;
+    for check in checks {
+        // Non-short-circuiting: every check must print its line.
+        ok &= check.report();
+    }
     i32::from(!ok)
 }
 

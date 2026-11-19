@@ -18,6 +18,12 @@ sharky \- Unix-first interactive shell
 .B sharky
 .B config explain
 [\fITOPIC\fR [\fIWORD\fR...]]
+.br
+.B sharky
+.B status
+.br
+.B sharky
+.B doctor
 .SH DESCRIPTION
 .B sharky
 is an interactive POSIX-like shell written in Rust. Commands run as real Unix
@@ -69,6 +75,26 @@ print that topic. Each parser directive has its own topic, alongside \fBtide his
 \fBfiles\fR, \fBtheme\fR and \fBoverwrite\fR. Unknown or malformed
 requests exit 2. Runs before the shell starts, so no configuration, profiles or
 history are read.
+.TP
+.B status
+Print plain-text facts, one per line: the sharky version, the resolved config
+and theme paths with whether each file exists, the history path with whether it
+exists, and the active compile-time feature flags (\fBnone\fR in this release).
+The paths follow \fBSHARKY_CONFIG\fR, \fBXDG_CONFIG_HOME\fR and \fBHOME\fR for
+configuration and \fBSHARKY_HISTORY\fR, \fBXDG_DATA_HOME\fR and \fBHOME\fR for
+history. Always exits 0. Never prints environment values, configuration values
+or \fBpearl\fR directives, and never writes files.
+.TP
+.B doctor
+Run read-only local checks and print one \fBOK\fR or \fBFAIL\fR line per check:
+validity of standard input and output descriptors (the reason states whether
+each is a terminal; a pipe is fine), parsing of \fBconfig.sharky\fR through the
+configuration parser, parsing of \fBtheme.sharky\fR, history file permissions and
+writability, and availability of the baseline external tools \fBsh\fR, \fBls\fR
+and \fBcat\fR on \fBPATH\fR. Unreadable config files are reported separately
+because the parser silently skips them. The history file is only inspected via
+metadata: it is never opened for append and no lock is taken. Exits 0 when all
+checks pass and 1 when any fails. No fstab checks are performed.
 .TP
 .B \-\-no\-config
 Do not read the configuration files.
@@ -269,7 +295,8 @@ Searched for commands, extended by \fBcurrent\fR entries.
 .SH EXIT STATUS
 The status of the last command, or the argument of \fBexit\fR. A syntax error
 exits with 2; a command that cannot be found exits with 127; a command that
-cannot be executed exits with 126.
+cannot be executed exits with 126. \fBstatus\fR always exits 0, \fBdoctor\fR
+exits 1 when a check fails, and malformed subcommand arguments exit 2.
 .SH EXAMPLES
 .nf
     sharky -c 'printf "a b\\n" | wc -w'
@@ -277,6 +304,8 @@ cannot be executed exits with 126.
     sharky -l -c 'echo "$LOGIN_VAR"'
     sharky --json -c 'printf hi'
     sharky state --json --env
+    sharky status
+    sharky doctor
     sharky
 .fi
 .SH SEE ALSO

@@ -514,6 +514,8 @@ fn json_string(value: &str) -> String {
 fn print_help() {
     println!("Usage: sharky [OPTIONS] [FILE]");
     println!("       sharky state --json [--env] [--no-config]");
+    println!("       sharky status");
+    println!("       sharky doctor");
     println!();
     println!("  -c COMMAND   run COMMAND and exit");
     println!("  --check      check top-level syntax only: no execution, config, profiles or history");
@@ -524,6 +526,8 @@ fn print_help() {
     println!("  --json       print one JSON object for -c or state");
     println!("  --env        include the environment in state JSON");
     println!("  state        print shell state as JSON (requires --json)");
+    println!("  status       print version, resolved paths and active feature flags");
+    println!("  doctor       run read-only local checks; exit 1 if any check fails");
     println!("  config explain [TOPIC]  print the configuration guide (or one topic)");
     println!("  --no-config  do not load the configuration file");
     println!("  --version    print the version");
