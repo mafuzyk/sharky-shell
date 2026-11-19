@@ -537,3 +537,17 @@ fn interactive_shell_survives_nounset() {
     );
     assert!(seen.contains("AFTER-U-99"), "shell died on nounset: {seen:?}");
 }
+
+#[test]
+fn interactive_shell_survives_a_failing_if_condition() {
+    let seen = run_interactive(
+        &[
+            "set -e",
+            "if false || false; then :; else printf else; fi",
+            "printf 'AFTER-I-%s' 99",
+        ],
+        "AFTER-I-99",
+    );
+    assert!(seen.contains("else"), "condition did not run: {seen:?}");
+    assert!(seen.contains("AFTER-I-99"), "shell died on the condition: {seen:?}");
+}
