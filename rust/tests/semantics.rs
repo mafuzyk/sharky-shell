@@ -662,6 +662,103 @@ fn function_error_after_another_command_uses_127() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("v: boom"));
 }
 
+// An expansion error inside an if or while condition aborts the whole shell in
+// bash; it is not a false condition. The status follows the command-string
+// rule, and no later command runs.
+
+#[test]
+fn command_string_error_word_in_an_if_condition_aborts() {
+    let out = sharky(r#"unset v; if printf '%s' "${v?boom}"; then :; fi; printf after"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 127);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("v: boom"));
+}
+
+#[test]
+fn command_string_error_word_in_a_while_condition_aborts() {
+    let out = sharky(r#"unset v; while printf '%s' "${v?boom}"; do :; done; printf after"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 127);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("v: boom"));
+}
+
+#[test]
+fn command_string_elif_error_word_aborts() {
+    let out = sharky(r#"unset v; if false; then :; elif printf '%s' "${v?boom}"; then :; fi; printf after"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 127);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("v: boom"));
+}
+
+#[test]
+fn command_string_error_without_a_word_in_an_if_condition_aborts() {
+    let out = sharky(r#"unset v; if printf '%s' "${v?}"; then :; fi; printf after"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 127);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("parameter null or not set"));
+}
+
+#[test]
+fn command_string_nounset_in_an_if_condition_aborts() {
+    let out = sharky(r#"set -u; if printf '%s' "$v"; then :; fi; printf after"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 127);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("v: unbound variable"));
+}
+
+#[test]
+fn command_string_indirect_error_in_an_if_condition_aborts() {
+    let out = sharky(r#"set -u; unset n; if printf '%s' "${!n}"; then :; fi; printf after"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("n: invalid indirect expansion"));
+}
+
+#[test]
+fn script_error_word_in_an_if_condition_aborts() {
+    let out = sharky_script(r#"unset v; if printf '%s' "${v?boom}"; then :; fi; printf after"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("v: boom"));
+}
+
+#[test]
+fn script_nounset_in_an_if_condition_aborts() {
+    let out = sharky_script(r#"set -u; if printf '%s' "$v"; then :; fi; printf after"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("v: unbound variable"));
+}
+
+#[test]
+fn stdin_error_word_in_an_if_condition_aborts() {
+    let out = sharky_stdin(r#"unset v; if printf '%s' "${v?boom}"; then :; fi; printf after"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("v: boom"));
+}
+
+#[test]
+fn stdin_nounset_in_an_if_condition_aborts() {
+    let out = sharky_stdin(r#"set -u; if printf '%s' "$v"; then :; fi; printf after"#);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("v: unbound variable"));
+}
+
+#[test]
+fn interactive_shell_skips_the_body_of_a_failing_condition() {
+    let seen = run_interactive(
+        &[
+            r#"unset v; if printf 'BODY%s' "${v?boom}"; then :; fi"#,
+            r#"printf 'AFTER-IF-%s' 99"#,
+        ],
+        "AFTER-IF-99",
+    );
+    assert!(!seen.contains("BODY99"), "condition body ran: {seen:?}");
+    assert!(seen.contains("AFTER-IF-99"), "shell died: {seen:?}");
+}
+
 #[test]
 fn subshell_null_parameter_with_a_word_uses_1() {
     let out = sharky(r#"unset v; ( printf '[%s]' "${v?boom}" )"#);

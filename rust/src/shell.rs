@@ -1264,8 +1264,12 @@ impl Shell {
 
     fn run_if(&mut self, branches: &[(List, List)], else_body: Option<&List>) -> Flow {
         for (condition, body) in branches {
-            if let Flow::Status(0) = self.run_suppressed(condition) {
-                return self.run_list(body);
+            // A condition that fails an expansion aborts the whole shell, so
+            // its exit flow must not be mistaken for a false condition.
+            match self.run_suppressed(condition) {
+                Flow::Status(0) => return self.run_list(body),
+                Flow::Status(_) => {}
+                other => return other,
             }
         }
 
