@@ -26,6 +26,7 @@ pub fn run() -> i32 {
     let mut state = false;
     let mut state_env = false;
     let mut interactive = false;
+    let mut private = false;
 
     while let Some(arg) = args.next() {
         if script.is_some() {
@@ -45,6 +46,7 @@ pub fn run() -> i32 {
             "--json" => json = true,
             "--env" => state_env = true,
             "-i" => interactive = true,
+            "-P" | "--private" => private = true,
             "-l" | "--login" => login = true,
             "-c" => match args.next() {
                 Some(source) => command = Some(source),
@@ -125,7 +127,7 @@ pub fn run() -> i32 {
                 return 1;
             }
             if tty {
-                crate::repl::run(&mut shell)
+                crate::repl::run(&mut shell, private)
             } else {
                 match crate::term::read_stdin_lines() {
                     Ok(text) => shell.run(&text),
@@ -404,6 +406,7 @@ fn print_help() {
     println!("  -c COMMAND   run COMMAND and exit");
     println!("  -i           force interactive mode");
     println!("  -l, --login  read login profiles before the command");
+    println!("  -P, --private  keep no history file: read and write nothing");
     println!("  --json       print one JSON object for -c or state");
     println!("  --env        include the environment in state JSON");
     println!("  state        print shell state as JSON (requires --json)");

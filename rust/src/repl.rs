@@ -4,12 +4,12 @@ use crate::prompt;
 use crate::shell::Shell;
 use crate::term;
 
-pub fn run(shell: &mut Shell) -> i32 {
+pub fn run(shell: &mut Shell, private: bool) -> i32 {
     install_signals();
     shell.set_interactive(true);
 
+    shell.prepare_history(private);
     let mut editor = Editor::new();
-    shell.init_history();
     let mut buffer = String::new();
     let mut status = 0;
     let mut pending_end: Option<i32> = None;
@@ -85,7 +85,6 @@ pub fn run(shell: &mut Shell) -> i32 {
                         shell.push_history(&buffer);
                         buffer.clear();
                         if let Some(exit) = shell.exit_requested {
-                            shell.save_history();
                             return shell.finish(exit);
                         }
                     }
@@ -104,13 +103,9 @@ pub fn run(shell: &mut Shell) -> i32 {
                 shell.last_status = 130;
                 status = 130;
             }
-            Ok(Line::Eof) => {
-                shell.save_history();
-                return shell.finish(status);
-            }
+            Ok(Line::Eof) => return shell.finish(status),
             Err(err) => {
                 eprintln!("sharky: {err}");
-                shell.save_history();
                 return 1;
             }
         }

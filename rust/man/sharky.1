@@ -33,6 +33,9 @@ Force interactive mode; fails when standard input or output is not a terminal.
 .B \-l, \-\-login
 Read login profiles before the command or system input.
 .TP
+.B \-P, \-\-private
+Use no history file: prior commands are not read and new ones are not written.
+.TP
 .B \-\-json
 Print one JSON object for \fB\-c\fR or \fBstate\fR.
 .TP
@@ -170,6 +173,14 @@ is not supported; use
 or
 .B time -p.
 .PP
+.SH HISTORY
+Commands are appended to the shared file as they run, so an abrupt exit loses
+nothing. A shell that started earlier keeps its own view until it runs
+.B history merge
+from the prompt; this never rewrites entries from another session. Private mode
+keeps everything in memory and leaves the file untouched. A history file that
+cannot be read warns at startup and makes \fBhistory \-c\fR fail instead of
+claiming it cleared the file.
 .SH FILES
 .TP
 .I ~/.config/sharky/config.sharky
@@ -191,6 +202,9 @@ Login mode imports only literal \fINAME=value\fR and
 .TP
 .B SHARKY_CONFIG
 Configuration directory, overriding the default.
+.TP
+.B SHARKY_HISTORY
+History file path, overriding the default.
 .TP
 .B XDG_CONFIG_HOME
 Used to find the configuration directory.

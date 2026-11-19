@@ -2073,3 +2073,222 @@ fn redraw_keeps_the_prompt_on_screen() {
     let _ = child.wait();
     std::fs::remove_dir_all(&dir).ok();
 }
+
+struct SharedSession {
+    child: std::process::Child,
+    master: std::os::fd::OwnedFd,
+    writer: std::fs::File,
+}
+
+fn shared_fixture(name: &str) -> std::path::PathBuf {
+    let dir = std::path::Path::new("/tmp/opencode").join(format!(
+        "sharky-shared-{name}-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("home")).unwrap();
+    dir
+}
+
+fn shared_session(dir: &std::path::Path, args: &[&str]) -> SharedSession {
+    shared_session_with_startup(dir, args).0
+}
+
+fn shared_session_with_startup(dir: &std::path::Path, args: &[&str]) -> (SharedSession, String) {
+    let pty = openpty(None, None).expect("pty");
+    let stdin = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stdout = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stderr = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+
+    let child = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args(args)
+        .stdin(stdin)
+        .stdout(stdout)
+        .stderr(stderr)
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .env("TERM", "xterm-256color")
+        .env("HOME", dir.join("home"))
+        .env("SHARKY_HISTORY", dir.join("history"))
+        .spawn()
+        .expect("spawn sharky");
+
+    let writer = unsafe { std::fs::File::from_raw_fd(pty.master.try_clone().unwrap().into_raw_fd()) };
+    let session = SharedSession {
+        child,
+        master: pty.master,
+        writer,
+    };
+    let startup = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    (session, startup)
+}
+
+impl SharedSession {
+    fn run(&mut self, line: &str) -> String {
+        let fd = self.master.as_raw_fd();
+        let _ = self.writer.write_all(format!("{line}\r").as_bytes());
+        read_until(fd, HISTORY_PROMPT_END, Duration::from_secs(5))
+    }
+
+    fn finish(mut self) {
+        let _ = self.writer.write_all(b"exit\r");
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+fn two_shells_merge_brings_sibling_entries_into_view() {
+    let dir = shared_fixture("merge-visibility");
+    let mut a = shared_session(&dir, &[]);
+    let mut b = shared_session(&dir, &[]);
+
+    a.run("printf from-sibling > $HOME/from_sibling");
+    assert!(wait_for(&dir.join("home/from_sibling"), Duration::from_secs(5)));
+
+    b.run("history > $HOME/before");
+    let before = std::fs::read_to_string(dir.join("home/before")).unwrap();
+    assert!(
+        !before.contains("from-sibling"),
+        "sibling entry visible before merge: {before:?}"
+    );
+
+    b.run("history merge");
+    b.run("history > $HOME/after");
+    let after = std::fs::read_to_string(dir.join("home/after")).unwrap();
+    assert!(
+        after.contains("printf from-sibling > $HOME/from_sibling"),
+        "merge missed sibling entry: {after:?}"
+    );
+
+    a.finish();
+    b.finish();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn stale_shell_exit_does_not_clobber_live_history() {
+    let dir = shared_fixture("stale-exit");
+    let mut a = shared_session(&dir, &[]);
+    let b = shared_session(&dir, &[]);
+
+    a.run("printf survivor > $HOME/survivor");
+    assert!(wait_for(&dir.join("home/survivor"), Duration::from_secs(5)));
+
+    // B never observed A's entry and exits with its stale in-memory view.
+    b.finish();
+
+    let text = std::fs::read_to_string(dir.join("history")).unwrap();
+    assert!(
+        text.contains("printf survivor > $HOME/survivor"),
+        "stale exit clobbered the file: {text:?}"
+    );
+
+    let mut c = shared_session(&dir, &[]);
+    c.run("history > $HOME/fresh");
+    let fresh = std::fs::read_to_string(dir.join("home/fresh")).unwrap();
+    assert!(
+        fresh.contains("printf survivor > $HOME/survivor"),
+        "fresh shell lost the entry: {fresh:?}"
+    );
+
+    a.finish();
+    c.finish();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn command_is_persisted_after_abrupt_termination() {
+    let dir = shared_fixture("abrupt");
+    let mut a = shared_session(&dir, &[]);
+
+    a.run("printf abrupt-cmd > $HOME/abrupt");
+    assert!(wait_for(&dir.join("home/abrupt"), Duration::from_secs(5)));
+
+    a.child.kill().expect("kill shell");
+    let _ = a.child.wait();
+
+    let text = std::fs::read_to_string(dir.join("history")).unwrap();
+    assert!(
+        text.contains("printf abrupt-cmd > $HOME/abrupt"),
+        "command lost on SIGKILL: {text:?}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn private_mode_starts_empty_and_leaves_history_bytes_untouched() {
+    let dir = shared_fixture("private");
+    let seed = "seeded command\n";
+    std::fs::write(dir.join("history"), seed).unwrap();
+    let before = std::fs::read(dir.join("history")).unwrap();
+
+    let mut a = shared_session(&dir, &["--private"]);
+    a.run("history > $HOME/private-list");
+    let list = std::fs::read_to_string(dir.join("home/private-list")).unwrap();
+    assert!(list.is_empty(), "private shell saw prior history: {list:?}");
+
+    let out = a.run("history merge");
+    assert!(
+        out.contains("can't merge history in private mode"),
+        "private merge error not surfaced: {out:?}"
+    );
+
+    a.run("printf ran-private > $HOME/private-ran");
+    assert!(wait_for(&dir.join("home/private-ran"), Duration::from_secs(5)));
+    a.finish();
+
+    assert_eq!(
+        std::fs::read(dir.join("history")).unwrap(),
+        before,
+        "private mode wrote history bytes"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn refused_history_file_warns_and_clear_never_reports_success() {
+    use std::os::unix::fs::symlink;
+
+    let dir = shared_fixture("refused-load");
+    let target = dir.join("target");
+    std::fs::write(&target, "seeded command\n").unwrap();
+    let before = std::fs::read(&target).unwrap();
+    symlink(&target, dir.join("history")).unwrap();
+
+    let (mut a, startup) = shared_session_with_startup(&dir, &[]);
+    assert!(
+        startup.contains("refusing history path"),
+        "no startup load diagnostic: {startup:?}"
+    );
+
+    a.run("history > $HOME/list");
+    let list = std::fs::read_to_string(dir.join("home/list")).unwrap();
+    assert!(list.is_empty(), "refused file was read: {list:?}");
+
+    let cleared = a.run("history -c");
+    assert!(
+        cleared.contains("refusing history path"),
+        "no clear diagnostic: {cleared:?}"
+    );
+    assert!(
+        cleared.contains("\x1b]133;D;1\x1b\\"),
+        "failed clear reported success: {cleared:?}"
+    );
+
+    let merged = a.run("history merge");
+    assert!(
+        merged.contains("refusing history path"),
+        "merge hid the load failure: {merged:?}"
+    );
+
+    a.finish();
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        before,
+        "refused file was modified"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

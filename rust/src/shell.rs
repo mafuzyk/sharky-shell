@@ -49,6 +49,7 @@ pub struct Shell {
     traps: HashMap<String, String>,
     exit_trap_ran: bool,
     history: Option<History>,
+    history_load_error: Option<String>,
     histexpand: bool,
     vi: bool,
     z: Option<Z>,
@@ -141,6 +142,7 @@ impl Shell {
             traps: HashMap::new(),
             exit_trap_ran: false,
             history: None,
+            history_load_error: None,
             histexpand: true,
             vi: false,
             z: None,
@@ -1809,19 +1811,41 @@ impl Shell {
         flow
     }
 
-    pub fn init_history(&mut self) {
-        self.history = Some(History::load(History::default_path(), self.history_limit()));
+    /// Warns on a refused history file and falls back to memory only. The failed
+    /// load is remembered so `history -c` cannot report clearing a file it never
+    /// opened.
+    pub fn prepare_history(&mut self, private: bool) {
+        self.history_load_error = None;
+        let limit = self.history_limit();
+        self.history = Some(if private {
+            History::private(limit)
+        } else {
+            match History::try_load(History::default_path(), limit) {
+                Ok(history) => history,
+                Err(err) => {
+                    eprintln!("sharky: history: {err}");
+                    self.history_load_error = Some(err);
+                    History::private(limit)
+                }
+            }
+        });
+    }
+
+    pub fn merge_history(&mut self) -> Result<(), String> {
+        if let Some(err) = &self.history_load_error {
+            return Err(err.clone());
+        }
+        let Some(history) = self.history.as_mut() else {
+            return Err("history: not available".to_string());
+        };
+        history.merge()
     }
 
     pub fn push_history(&mut self, line: &str) {
         if let Some(history) = &mut self.history {
-            history.add(line);
-        }
-    }
-
-    pub fn save_history(&self) {
-        if let Some(history) = &self.history {
-            history.save();
+            if let Err(err) = history.try_add(line) {
+                eprintln!("sharky: {err}");
+            }
         }
     }
 
@@ -1996,13 +2020,32 @@ impl Shell {
             return 0;
         }
         if args.len() == 1 && args[0] == "-c" {
-            if let Some(history) = &mut self.history {
-                history.clear();
+            if let Some(err) = &self.history_load_error {
+                eprintln!("sharky: history: {err}");
+                return 1;
             }
-            return 0;
+            let Some(history) = self.history.as_mut() else {
+                return 1;
+            };
+            return match history.try_clear() {
+                Ok(()) => 0,
+                Err(err) => {
+                    eprintln!("sharky: {err}");
+                    1
+                }
+            };
+        }
+        if args.len() == 1 && args[0] == "merge" {
+            return match self.merge_history() {
+                Ok(()) => 0,
+                Err(err) => {
+                    eprintln!("sharky: {err}");
+                    1
+                }
+            };
         }
 
-        eprintln!("sharky: history: usage: history [-c]");
+        eprintln!("sharky: history: usage: history [-c | merge]");
         1
     }
 

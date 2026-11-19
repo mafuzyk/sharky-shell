@@ -2237,6 +2237,64 @@ fn state_json_does_not_create_history_or_z_files() {
     std::fs::remove_dir_all(&data).ok();
 }
 
+#[test]
+fn help_lists_private_flag_but_no_merge_flag() {
+    let out = sharky(&["--help"]);
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    for flag in ["-P", "--private"] {
+        assert!(text.contains(flag), "missing {flag} in help: {text}");
+    }
+    assert!(!text.contains("--merge"), "unrequested flag in help: {text}");
+}
+
+#[test]
+fn merge_startup_flag_is_rejected() {
+    let out = sharky(&["--merge", "-c", "true"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("unknown option: --merge"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn history_fixture(name: &str) -> std::path::PathBuf {
+    let dir = std::path::Path::new("/tmp/opencode").join(format!(
+        "sharky-cli-history-{name}-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn sharky_with_history(dir: &std::path::Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args(args)
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .env("SHARKY_HISTORY", dir.join("history"))
+        .env("HOME", dir)
+        .output()
+        .expect("failed to run sharky")
+}
+
+#[test]
+fn private_short_flag_keeps_command_semantics_and_leaves_history_alone() {
+    let dir = history_fixture("private-short");
+    let history = dir.join("history");
+    std::fs::write(&history, "seed command\n").unwrap();
+    let before = std::fs::read(&history).unwrap();
+
+    let out = sharky_with_history(&dir, &["-P", "--json", "-c", "printf ok"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("\"stdout\":\"ok\""), "{text}");
+    assert_eq!(std::fs::read(&history).unwrap(), before, "private mode wrote history");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 fn login_home(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("sharky-login-{}-{name}", std::process::id()));
     std::fs::create_dir_all(dir.join(".config/sharky")).unwrap();
