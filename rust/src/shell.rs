@@ -61,6 +61,7 @@ pub struct Shell {
     substitution_ready: Vec<i32>,
     json_exec: Option<(RawFd, Vec<(String, String)>)>,
     expansion_error: bool,
+    substitution_status: Option<i32>,
     pub exit_requested: Option<i32>,
     jobs: Vec<Job>,
     next_job: usize,
@@ -176,6 +177,7 @@ impl Shell {
             substitution_ready: Vec::new(),
             json_exec: None,
             expansion_error: false,
+            substitution_status: None,
             exit_requested: None,
             jobs: Vec::new(),
             next_job: 1,
@@ -782,6 +784,7 @@ impl Shell {
 
     fn run_simple_inner(&mut self, simple: &Simple) -> Flow {
         if simple.words.is_empty() && simple.redirects.is_empty() {
+            self.substitution_status = None;
             for assignment in &simple.assignments {
                 self.assign(assignment);
             }
@@ -793,6 +796,9 @@ impl Shell {
             if self.expansion_error {
                 self.expansion_error = false;
                 return self.expansion_failure();
+            }
+            if let Some(code) = self.substitution_status.take().filter(|code| *code != 0) {
+                return Flow::Status(code);
             }
             return Flow::Status(0);
         }
@@ -922,10 +928,14 @@ impl Shell {
 
     fn run_simple_child_inner(&mut self, simple: &Simple) -> i32 {
         if simple.words.is_empty() && simple.redirects.is_empty() {
+            self.substitution_status = None;
             for assignment in &simple.assignments {
                 self.assign(assignment);
             }
-            return i32::from(self.nounset_failed);
+            if self.nounset_failed {
+                return 1;
+            }
+            return self.substitution_status.take().unwrap_or(0);
         }
 
         let prepared = match self.prepare(simple) {
@@ -3599,7 +3609,8 @@ impl Shell {
                 let mut file = unsafe { std::fs::File::from_raw_fd(read.into_raw_fd()) };
                 let mut output = String::new();
                 let _ = file.read_to_string(&mut output);
-                exec::wait(child);
+                let status = exec::wait(child);
+                self.substitution_status = Some(status);
                 while output.ends_with('\n') {
                     output.pop();
                 }
