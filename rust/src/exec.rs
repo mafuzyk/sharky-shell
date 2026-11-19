@@ -15,12 +15,34 @@ pub fn resolve(name: &str, shell: &Shell) -> Option<PathBuf> {
 }
 
 /// Resolves `name` against an explicit `path`, so `command -p` can search the
-/// default path without a temporary environment change.
+/// default path without a temporary environment change. A name containing a
+/// slash is kept as written even when it is not executable: execution reports
+/// the failing `execve` error, which is what bash does.
 pub fn resolve_in(name: &str, path: &str) -> Option<PathBuf> {
     if name.contains('/') {
         return Some(PathBuf::from(name));
     }
 
+    search_path(name, path)
+}
+
+/// Command lookup for `command -v`/`-V` and `type`. Bash treats a name
+/// containing a slash as a command only when it names an executable file, and
+/// never searches PATH for it.
+pub fn lookup(name: &str, shell: &Shell) -> Option<PathBuf> {
+    lookup_in(name, path_of(shell))
+}
+
+pub fn lookup_in(name: &str, path: &str) -> Option<PathBuf> {
+    if name.contains('/') {
+        let path = Path::new(name);
+        return is_executable(path).then(|| path.to_path_buf());
+    }
+
+    search_path(name, path)
+}
+
+fn search_path(name: &str, path: &str) -> Option<PathBuf> {
     path.split(':')
         .map(|dir| {
             if dir.is_empty() {

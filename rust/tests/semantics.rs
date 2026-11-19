@@ -1811,6 +1811,72 @@ fn command_big_v_reports_a_missing_name_on_stderr_and_fails() {
     assert_eq!(status(&out), 1);
 }
 
+// A name containing a slash is only a command when it is an executable file.
+// Bash never searches PATH for it and never reports a plain file, a directory
+// or a symlink to a non-executable one.
+
+fn temp_file(name: &str, mode: u32) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = temp_dir().join(name);
+    std::fs::write(&path, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+    path
+}
+
+#[test]
+fn command_v_prints_the_path_of_an_executable_file() {
+    let path = temp_file("probe.sh", 0o755);
+    let out = sharky(&format!("command -v {}", path.display()));
+    assert_eq!(stdout(&out), format!("{}\n", path.display()));
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn command_v_rejects_a_non_executable_file() {
+    let path = temp_file("plain.sh", 0o644);
+    let out = sharky(&format!("command -v {}", path.display()));
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+}
+
+#[test]
+fn command_v_rejects_a_directory() {
+    let dir = temp_dir();
+    let out = sharky(&format!("command -v {}", dir.display()));
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 1);
+}
+
+#[test]
+fn command_big_v_rejects_a_non_executable_file() {
+    let path = temp_file("plain.sh", 0o644);
+    let out = sharky(&format!("command -V {}", path.display()));
+    assert_eq!(stdout(&out), "");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("command: "), "{stderr:?}");
+    assert!(stderr.contains("not found"), "{stderr:?}");
+    assert_eq!(status(&out), 1);
+}
+
+#[test]
+fn type_rejects_a_non_executable_file() {
+    let path = temp_file("plain.sh", 0o644);
+    let out = sharky(&format!("type {}", path.display()));
+    assert_eq!(stdout(&out), "");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("type: "), "{stderr:?}");
+    assert!(stderr.contains("not found"), "{stderr:?}");
+    assert_eq!(status(&out), 1);
+}
+
+#[test]
+fn running_a_non_executable_file_reports_permission_denied() {
+    let path = temp_file("plain.sh", 0o644);
+    let out = sharky(&format!("{}", path.display()));
+    assert_eq!(status(&out), 126);
+}
+
 #[test]
 fn command_runs_a_builtin_when_no_function_shadows_it() {
     let out = sharky("command cd /; pwd");

@@ -2674,8 +2674,8 @@ impl Shell {
             Some(Resolution::Builtin)
         } else {
             let found = match path {
-                Some(path) => exec::resolve_in(name, path),
-                None => exec::resolve(name, self),
+                Some(path) => exec::lookup_in(name, path),
+                None => exec::lookup(name, self),
             };
             found.map(Resolution::External)
         }
