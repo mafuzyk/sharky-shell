@@ -555,7 +555,7 @@ impl Shell {
             };
             let should_run = if *is_and { status == 0 } else { status != 0 };
             if should_run {
-                self.errexit_suppressed = index + 1 != and_or.rest.len();
+                self.errexit_suppressed = previous || index + 1 != and_or.rest.len();
                 flow = self.run_pipeline(pipeline);
             }
         }
