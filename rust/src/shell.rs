@@ -1604,6 +1604,20 @@ impl Shell {
         self.ifs_first_char().map(String::from).unwrap_or_default()
     }
 
+    /// Separator for an unquoted joined expansion: the first character of IFS.
+    /// A null IFS leaves the elements as separate words, except for the keys
+    /// of `${!a[*]}`, which bash keeps apart with a space.
+    fn unquoted_join(&self, parameter: &Parameter) -> Option<String> {
+        if !joins_elements(parameter) {
+            return None;
+        }
+        match self.ifs_first_char() {
+            Some(separator) => Some(separator.to_string()),
+            None if parameter.operator == Some(ParamOp::Keys) => Some(" ".to_string()),
+            None => None,
+        }
+    }
+
     pub fn var(&self, name: &str) -> String {
         if !name.is_empty() && name.chars().all(|char| char.is_ascii_digit()) {
             if name == "0" {
@@ -2889,8 +2903,7 @@ impl Shell {
                             Part::Parameter(parameter) => {
                                 if let Some(values) = self.parameter_elements(parameter) {
                                     let join = joins_elements(parameter)
-                                        .then(|| self.ifs_first_char())
-                                        .flatten();
+                                        .then(|| self.ifs_join_separator());
                                     fields.field_quoted_multi(&values, join);
                                 } else {
                                     let mut text = String::new();
@@ -2923,9 +2936,7 @@ impl Shell {
                 }
                 Part::Parameter(parameter) => {
                     if let Some(values) = self.parameter_elements(parameter) {
-                        let join = joins_elements(parameter)
-                            .then(|| self.ifs_first_char())
-                            .flatten();
+                        let join = self.unquoted_join(parameter);
                         fields.field_multi(&values, join);
                     } else {
                         let value = self.parameter_value(parameter);
@@ -3065,6 +3076,13 @@ impl Shell {
         }
 
         if parameter.operator == Some(ParamOp::Keys) && multiple {
+            // The at form falls back to a space when IFS is empty, while the
+            // star form joins with nothing.
+            let separator = match self.ifs_first_char() {
+                Some(separator) => separator.to_string(),
+                None if index == Some("@") => " ".to_string(),
+                None => String::new(),
+            };
             if let Some(array) = self.arrays.get(&parameter.name) {
                 return array
                     .iter()
@@ -3072,10 +3090,14 @@ impl Shell {
                     .filter(|(_, value)| value.is_some())
                     .map(|(index, _)| index.to_string())
                     .collect::<Vec<_>>()
-                    .join(" ");
+                    .join(&separator);
             }
             if let Some(assoc) = self.assoc.get(&parameter.name) {
-                return assoc.keys().cloned().collect::<Vec<_>>().join(" ");
+                return assoc
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(&separator);
             }
             return String::new();
         }
@@ -4674,7 +4696,7 @@ impl Fields {
         }
     }
 
-    fn field_quoted_multi(&mut self, values: &[String], join: Option<char>) {
+    fn field_quoted_multi(&mut self, values: &[String], join: Option<String>) {
         if values.is_empty() {
             if join.is_some() {
                 self.started = true;
@@ -4684,7 +4706,7 @@ impl Fields {
         if let Some(separator) = join {
             for (index, value) in values.iter().enumerate() {
                 if index > 0 {
-                    self.current.push(separator);
+                    self.current.push_str(&separator);
                 }
                 self.push_quoted(value);
             }
@@ -4699,12 +4721,12 @@ impl Fields {
         }
     }
 
-    fn field_multi(&mut self, values: &[String], join: Option<char>) {
+    fn field_multi(&mut self, values: &[String], join: Option<String>) {
         if values.is_empty() {
             return;
         }
         if let Some(separator) = join {
-            let joined = values.join(&separator.to_string());
+            let joined = values.join(&separator);
             self.push(&joined, false);
             return;
         }

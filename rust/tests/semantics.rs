@@ -317,6 +317,169 @@ fn empty_ifs_joins_array_elements_with_nothing() {
     assert_eq!(status(&out), 0);
 }
 
+// "${!a[*]}" and "${!a[@]}" expand the array keys. The star form joins them
+// with the first character of IFS and the at form keeps one word per key, as
+// element expansion does. bash keeps an unquoted star join and a scalar at
+// join apart with a space when IFS is empty.
+
+#[test]
+fn quoted_array_keys_join_with_ifs_first_char() {
+    let out = sharky(r#"IFS=:; a=(x y); printf '%s' "${!a[*]}""#);
+    assert_eq!(stdout(&out), "0:1");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn quoted_array_keys_keep_one_word_per_key_with_at() {
+    let out = sharky(r#"IFS=:; a=(x y); printf '<%s>' "${!a[@]}""#);
+    assert_eq!(stdout(&out), "<0><1>");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn unquoted_array_keys_join_then_split_on_ifs() {
+    let out = sharky(r#"IFS=:; a=(x y); set -- ${!a[*]}; printf '%s|' "$@""#);
+    assert_eq!(stdout(&out), "0|1|");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn empty_ifs_joins_quoted_array_keys_with_nothing() {
+    let out = sharky(r#"IFS=; a=(x y); printf '%s' "${!a[*]}""#);
+    assert_eq!(stdout(&out), "01");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn empty_ifs_keeps_joined_array_keys_in_one_word() {
+    let out = sharky(r#"IFS=; a=(x y); for k in "${!a[*]}"; do printf '[%s]' "$k"; done"#);
+    assert_eq!(stdout(&out), "[01]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn empty_ifs_keeps_unquoted_array_keys_in_one_word() {
+    let out =
+        sharky(r#"IFS=; a=(x y); set -- ${!a[*]}; printf '%s|' "$@"; printf '=%s' "$#""#);
+    assert_eq!(stdout(&out), "0 1|=1");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn empty_ifs_still_splits_unquoted_keys_with_at() {
+    let out =
+        sharky(r#"IFS=; a=(x y); set -- ${!a[@]}; printf '%s|' "$@"; printf '=%s' "$#""#);
+    assert_eq!(stdout(&out), "0|1|=2");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn empty_ifs_keeps_unquoted_array_elements_as_separate_words() {
+    let out =
+        sharky(r#"IFS=; a=(x y); set -- ${a[*]}; printf '<%s>' "$@"; printf '=%s' "$#""#);
+    assert_eq!(stdout(&out), "<x><y>=2");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn assigned_quoted_array_keys_join_with_ifs_first_char() {
+    let out = sharky(r#"IFS=:; a=(x y); v="${!a[*]}"; printf '[%s]' "$v""#);
+    assert_eq!(stdout(&out), "[0:1]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn assigned_unquoted_array_keys_join_with_ifs_first_char() {
+    let out = sharky(r#"IFS=:; a=(x y); v=${!a[*]}; printf '[%s]' "$v""#);
+    assert_eq!(stdout(&out), "[0:1]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn associative_keys_join_with_ifs_first_char() {
+    let out = sharky(
+        r#"IFS=:; declare -A m=([k1]=v1 [k2]=v2); printf '%s' "${!m[*]}""#,
+    );
+    assert_eq!(stdout(&out), "k1:k2");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn assigned_associative_keys_join_with_ifs_first_char() {
+    let out = sharky(
+        r#"IFS=:; declare -A m=([k1]=v1 [k2]=v2); v="${!m[*]}"; printf '[%s]' "$v""#,
+    );
+    assert_eq!(stdout(&out), "[k1:k2]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn empty_ifs_keeps_unquoted_associative_keys_in_one_word() {
+    let out = sharky(
+        r#"IFS=; declare -A m=([k1]=v1 [k2]=v2); set -- ${!m[*]}; printf '%s|' "$@"; printf '=%s' "$#""#,
+    );
+    assert_eq!(stdout(&out), "k1 k2|=1");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn empty_ifs_joins_assigned_quoted_keys_with_a_space() {
+    let out = sharky(r#"IFS=; a=(x y); v="${!a[@]}"; printf '[%s]' "$v""#);
+    assert_eq!(stdout(&out), "[0 1]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn default_ifs_joins_array_keys_with_a_space() {
+    let out = sharky(r#"a=(x y); printf '[%s]' "${!a[*]}""#);
+    assert_eq!(stdout(&out), "[0 1]");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn empty_array_has_no_keys() {
+    let out = sharky(r#"a=(); printf '[%s]' "${!a[*]}"; set -- "${!a[@]}"; printf '=%s' "$#""#);
+    assert_eq!(stdout(&out), "[]=0");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn unquoted_empty_array_keys_expand_to_nothing() {
+    let out = sharky(r#"a=(); printf '[%s]' ${!a[*]} ${!a[@]}; printf done"#);
+    assert_eq!(stdout(&out), "[]done");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn unset_array_has_no_keys() {
+    let out = sharky(
+        r#"unset u; printf '[%s]' "${!u[*]}"; set -- "${!u[@]}"; printf '=%s' "$#""#,
+    );
+    assert_eq!(stdout(&out), "[]=0");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn array_key_counts_match_the_element_counts() {
+    let out = sharky(r#"IFS=:; a=(x y); printf '%s%s' "${#a[*]}" "${#a[@]}""#);
+    assert_eq!(stdout(&out), "22");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn associative_key_counts_match_the_element_counts() {
+    let out = sharky(r#"declare -A m=([k1]=v1); printf '%s%s' "${#m[*]}" "${#m[@]}""#);
+    assert_eq!(stdout(&out), "11");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn empty_array_key_counts_are_zero() {
+    let out = sharky(r#"a=(); printf '%s%s' "${#a[*]}" "${#a[@]}""#);
+    assert_eq!(stdout(&out), "00");
+    assert_eq!(status(&out), 0);
+}
+
 // local: a name without a value shadows the previous binding without becoming
 // set itself.
 
