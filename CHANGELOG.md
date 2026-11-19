@@ -8,6 +8,8 @@ rather than a separate preview track.
 
 ## [Unreleased]
 
+## [3.6.0] - 2026-11-19
+
 ### Added
 
 - `sharky status` prints plain-text facts before the shell starts: the version,
@@ -20,9 +22,9 @@ rather than a separate preview track.
   load would silently skip, theme parsing, history permissions and writability
   by metadata only, and resolution of `sh`, `ls` and `cat` through
   `exec::resolve`. It prints one `OK`/`FAIL` line per check, exits 0 when all
-  pass and 1 when any fails, and performs no fstab checks. Both subcommands run
-  before `Shell::new()`: no config load, no `pearl`, no profiles, no writes and
-  no printing of environment or configuration values.
+  pass and 1 when any fails, and performs no fstab checks. `status` runs before
+  the shell starts and neither subcommand loads configuration: no `pearl`, no
+  profiles, no writes and no printing of environment or configuration values.
 - Durable command history: each evaluated command is appended to one shared file
   under a lock, with failed writes kept only in memory and torn tails dropped on
   the next append. Sessions keep their own view until `history merge`, and
@@ -76,6 +78,21 @@ rather than a separate preview track.
   `config explain`. An unknown topic exits 1. The subcommand runs before the
   shell starts: no configuration is loaded or created and there are no side
   effects.
+- `--check` parses `-c` or a file for syntax only: it exits 0 silently on
+  success, or 2 with a line reference on a top-level syntax error. It requires
+  `-c` or a file (not stdin), checks only top-level syntax, executes nothing and
+  neither reads nor writes configuration, profiles or history. It cannot be
+  combined with `-i`, `-l`, `--json` or `state`.
+- `command` runs a name without function lookup, so it reaches the builtin or
+  external command hidden by a same-named function. `-v` prints how each name
+  resolves (bare name for builtins and functions, `alias name='value'` for
+  aliases, a path for externals) and `-V` prints a verbose description; missing
+  names are skipped silently by `-v` and reported on stderr by `-V`. `-p`
+  searches the default PATH instead of the environment PATH for lookup and for
+  execution, without changing the environment. The status follows Bash: with
+  `-v`/`-V` it is 0 when any name resolves (and with no names), and 1 only when
+  every name is missing; otherwise it is the status of the command run (127
+  when the name is not found), and an invalid option returns 2.
 
 ### Fixed
 
@@ -96,16 +113,23 @@ rather than a separate preview track.
 - `set -e` and `set -u` no longer exit the interactive shell: errexit failures,
   unbound variables and failing `if` conditions report a status and return to
   the prompt.
-- `command` runs a name without function lookup, so it reaches the builtin or
-  external command hidden by a same-named function. `-v` prints how each name
-  resolves (bare name for builtins and functions, `alias name='value'` for
-  aliases, a path for externals) and `-V` prints a verbose description; missing
-  names are skipped silently by `-v` and reported on stderr by `-V`. `-p`
-  searches the default PATH instead of the environment PATH for lookup and for
-  execution, without changing the environment. The status follows Bash: with
-  `-v`/`-V` it is 0 when any name resolves (and with no names), and 1 only when
-  every name is missing; otherwise it is the status of the command run (127
-  when the name is not found), and an invalid option returns 2.
+- Expansion errors now follow Bash's per-context status: a null or unset
+  parameter error exits 127 in a `-c` command string without errexit, while
+  scripts, standard input, subshells, errexit shells and interactive lines keep
+  status 1 (arithmetic errors stay at 1). An expansion error in an `if`/`elif`
+  condition now aborts the shell instead of being treated as a false condition.
+- `read` splits fields on `IFS` with Bash's last-name remainder rule: leading
+  and delimiter-adjacent IFS whitespace is skipped, a non-whitespace delimiter
+  ends a field even when empty, and the last name receives the rest of the line
+  with its delimiters. A trailing IFS character ends the remainder, a null IFS
+  leaves the line unsplit, and bare `read` stores the untrimmed line in `REPLY`.
+- A name no longer holds both a scalar and an array binding: a later assignment
+  of either kind wins, scalar writes go into element 0 of an existing array, and
+  a stale scalar is no longer exported after the name becomes an array.
+- Declaring an indexed array associative, or an associative array indexed, no
+  longer discards its elements: the conversion is rejected with status 1, the
+  original array is kept and the error is reported for that name while the
+  remaining arguments still apply.
 
 ## [3.5.4] - 2026-11-02
 
