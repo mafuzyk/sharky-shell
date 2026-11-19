@@ -1,9 +1,9 @@
 # Compatibility baseline contract
 
 Small, benign shell snippets with a frozen expected baseline, used to compare a
-candidate shell (Sharky) against real reference shells. This unit only prepares
-fixtures and the contract; it does not build or modify the Rust implementation,
-the Ruby oracle, or any Rust tests.
+candidate shell (Sharky) against real reference shells. This directory holds
+only the fixtures, the contract and the baseline; the candidate is built
+elsewhere.
 
 ## Classification
 
@@ -83,11 +83,11 @@ cd compatibility && DASH_BIN=/path/to/dash ./run.sh record
 # Sanity-check that references still reproduce the frozen baseline (no sharky build needed).
 cd compatibility && DASH_BIN=/path/to/dash ./run.sh verify-refs
 
-# Compare an already-built Sharky binary; this unit never compiles one.
+# Compare an already-built Sharky binary.
 cd compatibility && ./run.sh check /path/to/sharky
 ```
 
 `DASH_BIN` and `BASH_BIN` select reference paths; `COMPAT_PATH`, `TIMEOUT_SECS`,
 `TIMEOUT_BIN` and `CANDIDATE_ARGS` control the isolated run. `check` PASS/FAIL
-lines name the candidate, not the reference. `check` requires a Sharky binary
-that this unit did not build and did not verify.
+lines name the candidate, not the reference. `check` takes the path to an
+already-built Sharky binary.
