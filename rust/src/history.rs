@@ -1,11 +1,16 @@
 //! File-backed command history.
 //!
-//! A command becomes durable at `try_add`: one escaped line is appended to the
-//! file under an exclusive `flock` on its parent directory, so two shells never
-//! clobber each other. The `limit` the caller passes bounds memory only; the file
-//! is shared between sessions that may pass different limits, so nothing on disk
-//! is pruned to it. Compaction every `VACUUM_EVERY` appends only collapses
-//! duplicate lines, keeping the newest occurrence of each command.
+//! A command becomes durable at `try_add`: one v2 record is appended to the file
+//! under an exclusive `flock` on its parent directory, so two shells never clobber
+//! each other. The `limit` the caller passes bounds memory only; the file is shared
+//! between sessions that may pass different limits, so nothing on disk is pruned to
+//! it. Compaction every `VACUUM_EVERY` appends only collapses duplicate records,
+//! keeping the newest occurrence of each command with its own bytes.
+//!
+//! The in-memory view holds one copy of each command at the position of its newest
+//! record, so a repeat of an older command has to be appended again to become the
+//! newest one and answer `!!` correctly. Two identical consecutive commands are one
+//! event and write nothing the second time.
 //!
 //! Writes and reads are newline records: a crash can leave a torn tail without its
 //! newline, which readers drop and the next append truncates away before writing.
@@ -15,13 +20,16 @@
 //!
 //! Reading accepts both record formats: the legacy bare escaped command and the v2
 //! TAB-separated record documented on [`Record`]. Both escape their own newlines,
-//! so a record is always one line and a torn tail stays detectable.
+//! so a record is always one line and a torn tail stays detectable. Records are
+//! split on a bare `\n`, never on `str::lines`, so a carriage return a CRLF paste
+//! left in the command survives.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use nix::fcntl::{Flock, FlockArg};
 
@@ -45,33 +53,37 @@ pub const MAX_PATHS: usize = 8;
 /// The v2 grammar is one line per record with fields separated by a raw TAB:
 ///
 /// ```text
-/// h2 \t <when-us> \t <cwd> \t <npaths> \t <path>... \t <cmd>
+/// h2 \t <when-us> \t <cwd> \t <npaths> \t <path>... \t <cmd> \t <hits>
 /// ```
 ///
 /// `when` is microseconds since the Unix epoch. The command sits at field index
-/// `4 + npaths`, so a record with paths never shifts its command. Fields past the
-/// expected count are ignored, which lets a newer writer add fields without
-/// breaking this reader. `npaths` must agree with the fields that follow, or the
-/// line is not a valid v2 header and loads as legacy.
+/// `4 + npaths`, so a record with paths never shifts its command. `hits` follows the
+/// command as an extra field: how many times the command has been recorded up to
+/// this line. A reader that predates it stops at the command, and a v2 line without
+/// it decodes as one hit. Fields past `hits` are ignored, which lets a newer writer
+/// add fields without breaking this reader. `npaths` must agree with the fields that
+/// follow, or the line is not a valid v2 header and loads as legacy.
 ///
 /// Escapes inside every text field: backslash is doubled (`\\`), newline becomes
-/// `\n` and TAB becomes `\t`. A raw TAB is therefore always a separator.
+/// `\n`, TAB becomes `\t` and carriage return becomes `\r`. A raw TAB is therefore
+/// always a separator and a record never spans two lines.
 ///
 /// A legacy (v1) line is a bare escaped command with no header. It loads with
 /// `when = None` and keeps the line it was decoded from, so compaction can write
 /// it back byte for byte.
-#[allow(dead_code)] // the append path starts emitting v2 in a later unit
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
     pub command: String,
     pub when: Option<i64>,
     pub cwd: Option<String>,
     pub paths: Vec<String>,
+    /// How many times the command had been recorded when this line was written.
+    pub hits: u64,
     /// The line as it sits on disk, present only for a legacy record.
     original: Option<String>,
 }
 
-#[allow(dead_code)] // the append path starts emitting v2 in a later unit
+#[allow(dead_code)] // `is_legacy` and `original_line` are exercised by the codec tests
 impl Record {
     /// A record this session creates; no legacy bytes are attached to it.
     pub fn new(command: impl Into<String>) -> Self {
@@ -80,6 +92,7 @@ impl Record {
             when: None,
             cwd: None,
             paths: Vec::new(),
+            hits: 1,
             original: None,
         }
     }
@@ -101,7 +114,7 @@ impl Record {
             return line.clone();
         }
         let paths = &self.paths[..self.paths.len().min(MAX_PATHS)];
-        let mut line = String::with_capacity(self.command.len() + 32);
+        let mut line = String::with_capacity(self.command.len() + 40);
         line.push_str(V2_MARKER);
         line.push('\t');
         line.push_str(&self.when.unwrap_or(0).to_string());
@@ -115,6 +128,8 @@ impl Record {
         }
         line.push('\t');
         line.push_str(&encode_field(&self.command));
+        line.push('\t');
+        line.push_str(&self.hits.max(1).to_string());
         line
     }
 }
@@ -128,6 +143,7 @@ pub fn decode(line: &str) -> Record {
         when: None,
         cwd: None,
         paths: Vec::new(),
+        hits: 1,
         original: Some(line.to_string()),
     })
 }
@@ -141,7 +157,16 @@ fn decode_v2(line: &str) -> Option<Record> {
     let npaths = fields[3].parse::<usize>().ok()?;
     // The command index follows the declared path count; a count the line cannot
     // hold means this is not a v2 header at all.
-    let command = *fields.get(4usize.checked_add(npaths)?)?;
+    let command_index = 4usize.checked_add(npaths)?;
+    let command = *fields.get(command_index)?;
+    // The hit count is an extra field after the command, so a line written before
+    // it existed still decodes, as one hit. A non-numeric field there is a future
+    // one and is ignored the same way.
+    let hits = fields
+        .get(command_index + 1)
+        .and_then(|field| field.parse::<u64>().ok())
+        .unwrap_or(1)
+        .max(1);
     let cwd = decode_field(fields[2]);
     let paths = fields[4..4 + npaths]
         .iter()
@@ -153,12 +178,16 @@ fn decode_v2(line: &str) -> Option<Record> {
         when: Some(when),
         cwd: (!cwd.is_empty()).then_some(cwd),
         paths,
+        hits,
         original: None,
     })
 }
 
 pub struct History {
     entries: Vec<String>,
+    /// The newest hit count known for each entry, keyed by command. Kept beside the
+    /// view so a repeat can carry the count forward without re-reading the file.
+    hits: HashMap<String, u64>,
     path: Option<PathBuf>,
     limit: usize,
     appends: usize,
@@ -187,9 +216,10 @@ impl History {
         if path.as_os_str().is_empty() {
             return Ok(History::private(limit));
         }
-        let entries = read_history(&path)?;
+        let (entries, hits) = view(read_history(&path)?);
         let mut history = History {
             entries,
+            hits,
             path: Some(path),
             limit,
             appends: 0,
@@ -202,6 +232,7 @@ impl History {
     pub fn private(limit: usize) -> Self {
         History {
             entries: Vec::new(),
+            hits: HashMap::new(),
             path: None,
             limit,
             appends: 0,
@@ -215,36 +246,76 @@ impl History {
     /// Appends to memory, then to the file unless private. The memory entry stays
     /// when the append fails, so the session keeps the command and `merge` can
     /// preserve it as a local-only entry.
+    ///
+    /// Two consecutive identical commands are one event: the newest entry already is
+    /// that command, so the second one writes nothing. A repeat of an older command
+    /// moves back to the newest position and appends a record with one more hit than
+    /// the count this session knows for it, so `!!` resolves to the repeat.
     pub fn try_add(&mut self, command: &str) -> Result<(), String> {
+        self.try_add_with(command, None, &[])
+    }
+
+    /// [`History::try_add`] plus the metadata a picker can use: where the command
+    /// ran and the paths it named. Omitted values stay empty on the record.
+    pub fn try_add_with(
+        &mut self,
+        command: &str,
+        cwd: Option<&str>,
+        paths: &[&str],
+    ) -> Result<(), String> {
         let command = command.trim_end();
-        if command.is_empty() || self.entries.iter().any(|entry| entry == command) {
+        if command.is_empty() {
             return Ok(());
         }
+        if self.entries.last().map(String::as_str) == Some(command) {
+            return Ok(());
+        }
+        let hits = match self.entries.iter().position(|entry| entry == command) {
+            Some(position) => {
+                self.entries.remove(position);
+                self.hits.get(command).copied().unwrap_or(1) + 1
+            }
+            None => 1,
+        };
         self.entries.push(command.to_string());
+        self.hits.insert(command.to_string(), hits);
         self.trim();
         if self.path.is_none() {
             return Ok(());
         }
-        self.append(command)
+        let mut record = Record::new(command);
+        record.when = Some(now_micros());
+        record.cwd = cwd.map(str::to_string);
+        record.paths = paths
+            .iter()
+            .take(MAX_PATHS)
+            .map(|path| path.to_string())
+            .collect();
+        record.hits = hits;
+        self.append(&record)
     }
 
     /// Rebuilds memory from disk order (the shared chronology) and appends the
     /// entries only this session holds, so a command whose append failed is kept.
-    /// Duplicates collapse to their disk position, then the memory limit applies.
+    /// Duplicates collapse to their newest disk position, then the memory limit
+    /// applies.
     pub fn merge(&mut self) -> Result<(), String> {
         let Some(path) = self.path.clone() else {
             return Err(PRIVATE_MERGE.to_string());
         };
-        let disk = read_history(&path)?;
-        let local = std::mem::take(&mut self.entries);
-        let mut seen = HashSet::with_capacity(disk.len() + local.len());
-        let mut merged = Vec::with_capacity(disk.len() + local.len());
-        for entry in disk.into_iter().chain(local) {
-            if seen.insert(entry.clone()) {
-                merged.push(entry);
+        let (mut entries, mut hits) = view(read_history(&path)?);
+        let local_entries = std::mem::take(&mut self.entries);
+        let local_hits = std::mem::take(&mut self.hits);
+        for command in local_entries {
+            if hits.contains_key(&command) {
+                continue;
             }
+            let count = local_hits.get(&command).copied().unwrap_or(1);
+            hits.insert(command.clone(), count);
+            entries.push(command);
         }
-        self.entries = merged;
+        self.entries = entries;
+        self.hits = hits;
         self.trim();
         Ok(())
     }
@@ -277,10 +348,11 @@ impl History {
         }
         drop(lock);
         self.entries.clear();
+        self.hits.clear();
         Ok(())
     }
 
-    fn append(&mut self, command: &str) -> Result<(), String> {
+    fn append(&mut self, record: &Record) -> Result<(), String> {
         let Some(path) = self.path.clone() else {
             return Ok(());
         };
@@ -296,7 +368,7 @@ impl History {
         file.set_permissions(std::fs::Permissions::from_mode(0o600))
             .map_err(|err| describe("chmod", &path, err))?;
         discard_partial_tail(&mut file, &path)?;
-        file.write_all(format!("{}\n", escape(command)).as_bytes())
+        file.write_all(format!("{}\n", record.encode()).as_bytes())
             .map_err(|err| describe("write", &path, err))?;
         file.sync_data()
             .map_err(|err| describe("sync", &path, err))?;
@@ -312,23 +384,23 @@ impl History {
         Ok(())
     }
 
-    /// Compacts under the caller's exclusive lock. Duplicate lines collapse to
-    /// their newest position; distinct entries are kept because the session limit
-    /// must not shrink a file other sessions share.
+    /// Compacts under the caller's exclusive lock. Duplicate commands collapse to
+    /// their newest record, which keeps that record's hit count; distinct records
+    /// are kept as they stand, because the session limit must not shrink a file
+    /// other sessions share. Legacy records are rewritten with their own bytes.
     fn vacuum(&self, dir: &Path, path: &Path) {
         let Ok(records) = read_unlocked(path) else {
             return;
         };
-        let entries = commands(records);
-        if entries.is_empty() {
+        if records.is_empty() {
             return;
         }
-        let total = entries.len();
+        let total = records.len();
         let mut seen = HashSet::new();
-        let mut kept = Vec::with_capacity(total);
-        for entry in entries.into_iter().rev() {
-            if seen.insert(entry.clone()) {
-                kept.push(entry);
+        let mut kept: Vec<Record> = Vec::with_capacity(total);
+        for record in records.into_iter().rev() {
+            if seen.insert(record.command.clone()) {
+                kept.push(record);
             }
         }
         if kept.len() == total {
@@ -340,8 +412,8 @@ impl History {
         name.push(".tmp");
         let temp = path.with_file_name(name);
         let mut text = String::new();
-        for entry in &kept {
-            text.push_str(&escape(entry));
+        for record in &kept {
+            text.push_str(&record.encode());
             text.push('\n');
         }
 
@@ -364,7 +436,12 @@ impl History {
     }
 
     fn trim(&mut self) {
-        trim_entries(&mut self.entries, self.limit);
+        if self.entries.len() > self.limit {
+            let excess = self.entries.len() - self.limit;
+            for command in self.entries.drain(..excess) {
+                self.hits.remove(&command);
+            }
+        }
     }
 }
 
@@ -479,31 +556,43 @@ fn read_unlocked(path: &Path) -> Result<Vec<Record>, String> {
     parse(path, &bytes)
 }
 
-fn read_history(path: &Path) -> Result<Vec<String>, String> {
+fn read_history(path: &Path) -> Result<Vec<Record>, String> {
     let dir = parent(path);
     if !dir.exists() {
         return Ok(Vec::new());
     }
     let lock = lock_dir(&dir, FlockArg::LockShared)?;
     reject_special(path)?;
-    let entries = read_unlocked(path).map(commands);
+    let records = read_unlocked(path);
     drop(lock);
-    entries
+    records
 }
 
-fn commands(records: Vec<Record>) -> Vec<String> {
-    records
-        .into_iter()
-        .map(|record| record.command)
-        .filter(|command| !command.is_empty())
-        .collect()
+/// Collapses records to the in-memory view: one entry per command, at the position
+/// of its newest record, carrying that record's hit count. Older duplicates on disk
+/// never reach the view, so a repeat has to be appended again to become the newest
+/// entry.
+fn view(records: Vec<Record>) -> (Vec<String>, HashMap<String, u64>) {
+    let mut hits = HashMap::with_capacity(records.len());
+    let mut entries = Vec::with_capacity(records.len());
+    for record in records.into_iter().rev() {
+        if hits.contains_key(&record.command) {
+            continue;
+        }
+        hits.insert(record.command.clone(), record.hits);
+        entries.push(record.command);
+    }
+    entries.reverse();
+    (entries, hits)
 }
 
 /// Only newline-terminated records count: a crash can leave a partial tail, which
 /// must not become an entry or make the whole file undecodable when its UTF-8 is
 /// cut mid-character. Both formats escape their own newlines, so a record never
-/// spans two lines and `lines()` splits them exactly. Order is file position:
-/// legacy lines carry no timestamp, and the newest append is the truth.
+/// spans two lines and a bare `\n` split yields them exactly. The split is
+/// deliberate: `str::lines` also eats a trailing `\r`, which is part of a command
+/// pasted with CRLF endings. Order is file position: legacy lines carry no
+/// timestamp, and the newest append is the truth.
 pub fn parse(path: &Path, bytes: &[u8]) -> Result<Vec<Record>, String> {
     let Some(end) = bytes.iter().rposition(|byte| *byte == b'\n') else {
         return Ok(Vec::new());
@@ -516,26 +605,21 @@ pub fn parse(path: &Path, bytes: &[u8]) -> Result<Vec<Record>, String> {
         )
     })?;
     Ok(complete
-        .lines()
+        .split('\n')
         .map(decode)
         .filter(|record| !record.command.is_empty())
         .collect())
 }
 
-fn trim_entries(entries: &mut Vec<String>, limit: usize) {
-    if entries.len() > limit {
-        let excess = entries.len() - limit;
-        entries.drain(..excess);
-    }
+fn now_micros() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_micros() as i64)
+        .unwrap_or(0)
 }
 
-/// Escapes a v1 command: backslash doubled and newline as `\n`. A TAB stays raw
-/// here because v1 lines predate the field grammar and must keep their bytes.
-fn escape(entry: &str) -> String {
-    entry.replace('\\', "\\\\").replace('\n', "\\n")
-}
-
-/// Escapes one v2 text field: backslash doubled, newline as `\n`, TAB as `\t`.
+/// Escapes one v2 text field: backslash doubled, newline as `\n`, TAB as `\t` and
+/// carriage return as `\r`.
 fn encode_field(field: &str) -> String {
     let mut out = String::with_capacity(field.len());
     for ch in field.chars() {
@@ -543,19 +627,22 @@ fn encode_field(field: &str) -> String {
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
             '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
             other => out.push(other),
         }
     }
     out
 }
 
-/// Decodes one v2 text field, where `\t` is also an escape.
+/// Decodes one v2 text field, where `\t` and `\r` are also escapes.
 fn decode_field(field: &str) -> String {
     decode_escapes(field, true)
 }
 
 /// Shared decoder. Unknown escapes keep their backslash, so data is never lost.
-fn decode_escapes(line: &str, tabs: bool) -> String {
+/// Only v2 owns the TAB and carriage-return escapes; a legacy line never had them,
+/// so they stay the two characters a user typed there.
+fn decode_escapes(line: &str, v2: bool) -> String {
     let mut out = String::new();
     let mut chars = line.chars();
 
@@ -566,7 +653,8 @@ fn decode_escapes(line: &str, tabs: bool) -> String {
         }
         match chars.next() {
             Some('n') => out.push('\n'),
-            Some('t') if tabs => out.push('\t'),
+            Some('t') if v2 => out.push('\t'),
+            Some('r') if v2 => out.push('\r'),
             Some('\\') => out.push('\\'),
             Some(other) => {
                 out.push('\\');

@@ -24,6 +24,32 @@ fn lines(path: &Path) -> Vec<String> {
         .collect()
 }
 
+/// Splits on the record separator only, so a `\r` before the newline stays part of
+/// the record exactly as `parse` sees it.
+fn records(path: &Path) -> Vec<String> {
+    let text = std::fs::read_to_string(path).unwrap();
+    let mut records: Vec<String> = text.split('\n').map(str::to_string).collect();
+    if records.last().is_some_and(String::is_empty) {
+        records.pop();
+    }
+    records
+}
+
+/// The command each on-disk record decodes to, in file order.
+fn commands(path: &Path) -> Vec<String> {
+    records(path)
+        .iter()
+        .map(|line| history::decode(line).command)
+        .collect()
+}
+
+fn now_micros() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as i64
+}
+
 fn chmod(path: &Path, mode: u32) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
 }
@@ -42,7 +68,8 @@ fn appended_command_is_durable_without_flush() {
 
     history.try_add("ls -la").unwrap();
 
-    assert_eq!(lines(&path), ["ls -la"]);
+    assert_eq!(commands(&path), ["ls -la"]);
+    assert_eq!(records(&path).len(), 1);
 }
 
 #[test]
@@ -63,9 +90,9 @@ fn escape_roundtrips_newlines_and_backslashes() {
     let mut history = History::try_load(path.clone(), 100).unwrap();
 
     history.try_add(command).unwrap();
-    let raw = std::fs::read_to_string(&path).unwrap();
 
-    assert_eq!(raw, "echo a\\nb\\\\c\n");
+    assert_eq!(records(&path).len(), 1, "a record never spans two lines");
+    assert_eq!(commands(&path), [command]);
     assert_eq!(History::try_load(path, 100).unwrap().entries(), [command]);
 }
 
@@ -78,7 +105,7 @@ fn independent_instances_both_append_and_survive() {
     a.try_add("from a").unwrap();
     b.try_add("from b").unwrap();
 
-    assert_eq!(lines(&path), ["from a", "from b"]);
+    assert_eq!(commands(&path), ["from a", "from b"]);
     assert_eq!(
         History::try_load(path, 100).unwrap().entries(),
         ["from a", "from b"]
@@ -114,7 +141,7 @@ fn append_discards_an_incomplete_tail() {
 
     history.try_add("second").unwrap();
 
-    assert_eq!(lines(&path), ["first", "second"]);
+    assert_eq!(commands(&path), ["first", "second"]);
     assert_eq!(
         History::try_load(path, 100).unwrap().entries(),
         ["first", "second"]
@@ -344,12 +371,10 @@ fn load_failure_keeps_its_diagnostic_instead_of_looking_private() {
     );
     assert!(error.contains("history"), "unexpected error: {error}");
     assert!(History::try_load(dir.join("absent"), 100).is_ok());
-    assert!(
-        History::try_load(PathBuf::new(), 100)
-            .unwrap()
-            .entries()
-            .is_empty()
-    );
+    assert!(History::try_load(PathBuf::new(), 100)
+        .unwrap()
+        .entries()
+        .is_empty());
 }
 
 #[test]
@@ -368,7 +393,7 @@ fn append_failure_is_reported_and_keeps_the_memory_entry() {
 
     assert!(error.contains("history"), "unexpected error: {error}");
     assert_eq!(history.entries(), ["before", "during"]);
-    assert_eq!(lines(&path), ["before"]);
+    assert_eq!(commands(&path), ["before"]);
 }
 
 #[test]
@@ -387,7 +412,7 @@ fn clear_failure_is_reported_and_keeps_the_file() {
 
     assert!(error.contains("history"), "unexpected error: {error}");
     assert_eq!(history.entries(), ["kept"]);
-    assert_eq!(lines(&path), ["kept"]);
+    assert_eq!(commands(&path), ["kept"]);
 }
 
 #[test]
@@ -433,15 +458,24 @@ fn vacuum_collapses_duplicates_across_sessions_to_the_newest_occurrence() {
     let mut history = History::try_load(path.clone(), 100).unwrap();
 
     other.try_add("repeat").unwrap();
+    // Kept apart so the second "repeat" is an older-command repeat, not a
+    // consecutive one that would collapse on its own.
+    history.try_add("between").unwrap();
     history.try_add("repeat").unwrap();
-    for index in 0..23 {
+    for index in 0..22 {
         history.try_add(&format!("unique {index}")).unwrap();
     }
     history.try_add("last").unwrap();
 
-    let file = lines(&path);
-    assert_eq!(file.iter().filter(|line| *line == "repeat").count(), 1);
-    assert_eq!(file.first().unwrap(), "repeat");
+    let file = commands(&path);
+    assert_eq!(
+        file.iter().filter(|command| *command == "repeat").count(),
+        1
+    );
+    // The surviving record sits where the newest occurrence was, not where the
+    // oldest one was.
+    assert_eq!(file.first().unwrap(), "between");
+    assert_eq!(file.get(1).unwrap(), "repeat");
     assert_eq!(file.last().unwrap(), "last");
     assert_eq!(file.len(), 25);
 }
@@ -500,8 +534,8 @@ fn v2_roundtrips_tabs_and_backslashes() {
 
     let line = record.encode();
 
-    // With no paths the line has exactly the four separators of its five fields.
-    assert_eq!(line.matches('\t').count(), 4, "line: {line:?}");
+    // With no paths the line has exactly the separators of its six fields.
+    assert_eq!(line.matches('\t').count(), 5, "line: {line:?}");
     assert!(!line.contains('\n'), "one record per line: {line:?}");
     assert_eq!(line.split('\t').next(), Some("h2"));
 
@@ -570,7 +604,7 @@ fn v2_record_with_eight_paths_round_trips() {
 
     let line = record.encode();
 
-    assert_eq!(line.matches('\t').count(), 12, "line: {line:?}");
+    assert_eq!(line.matches('\t').count(), 13, "line: {line:?}");
     let decoded = history::decode(&line);
     assert!(!decoded.is_legacy());
     assert_eq!(decoded.paths, record.paths);
@@ -608,4 +642,152 @@ fn legacy_line_that_starts_with_h2_is_not_v2() {
         assert_eq!(record.original_line(), Some(command));
     }
     assert_eq!(History::try_load(path, 100).unwrap().entries(), commands);
+}
+
+#[test]
+fn repeat_of_an_old_command_moves_to_the_newest_position() {
+    let path = scratch("recency").join("history");
+    let mut history = History::try_load(path.clone(), 100).unwrap();
+
+    history.try_add("ls").unwrap();
+    history.try_add("pwd").unwrap();
+    history.try_add("ls").unwrap();
+
+    // `!!` must resolve to the repeat, so the view ends with it and holds one copy.
+    assert_eq!(history.entries(), ["pwd", "ls"]);
+    let stored = records(&path);
+    assert_eq!(stored.len(), 3, "a repeat of an older command appends");
+    let newest = history::decode(stored.last().unwrap());
+    assert_eq!(newest.command, "ls");
+    assert_eq!(newest.hits, 2, "the repeat counts one more hit");
+}
+
+#[test]
+fn identical_consecutive_command_is_stored_once() {
+    let path = scratch("consecutive").join("history");
+    let mut history = History::try_load(path.clone(), 100).unwrap();
+
+    history.try_add("ls").unwrap();
+    history.try_add("ls").unwrap();
+    history.try_add("ls").unwrap();
+
+    assert_eq!(history.entries(), ["ls"]);
+    assert_eq!(records(&path).len(), 1);
+}
+
+#[test]
+fn view_keeps_one_copy_of_each_command() {
+    let path = scratch("view").join("history");
+    std::fs::write(&path, "a\nb\na\n").unwrap();
+    let mut history = History::try_load(path.clone(), 100).unwrap();
+
+    // Loading collapses to the newest position of each command.
+    assert_eq!(history.entries(), ["b", "a"]);
+
+    history.try_add("b").unwrap();
+
+    assert_eq!(history.entries(), ["a", "b"]);
+}
+
+#[test]
+fn command_containing_a_carriage_return_round_trips() {
+    // A pasted CRLF line keeps the CR the shell received instead of losing it.
+    // Both records matter: the first is the one a splitting reader silently trims.
+    let legacy = scratch("crlf-legacy").join("history");
+    std::fs::write(&legacy, "echo x\r\necho y\r\n").unwrap();
+    assert_eq!(
+        History::try_load(legacy, 100).unwrap().entries(),
+        ["echo x\r", "echo y\r"]
+    );
+
+    // A CR the command carries mid-text survives the v2 codec too, escaped so the
+    // record still has no raw control separator.
+    let path = scratch("crlf-v2").join("history");
+    let command = "printf 'a\r\nb'";
+    let mut history = History::try_load(path.clone(), 100).unwrap();
+    history.try_add(command).unwrap();
+
+    assert_eq!(records(&path).len(), 1, "an escaped CR keeps one record");
+    assert_eq!(history::decode(&records(&path)[0]).command, command);
+    assert_eq!(History::try_load(path, 100).unwrap().entries(), [command]);
+}
+
+#[test]
+fn append_writes_v2_with_when_cwd_paths_and_hits() {
+    let path = scratch("append-v2").join("history");
+    let mut history = History::try_load(path.clone(), 100).unwrap();
+    let before = now_micros();
+
+    history
+        .try_add_with("make -j2", Some("/w"), &["/w/a.rs", "/w/b.rs"])
+        .unwrap();
+
+    let after = now_micros();
+    let stored = records(&path);
+    assert_eq!(stored.len(), 1);
+    assert!(stored[0].starts_with("h2\t"), "line: {:?}", stored[0]);
+    let record = history::decode(&stored[0]);
+    assert!(!record.is_legacy());
+    assert_eq!(record.command, "make -j2");
+    assert_eq!(record.cwd.as_deref(), Some("/w"));
+    assert_eq!(record.paths, ["/w/a.rs", "/w/b.rs"]);
+    assert_eq!(record.hits, 1);
+    let when = record.when.unwrap();
+    assert!(
+        (before..=after).contains(&when),
+        "when {when} outside [{before}, {after}]"
+    );
+    assert_eq!(history.entries(), ["make -j2"]);
+}
+
+#[test]
+fn v2_record_round_trips_its_hit_count() {
+    let mut record = history::Record::new("cargo test");
+    record.when = Some(5);
+    record.hits = 7;
+
+    let line = record.encode();
+
+    assert_eq!(line.split('\t').next_back(), Some("7"));
+    let decoded = history::decode(&line);
+    assert_eq!(decoded.hits, 7);
+    assert_eq!(decoded.command, "cargo test");
+    assert_eq!(decoded.encode(), line, "re-encoding must be stable");
+}
+
+#[test]
+fn v2_record_without_hits_defaults_to_one() {
+    // A line written before the hit field existed ends at the command.
+    let record = history::decode("h2\t1700000000000000\t/tmp\t0\techo hi");
+
+    assert!(!record.is_legacy());
+    assert_eq!(record.command, "echo hi");
+    assert_eq!(record.hits, 1);
+}
+
+#[test]
+fn vacuum_preserves_hits_and_legacy_bytes() {
+    let path = scratch("vacuum-hits").join("history");
+    let first = v2_line("dup", 1, Some("/w"), &[]);
+    let mut newer = history::Record::new("dup");
+    newer.when = Some(2);
+    newer.hits = 2;
+    std::fs::write(&path, format!("legacy cmd\n{first}\n{}\n", newer.encode())).unwrap();
+
+    let mut history = History::try_load(path.clone(), 100).unwrap();
+    assert_eq!(history.entries(), ["legacy cmd", "dup"]);
+
+    for index in 0..25 {
+        history.try_add(&format!("other {index}")).unwrap();
+    }
+
+    let stored = records(&path);
+    assert_eq!(stored[0], "legacy cmd", "legacy bytes stay verbatim");
+    let dups: Vec<_> = stored
+        .iter()
+        .map(|line| history::decode(line))
+        .filter(|record| record.command == "dup")
+        .collect();
+    assert_eq!(dups.len(), 1);
+    assert_eq!(dups[0].hits, 2, "the newest record keeps its hit count");
 }
