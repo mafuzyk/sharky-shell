@@ -6,7 +6,7 @@ versioning. sharky is in alpha: version numbers mark releases, while alpha is
 the project's ongoing maturity, delivered through the normal release channel
 rather than a separate preview track.
 
-## [Unreleased]
+## [3.7.0] - 2026-11-20
 
 ### Changed
 
