@@ -128,6 +128,10 @@ enum Flow {
     // bash discards the line it is executing, without leaving the shell. It
     // unwinds to `run_program`; a forked child maps it to its exit status.
     Discard(i32),
+    // A SIGINT delivered while the shell was running builtin commands. Bash
+    // discards the input unit being executed, so the whole construct unwinds to
+    // the top level and reports 130.
+    Interrupt,
     Break,
     Continue,
     Return(i32),
@@ -422,6 +426,10 @@ impl Shell {
         before_run();
         Ok(match self.run_program(&program) {
             Flow::Status(code) | Flow::Exit(code) | Flow::Discard(code) | Flow::Return(code) => code,
+            Flow::Interrupt => {
+                self.last_status = 130;
+                130
+            }
             Flow::Break | Flow::Continue => 0,
         })
     }
@@ -580,6 +588,9 @@ impl Shell {
             if let Some(code) = self.service_traps() {
                 return Flow::Exit(code);
             }
+            if crate::signal::take_interrupt() {
+                return Flow::Interrupt;
+            }
 
             if entry.background {
                 self.run_background(&entry.and_or);
@@ -601,10 +612,16 @@ impl Shell {
             if let Some(code) = self.service_traps() {
                 return Flow::Exit(code);
             }
+            if crate::signal::take_interrupt() {
+                return Flow::Interrupt;
+            }
         }
 
         if let Some(code) = self.service_traps() {
             return Flow::Exit(code);
+        }
+        if crate::signal::take_interrupt() {
+            return Flow::Interrupt;
         }
 
         Flow::Status(status)
@@ -631,6 +648,7 @@ impl Shell {
                     command: describe_and_or(and_or),
                     stop: None,
                 });
+                self.publish_jobs();
             }
             Ok(ForkResult::Child) => {
                 let _ = setpgid(Pid::from_raw(0), Pid::from_raw(0));
@@ -656,6 +674,10 @@ impl Shell {
             if let Some(code) = self.service_traps() {
                 self.errexit_suppressed = previous;
                 return Flow::Exit(code);
+            }
+            if crate::signal::take_interrupt() {
+                self.errexit_suppressed = previous;
+                return Flow::Interrupt;
             }
             let status = match &flow {
                 Flow::Status(code) => *code,
@@ -771,11 +793,24 @@ impl Shell {
             match unsafe { fork() } {
                 Ok(ForkResult::Parent { child }) => {
                     if self.interactive {
+                        match self.job_pgid.or(leader) {
+                            // A pipeline inside a subshell belongs to the
+                            // subshell's group, so the whole subshell stays one
+                            // job of the outer shell.
+                            Some(group) => {
+                                let _ = setpgid(child, group);
+                            }
+                            None => {
+                                // The first member of a foreground pipeline
+                                // leads the job. Setting the group here as well
+                                // as in the child closes the ESRCH race with
+                                // the terminal hand-off.
+                                let _ = setpgid(child, child);
+                                self.set_foreground(child);
+                            }
+                        }
                         if leader.is_none() {
-                            self.set_foreground(child);
                             leader = Some(child);
-                        } else if let Some(leader) = leader {
-                            let _ = setpgid(child, leader);
                         }
                     }
                     pids.push(child);
@@ -821,7 +856,9 @@ impl Shell {
         drop(pipes);
 
         let command = describe_pipeline(pipeline);
-        let pgid = leader.unwrap_or_else(getpgrp);
+        let pgid = self
+            .job_pgid
+            .unwrap_or_else(|| leader.unwrap_or_else(getpgrp));
         let status = self.wait_pipeline(&pids, pgid, command);
         self.reap_substitutions();
         self.errexit_check(Flow::Status(status))
@@ -1260,15 +1297,64 @@ impl Shell {
         }
     }
 
+    /// Waits for a subshell or redirected child. A job-control stop is only an
+    /// event for the shell that owns the terminal and the job table; a nested
+    /// shell keeps waiting for the process to finish, because the outer shell
+    /// reports and resumes the whole group.
+    fn wait_subshell(&mut self, child: Pid) -> Option<WaitStatus> {
+        self.wait_foreground_member(child)
+    }
+
+    /// Waits for one member of the foreground job, ignoring stop statuses when
+    /// this shell is itself part of a job. A nested shell must not consume the
+    /// stop and turn it into an exit status while its parent waits for it.
+    fn wait_foreground_member(&mut self, pid: Pid) -> Option<WaitStatus> {
+        loop {
+            match exec::wait_traced(pid) {
+                Some(WaitStatus::Stopped(_, _)) if !self.foreground_control() => continue,
+                other => return other,
+            }
+        }
+    }
+
     fn run_subshell(&mut self, list: &List) -> Flow {
         // SAFETY: the child runs shell code and exits without unwinding.
         match unsafe { fork() } {
             Ok(ForkResult::Parent { child }) => {
-                let status = exec::wait(child);
+                if self.interactive && self.job_pgid.is_none() {
+                    // Both sides set the group: the child's own call and this
+                    // one race, and closing it here means the terminal never
+                    // hands foreground status to a group that does not exist
+                    // yet. Inside a background job the child joins the job's
+                    // existing group instead.
+                    let _ = setpgid(child, child);
+                    self.set_foreground(child);
+                }
+                // A stopped subshell must come back to the prompt, not block
+                // this wait forever, and must stay a job that `jobs`, `fg`,
+                // `bg` and `kill %n` can still reach.
+                let status = self.wait_subshell(child);
                 self.reclaim_terminal();
-                Flow::Status(status)
+                match status {
+                    Some(WaitStatus::Stopped(_, signal)) if self.foreground_control() => {
+                        let command = format!("( {} )", describe_list(list));
+                        self.record_stopped_job(child, command, signal as i32);
+                        Flow::Status(128 + signal as i32)
+                    }
+                    Some(WaitStatus::Exited(_, code)) => Flow::Status(code),
+                    Some(WaitStatus::Signaled(_, signal, _)) => Flow::Status(128 + signal as i32),
+                    _ => Flow::Status(1),
+                }
             }
             Ok(ForkResult::Child) => {
+                if self.interactive {
+                    // A subshell leads its own job when it is the foreground
+                    // command; inside a background job it stays in the group
+                    // that job already has, so one signal reaches all of it.
+                    let group = self.job_pgid.unwrap_or_else(getpid);
+                    let _ = setpgid(Pid::from_raw(0), group);
+                    self.job_pgid = Some(group);
+                }
                 self.reset_child_traps();
                 self.in_subshell = true;
                 let code = flow_status(self.run_list(list));
@@ -1316,11 +1402,28 @@ impl Shell {
         // SAFETY: the child runs shell code and exits without unwinding.
         match unsafe { fork() } {
             Ok(ForkResult::Parent { child }) => {
-                let status = exec::wait(child);
+                if self.interactive && self.job_pgid.is_none() {
+                    let _ = setpgid(child, child);
+                    self.set_foreground(child);
+                }
+                let status = self.wait_subshell(child);
                 self.reclaim_terminal();
-                Flow::Status(status)
+                match status {
+                    Some(WaitStatus::Stopped(_, signal)) if self.foreground_control() => {
+                        self.record_stopped_job(child, describe_command(command), signal as i32);
+                        Flow::Status(128 + signal as i32)
+                    }
+                    Some(WaitStatus::Exited(_, code)) => Flow::Status(code),
+                    Some(WaitStatus::Signaled(_, signal, _)) => Flow::Status(128 + signal as i32),
+                    _ => Flow::Status(1),
+                }
             }
             Ok(ForkResult::Child) => {
+                if self.interactive {
+                    let group = self.job_pgid.unwrap_or_else(getpid);
+                    let _ = setpgid(Pid::from_raw(0), group);
+                    self.job_pgid = Some(group);
+                }
                 self.reset_child_traps();
                 if let Err(message) = apply_actions(&actions) {
                     eprintln!("sharky: {message}");
@@ -1678,6 +1781,13 @@ impl Shell {
         match unsafe { fork() } {
             Ok(ForkResult::Parent { child }) => {
                 if leader.is_none() {
+                    // The child sets its own group too; doing it here as well
+                    // closes the window where the hand-off fails with ESRCH
+                    // because the child has not run yet. Inside a subshell the
+                    // command joins the subshell's group instead.
+                    if self.interactive && self.job_pgid.is_none() {
+                        let _ = setpgid(child, child);
+                    }
                     self.set_foreground(child);
                 }
                 Ok(child)
@@ -2495,16 +2605,51 @@ impl Shell {
         }
 
         let mut finished = Vec::new();
+        let mut announcements = Vec::new();
         for (index, job) in self.jobs.iter_mut().enumerate() {
-            match exec::wait_scan(job.pids[0]) {
-                WaitStatus::Exited(_, _) | WaitStatus::Signaled(_, _, _) => {
-                    finished.push(index);
+            // A job owns every process in it: a pipeline whose first member
+            // exited is still running when its last one has not. Reaping only
+            // the leader would leave the others as zombies and the job forever
+            // "Running".
+            let mut alive = Vec::with_capacity(job.pids.len());
+            let mut stopped = None;
+            let mut continued = false;
+            for pid in &job.pids {
+                match exec::wait_scan(*pid) {
+                    // Already reaped, or terminated now.
+                    None | Some(WaitStatus::Exited(_, _)) | Some(WaitStatus::Signaled(_, _, _)) => {}
+                    Some(WaitStatus::Stopped(_, signal)) => {
+                        stopped.get_or_insert(signal as i32);
+                        alive.push(*pid);
+                    }
+                    Some(WaitStatus::Continued(_)) => {
+                        continued = true;
+                        alive.push(*pid);
+                    }
+                    Some(_) => alive.push(*pid),
                 }
-                WaitStatus::Stopped(_, signal) if job.stop.is_none() => {
-                    job.stop = Some(signal as i32);
-                    println!("\n[{}]+  Stopped                 {}", job.id, job.command);
-                }
-                _ => {}
+            }
+            job.pids = alive;
+            // A job resumed by a signal from outside the shell is running
+            // again, even though `kill -CONT` is not the builtin that did it.
+            if continued && stopped.is_none() {
+                job.stop = None;
+            }
+            if let Some(signal) = stopped
+                && job.stop.is_none()
+            {
+                job.stop = Some(signal);
+                announcements.push(format!("[{}]+  Stopped                 {}", job.id, job.command));
+            }
+            if job.pids.is_empty() {
+                finished.push(index);
+            }
+        }
+
+        if !announcements.is_empty() {
+            println!();
+            for line in announcements {
+                println!("{line}");
             }
         }
 
@@ -2514,10 +2659,35 @@ impl Shell {
                 println!("[{}]+  Done                    {}", job.id, job.command);
             }
         }
+
+        self.publish_jobs();
     }
 
     fn wait_foreground(&mut self, pids: &[Pid], pgid: Pid, command: String) -> i32 {
         self.wait_job(pids, pgid, command, false)
+    }
+
+    /// Publishes the job table's process groups for the hangup handler, which
+    /// can only touch async-signal-safe state.
+    fn publish_jobs(&self) {
+        let groups: Vec<i32> = self.jobs.iter().map(|job| job.pgid.as_raw()).collect();
+        crate::signal::publish_job_groups(&groups);
+    }
+
+    /// Adds a job that stopped, so `jobs`, `fg`, `bg` and `kill %n` can still
+    /// reach it after the shell takes the terminal back.
+    fn record_stopped_job(&mut self, pgid: Pid, command: String, signal: i32) {
+        let id = self.next_job;
+        self.next_job += 1;
+        self.jobs.push(Job {
+            id,
+            pgid,
+            pids: vec![pgid],
+            command: command.clone(),
+            stop: Some(signal),
+        });
+        self.publish_jobs();
+        println!("\n[{id}]+  Stopped                 {command}");
     }
 
     fn wait_pipeline(&mut self, pids: &[Pid], pgid: Pid, command: String) -> i32 {
@@ -2530,13 +2700,23 @@ impl Shell {
         let mut stopped = None;
 
         for pid in pids {
-            let code = match exec::wait_traced(*pid) {
-                WaitStatus::Exited(_, code) => code,
-                WaitStatus::Signaled(_, signal, _) => 128 + signal as i32,
-                WaitStatus::Stopped(_, signal) => {
+            let code = match self.wait_foreground_member(*pid) {
+                Some(WaitStatus::Exited(_, code)) => code,
+                Some(WaitStatus::Signaled(_, signal, _)) => {
+                    // A foreground command killed by Ctrl-C interrupts the
+                    // input unit too, as bash aborts the whole construct the
+                    // typed line was running.
+                    if signal == Signal::SIGINT {
+                        crate::signal::mark_interrupt();
+                    }
+                    128 + signal as i32
+                }
+                Some(WaitStatus::Stopped(_, signal)) => {
                     stopped = Some(signal as i32);
                     128 + signal as i32
                 }
+                // Its status was consumed elsewhere; it is not a failure.
+                None => continue,
                 _ => 0,
             };
             statuses.push(code);
@@ -2553,7 +2733,7 @@ impl Shell {
         // the point where bash runs a trap that arrived while it waited.
         self.dispatch_traps();
 
-        if stopped.is_some() && self.interactive {
+        if stopped.is_some() && self.foreground_control() {
             let id = self.next_job;
             self.next_job += 1;
             self.jobs.push(Job {
@@ -2563,6 +2743,7 @@ impl Shell {
                 command: command.clone(),
                 stop: stopped,
             });
+            self.publish_jobs();
             println!("\n[{id}]+  Stopped                 {command}");
         }
 
@@ -2605,6 +2786,7 @@ impl Shell {
 
         let mut job = self.jobs.remove(index);
         job.stop = None;
+        self.publish_jobs();
         println!("{}", job.command);
 
         self.set_foreground(job.pgid);
@@ -3179,6 +3361,7 @@ impl Shell {
                 }
                 self.jobs.retain(|job| job.id != id);
             }
+            self.publish_jobs();
             for pid in std::mem::take(&mut self.substitution_pids) {
                 let _ = exec::wait(pid);
             }
@@ -3233,11 +3416,13 @@ impl Shell {
         let (status, stopped) = self.wait_group(pids);
         let Some(signal) = stopped else {
             self.jobs.retain(|job| job.id != id);
+            self.publish_jobs();
             return status;
         };
         if let Some(job) = self.jobs.iter_mut().find(|job| job.id == id) {
             job.stop = Some(signal);
         }
+        self.publish_jobs();
         eprintln!("sharky: warning: wait: job {id} is stopped");
         128 + signal
     }
@@ -3248,9 +3433,13 @@ impl Shell {
         let mut status = 0;
         for pid in pids {
             match exec::wait_stopped(*pid) {
-                WaitStatus::Exited(_, code) => status = code,
-                WaitStatus::Signaled(_, signal, _) => status = 128 + signal as i32,
-                WaitStatus::Stopped(_, signal) => return (128 + signal as i32, Some(signal as i32)),
+                Some(WaitStatus::Exited(_, code)) => status = code,
+                Some(WaitStatus::Signaled(_, signal, _)) => status = 128 + signal as i32,
+                Some(WaitStatus::Stopped(_, signal)) => {
+                    return (128 + signal as i32, Some(signal as i32));
+                }
+                // Already reaped; no status is left to report.
+                None => {}
                 _ => {}
             }
         }
@@ -3291,6 +3480,19 @@ impl Shell {
                 if killpg(pgid, signal).is_err() {
                     eprintln!("sharky: kill: {target}: no such process");
                     status = 1;
+                } else {
+                    // The job table follows the signal: a stopped job that is
+                    // resumed is running again, and a running job that is
+                    // stopped is not finished. Dropping the entry would orphan
+                    // the process and lose `jobs`, `fg` and `wait`.
+                    match signal {
+                        Signal::SIGSTOP | Signal::SIGTSTP => {
+                            self.jobs[index].stop = Some(signal as i32);
+                        }
+                        Signal::SIGCONT => self.jobs[index].stop = None,
+                        _ => {}
+                    }
+                    self.publish_jobs();
                 }
                 continue;
             }
@@ -3993,8 +4195,8 @@ impl Shell {
             return;
         }
         match number {
-            nix::libc::SIGINT
-            | nix::libc::SIGQUIT
+            nix::libc::SIGINT => crate::signal::interruptible(number),
+            nix::libc::SIGQUIT
             | nix::libc::SIGTSTP
             | nix::libc::SIGTTIN
             | nix::libc::SIGTTOU => crate::signal::ignore(number),
@@ -4134,6 +4336,18 @@ impl Shell {
         self.trap_running = false;
         self.trap_exit = None;
         reset_child_signals();
+        // The shell keeps fatal-signal handlers that write to the terminal. A
+        // child shares the terminal's open file description, so that handler
+        // must not run there: the default action is what a child gets. An
+        // ignored signal keeps its disposition, which survives exec.
+        for name in ["TERM", "HUP"] {
+            if self.traps.get(name).is_some_and(|action| action.is_empty()) {
+                continue;
+            }
+            if let Some(number) = crate::signal::number(name) {
+                crate::signal::reset(number);
+            }
+        }
     }
 
     fn read(&mut self, args: &[String]) -> i32 {
@@ -4154,15 +4368,23 @@ impl Shell {
 
         let mut line = String::new();
         loop {
-            let Some(chunk) = read_stdin_line() else {
-                return 1;
-            };
-            line.push_str(&chunk);
-            if !raw && line.ends_with("\\\n") {
-                line.truncate(line.len() - 2);
-                continue;
+            match read_stdin_line() {
+                LineInput::Line(chunk) => {
+                    line.push_str(&chunk);
+                    if !raw && line.ends_with("\\\n") {
+                        line.truncate(line.len() - 2);
+                        continue;
+                    }
+                    break;
+                }
+                LineInput::Interrupted => {
+                    // A newline closes the line the terminal echoed, so the
+                    // prompt starts clean, and the run loop sees 130.
+                    println!();
+                    return 130;
+                }
+                LineInput::End => return 1,
             }
-            break;
         }
 
         let ended = line.ends_with('\n');
@@ -4219,11 +4441,20 @@ impl Shell {
         }
 
         let mut values = Vec::new();
-        while let Some(mut line) = read_stdin_line() {
-            if strip && line.ends_with('\n') {
-                line.pop();
+        loop {
+            match read_stdin_line() {
+                LineInput::Line(mut line) => {
+                    if strip && line.ends_with('\n') {
+                        line.pop();
+                    }
+                    values.push(line);
+                }
+                LineInput::Interrupted => {
+                    println!();
+                    return 130;
+                }
+                LineInput::End => break,
             }
-            values.push(line);
         }
         self.set_array(&name, values, false);
         0
@@ -5919,6 +6150,21 @@ fn describe_and_or(and_or: &AndOr) -> String {
     text
 }
 
+fn describe_list(list: &List) -> String {
+    list.entries
+        .iter()
+        .map(|entry| {
+            let text = describe_and_or(&entry.and_or);
+            if entry.background {
+                format!("{text} &")
+            } else {
+                text
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 fn describe_pipeline(pipeline: &Pipeline) -> String {
     pipeline
         .commands
@@ -6368,6 +6614,7 @@ fn reset_child_signals() {
 fn flow_status(flow: Flow) -> i32 {
     match flow {
         Flow::Status(code) | Flow::Exit(code) | Flow::Discard(code) | Flow::Return(code) => code,
+        Flow::Interrupt => 130,
         Flow::Break | Flow::Continue => 0,
     }
 }
@@ -7977,7 +8224,16 @@ fn trap_signal(name: &str) -> Option<&'static str> {
     crate::signal::number(bare).and_then(crate::signal::name)
 }
 
-fn read_stdin_line() -> Option<String> {
+/// One line of standard input, or the reason there is none.
+enum LineInput {
+    Line(String),
+    End,
+    /// A signal asked the shell to stop reading; the caller reports 130 and
+    /// lets the run loop unwind the command being executed.
+    Interrupted,
+}
+
+fn read_stdin_line() -> LineInput {
     let mut bytes = Vec::new();
     loop {
         let mut byte = [0u8; 1];
@@ -7985,6 +8241,11 @@ fn read_stdin_line() -> Option<String> {
         let count = unsafe { nix::libc::read(0, byte.as_mut_ptr() as *mut _, 1) };
         if count < 0 {
             if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                // Without SA_RESTART the handler interrupts the read, which is
+                // the only way a blocked `read` builtin learns about Ctrl-C.
+                if crate::signal::interrupt_pending() {
+                    return LineInput::Interrupted;
+                }
                 continue;
             }
             break;
@@ -7999,9 +8260,9 @@ fn read_stdin_line() -> Option<String> {
     }
 
     if bytes.is_empty() {
-        None
+        LineInput::End
     } else {
-        Some(String::from_utf8_lossy(&bytes).into_owned())
+        LineInput::Line(String::from_utf8_lossy(&bytes).into_owned())
     }
 }
 

@@ -85,6 +85,9 @@ pub fn run(shell: &mut Shell, private: bool) -> i32 {
                 buffer.push_str(&text);
 
                 let started = std::time::Instant::now();
+                // A Ctrl-C handled while the previous line was being edited (or
+                // between commands) must not abort the command about to start.
+                crate::signal::clear_interrupt();
                 let outcome = shell.eval_with(&buffer, || {
                     let _ = term::write_stdout(&term::mark_command_start(&buffer));
                 });
@@ -114,6 +117,7 @@ pub fn run(shell: &mut Shell, private: bool) -> i32 {
             Ok(Line::Interrupted) => {
                 // The editor consumed Ctrl-C as a byte; an installed INT action
                 // still has to run, and may ask the shell to exit.
+                crate::signal::clear_interrupt();
                 let exit = shell.interrupt_line();
                 buffer.clear();
                 shell.last_status = 130;
@@ -134,10 +138,12 @@ pub fn run(shell: &mut Shell, private: bool) -> i32 {
 fn install_signals() {
     use nix::sys::signal::{SigHandler, Signal, signal};
 
-    // SAFETY: ignoring these signals is how an interactive shell survives them;
-    // foreground jobs run in their own process group and receive their own copy.
+    // SAFETY: an interactive shell must survive the signals the terminal sends
+    // to its own process group. SIGINT is recorded instead of ignored so a
+    // builtin loop or a blocked `read` can still be interrupted; a foreground
+    // job runs in its own process group and receives its own copy.
     unsafe {
-        let _ = signal(Signal::SIGINT, SigHandler::SigIgn);
+        crate::signal::interruptible(Signal::SIGINT as i32);
         let _ = signal(Signal::SIGQUIT, SigHandler::SigIgn);
         let _ = signal(Signal::SIGTSTP, SigHandler::SigIgn);
         let _ = signal(Signal::SIGTTOU, SigHandler::SigIgn);

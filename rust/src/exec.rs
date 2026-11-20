@@ -100,35 +100,61 @@ pub fn exec_replace(path: &Path, argv: &[String], env: &[(String, String)]) -> !
 }
 
 pub fn wait(pid: Pid) -> i32 {
-    match waitpid(pid, None) {
-        Ok(WaitStatus::Exited(_, status)) => status,
-        Ok(WaitStatus::Signaled(_, signal, _)) => 128 + signal as i32,
-        Ok(_) => 1,
-        Err(err) => {
-            eprintln!("sharky: wait: {err}");
-            1
+    loop {
+        match waitpid(pid, None) {
+            Ok(WaitStatus::Exited(_, status)) => return status,
+            Ok(WaitStatus::Signaled(_, signal, _)) => return 128 + signal as i32,
+            Ok(_) => return 1,
+            Err(Errno::EINTR) => continue,
+            Err(err) => {
+                eprintln!("sharky: wait: {err}");
+                return 1;
+            }
         }
     }
 }
 
 /// Waits for a pid and reports a job-control stop instead of blocking on it.
 /// Plain `waitpid` never returns for a stopped child, so `wait %job` on a
-/// SIGSTOPed job would hang forever.
-pub fn wait_stopped(pid: Pid) -> WaitStatus {
-    waitpid(pid, Some(WaitPidFlag::WUNTRACED)).unwrap_or_else(|err| {
-        eprintln!("sharky: wait: {err}");
-        WaitStatus::Exited(pid, 1)
-    })
+/// SIGSTOPed job would hang forever. `None` means the pid is no longer a child
+/// of this process, which happens once another wait consumed its status: a
+/// waiter must skip it instead of inventing a failure.
+pub fn wait_stopped(pid: Pid) -> Option<WaitStatus> {
+    wait_member(pid)
 }
 
-pub fn wait_traced(pid: Pid) -> WaitStatus {
-    waitpid(pid, Some(WaitPidFlag::WUNTRACED))
-        .unwrap_or(WaitStatus::Exited(pid, 1))
+pub fn wait_traced(pid: Pid) -> Option<WaitStatus> {
+    wait_member(pid)
 }
 
-pub fn wait_scan(pid: Pid) -> WaitStatus {
-    waitpid(pid, Some(WaitPidFlag::WNOHANG | WaitPidFlag::WUNTRACED))
-        .unwrap_or(WaitStatus::StillAlive)
+fn wait_member(pid: Pid) -> Option<WaitStatus> {
+    loop {
+        match waitpid(pid, Some(WaitPidFlag::WUNTRACED)) {
+            Ok(status) => return Some(status),
+            Err(Errno::EINTR) => continue,
+            Err(Errno::ECHILD) => return None,
+            Err(err) => {
+                eprintln!("sharky: wait: {err}");
+                return None;
+            }
+        }
+    }
+}
+
+/// A non-blocking poll of one child. `None` means the status was already
+/// consumed elsewhere, so a reaper must treat the process as gone.
+pub fn wait_scan(pid: Pid) -> Option<WaitStatus> {
+    loop {
+        match waitpid(
+            pid,
+            Some(WaitPidFlag::WNOHANG | WaitPidFlag::WUNTRACED | WaitPidFlag::WCONTINUED),
+        ) {
+            Ok(status) => return Some(status),
+            Err(Errno::EINTR) => continue,
+            Err(Errno::ECHILD) => return None,
+            Err(_) => return Some(WaitStatus::StillAlive),
+        }
+    }
 }
 
 fn is_executable(path: &Path) -> bool {

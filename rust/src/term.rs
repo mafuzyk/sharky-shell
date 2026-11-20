@@ -1,4 +1,7 @@
+use std::cell::UnsafeCell;
 use std::io::{self, Read};
+use std::mem::MaybeUninit;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use nix::libc;
 
@@ -28,24 +31,52 @@ pub struct RawMode {
     original: libc::termios,
 }
 
-static RAW_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static ALTERNATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static mut SAVED_TERMIOS: Option<libc::termios> = None;
+static RAW_ACTIVE: AtomicBool = AtomicBool::new(false);
+static ALTERNATE: AtomicBool = AtomicBool::new(false);
+
+/// The terminal settings captured before raw mode, for the fatal-signal
+/// handler. Interior mutability without `static mut`: the cell is written by
+/// the shell thread and published through `RAW_ACTIVE` with release ordering,
+/// which the handler observes with acquire ordering, so a read can only happen
+/// after a complete write.
+struct SavedTermios(UnsafeCell<MaybeUninit<libc::termios>>);
+
+// SAFETY: see above; access is ordered by `RAW_ACTIVE` and the shell is
+// single-threaded.
+unsafe impl Sync for SavedTermios {}
+
+static SAVED_TERMIOS: SavedTermios = SavedTermios(UnsafeCell::new(MaybeUninit::uninit()));
 
 pub extern "C" fn restore_terminal_and_exit(signal: libc::c_int) {
-    // SAFETY: the handler only reads the saved termios and exits immediately.
+    // A terminal hangup must take the jobs with it, as bash does. This runs
+    // before anything else so a job that ignores the hangup still dies from the
+    // `SIGCONT` that follows it.
+    if signal == libc::SIGHUP {
+        crate::signal::forward_hangup();
+    }
+    // SAFETY: the handler only performs async-signal-safe syscalls and exits.
     unsafe {
-        if RAW_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
-            let saved = std::ptr::addr_of!(SAVED_TERMIOS);
-            if let Some(termios) = (*saved).as_ref() {
-                libc::tcsetattr(0, libc::TCSANOW, termios);
-            }
+        if RAW_ACTIVE.load(Ordering::Acquire) {
+            let saved = (*SAVED_TERMIOS.0.get()).assume_init_ref();
+            // TCSANOW and not TCSADRAIN: draining the output queue can block
+            // forever when nobody is reading the terminal.
+            libc::tcsetattr(0, libc::TCSANOW, saved);
+        }
+        // Never block on a full terminal: the process is dying either way. The
+        // status flags are shared by every descriptor duplicated from the same
+        // open file, so they are put back before exiting.
+        let flags = libc::fcntl(1, libc::F_GETFL);
+        if flags >= 0 {
+            libc::fcntl(1, libc::F_SETFL, flags | libc::O_NONBLOCK);
         }
         let clear = b"\x1b[?2004l";
         libc::write(1, clear.as_ptr() as *const _, clear.len());
-        if ALTERNATE.load(std::sync::atomic::Ordering::Relaxed) {
+        if ALTERNATE.load(Ordering::Acquire) {
             let leave = b"\x1b[?1049l";
             libc::write(1, leave.as_ptr() as *const _, leave.len());
+        }
+        if flags >= 0 {
+            libc::fcntl(1, libc::F_SETFL, flags);
         }
         libc::_exit(128 + signal);
     }
@@ -64,11 +95,16 @@ impl RawMode {
             termios.c_iflag &= !(libc::IXON | libc::ICRNL);
             termios.c_cc[libc::VMIN] = 1;
             termios.c_cc[libc::VTIME] = 0;
+            // Publish the saved settings before the terminal becomes raw: from
+            // here on a fatal signal restores them, even in the window before
+            // tcsetattr runs, and the release store makes the write visible to
+            // a handler that observes the flag.
+            (*SAVED_TERMIOS.0.get()).write(original);
+            RAW_ACTIVE.store(true, Ordering::Release);
             if libc::tcsetattr(0, libc::TCSADRAIN, &termios) != 0 {
+                RAW_ACTIVE.store(false, Ordering::Release);
                 return None;
             }
-            SAVED_TERMIOS = Some(original);
-            RAW_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
             let _ = write_stdout("\x1b[?2004h");
             Some(RawMode { original })
         }
@@ -78,11 +114,14 @@ impl RawMode {
 impl Drop for RawMode {
     fn drop(&mut self) {
         let _ = write_stdout("\x1b[?2004l");
-        RAW_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
+        // Restore first, clear the flag second: a fatal signal in between still
+        // sees an active raw mode and restores again, instead of exiting with
+        // the terminal raw.
         // SAFETY: restoring the termios captured in enable().
         unsafe {
             libc::tcsetattr(0, libc::TCSADRAIN, &self.original);
         }
+        RAW_ACTIVE.store(false, Ordering::Release);
     }
 }
 
