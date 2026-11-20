@@ -257,6 +257,36 @@ fn login_survives_a_home_without_profiles() {
 }
 
 #[test]
+fn login_profile_plain_assignments_do_not_leak_into_a_child_environment() {
+    let home = scratch("profile-export");
+    std::fs::write(
+        home.join(".profile"),
+        "LOGGED_PLAIN=one\nexport LOGGED_EXPORTED=two\n",
+    )
+    .unwrap();
+
+    let out = run(&home, &["-l", "-c", "env"]);
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !text.lines().any(|line| line.starts_with("LOGGED_PLAIN=")),
+        "{text}"
+    );
+    assert!(
+        text.lines().any(|line| line == "LOGGED_EXPORTED=two"),
+        "{text}"
+    );
+    // The system profile marks itself with a plain assignment, which must not
+    // become part of the environment inherited by commands either.
+    assert!(
+        !text.lines().any(|line| line.starts_with("__ETC_PROFILE_SOURCED=")),
+        "{text}"
+    );
+
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
 fn exit_in_a_login_profile_stops_the_c_command() {
     let home = scratch("exit-c");
     std::fs::write(home.join(".profile"), "exit 5\n").unwrap();

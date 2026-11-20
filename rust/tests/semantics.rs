@@ -3019,7 +3019,7 @@ fn declare_dash_p_without_names_prints_every_variable_sorted() {
             name.split('=').next().unwrap()
         })
         .collect();
-    assert_eq!(names, ["AA", "PATH", "PWD", "arr", "m", "map", "zz"]);
+    assert_eq!(names, ["AA", "OLDPWD", "PATH", "PWD", "SHLVL", "_", "arr", "m", "map", "zz"]);
     assert!(text.lines().any(|line| line.starts_with("declare -a arr=")), "{text:?}");
     assert!(text.lines().any(|line| line.starts_with("declare -A map=")), "{text:?}");
     assert!(text.lines().any(|line| line.starts_with("declare -- zz=")), "{text:?}");

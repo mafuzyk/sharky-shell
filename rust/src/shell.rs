@@ -29,6 +29,22 @@ use crate::parser;
 
 pub struct Shell {
     pub env: Vec<(String, String)>,
+    /// Names carrying bash's export attribute. `env` stays the single value
+    /// store; only names listed here are copied into a child environment.
+    exported: HashSet<String>,
+    /// The level `SHLVL` reports. It starts at the inherited value plus one and
+    /// follows every assignment, so the no-fork final-command path can export
+    /// one less without touching the shell's own value.
+    shlvl_level: i64,
+    /// The simple command bash would exec without forking at the end of a `-c`
+    /// string, a command substitution or a subshell. That path exports SHLVL
+    /// one lower than the shell reports.
+    shlvl_tail: Option<*const Simple>,
+    mark_tail_on_eval: bool,
+    /// Set in a forked pipeline member. Bash skips the no-fork exec path for a
+    /// command or process substitution created there, so its child exports the
+    /// shell level unchanged.
+    in_pipeline_member: bool,
     pub cwd: PathBuf,
     /// The shell's own process, as `$$` reports it. A forked child keeps this
     /// value, the way bash reports the parent shell from a subshell.
@@ -109,6 +125,7 @@ struct SavedLocal {
     var: Option<String>,
     array: Option<Vec<Option<String>>>,
     assoc: Option<BTreeMap<String, String>>,
+    exported: bool,
 }
 
 struct Job {
@@ -195,7 +212,7 @@ impl Shell {
             let _ = signal(Signal::SIGPIPE, SigHandler::SigDfl);
         }
 
-        let env = std::env::vars_os()
+        let mut env: Vec<(String, String)> = std::env::vars_os()
             .map(|(key, value)| {
                 (
                     key.to_string_lossy().into_owned(),
@@ -204,9 +221,45 @@ impl Shell {
             })
             .collect();
 
+        // Every inherited variable starts exported, exactly like a variable
+        // that arrived from the parent environment.
+        let mut exported: HashSet<String> = env.iter().map(|(name, _)| name.clone()).collect();
+
+        // Bash starts one level above the inherited value, treating an unset or
+        // unparseable value as 0, and resets a level that would reach 1000.
+        let inherited = env
+            .iter()
+            .find(|(name, _)| name == "SHLVL")
+            .map(|(_, value)| value.trim().parse::<i64>().unwrap_or(0))
+            .unwrap_or(0);
+        let mut shlvl_level = inherited.saturating_add(1);
+        if shlvl_level >= 1000 {
+            eprintln!("sharky: warning: shell level ({shlvl_level}) too high, resetting to 1");
+            shlvl_level = 1;
+        }
+        set_env_entry(&mut env, "SHLVL", shlvl_level.to_string());
+        exported.insert("SHLVL".to_string());
+
+        // `_` names the shell itself before the first command. An inherited
+        // value is kept as it arrived; it is only ever exported to children as
+        // the resolved command path.
+        if !env.iter().any(|(name, _)| name == "_") {
+            let name = std::env::args_os()
+                .next()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .filter(|arg| !arg.is_empty())
+                .unwrap_or_else(|| "sharky".to_string());
+            env.push(("_".to_string(), name));
+        }
+
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
         let mut shell = Shell {
             env,
+            exported,
+            shlvl_level,
+            shlvl_tail: None,
+            mark_tail_on_eval: false,
+            in_pipeline_member: false,
             cwd: cwd.clone(),
             pid: getpid(),
             last_status: 0,
@@ -263,6 +316,9 @@ impl Shell {
             getopts_dirty: false,
         };
         shell.set_var("PWD", cwd.display().to_string());
+        // Bash creates PWD exported and OLDPWD exported but unset at startup.
+        shell.exported.insert("PWD".to_string());
+        shell.exported.insert("OLDPWD".to_string());
         shell
     }
 
@@ -310,6 +366,9 @@ impl Shell {
     fn apply_config(&mut self, config: Config) {
         for (name, value) in config.env {
             self.set_var(&name, value);
+            // A config `pearl` line promises the variable to the shell and its
+            // children, so it carries the export attribute.
+            self.mark_exported(&name);
         }
         for dir in config.paths {
             self.add_path(&dir);
@@ -376,16 +435,48 @@ impl Shell {
     }
 
     pub fn run(&mut self, source: &str) -> i32 {
-        let status = match self.eval(source) {
+        // Only the top-level `-c` string gets bash's no-fork final-command
+        // path; profiles, traps, scripts and stdin do not.
+        let saved_tail = self.shlvl_tail;
+        self.shlvl_tail = None;
+        let mark = self.command_string && !self.exit_trap_ran;
+        let result = if mark {
+            self.eval_tail(source)
+        } else {
+            self.eval(source)
+        };
+        let status = match result {
             Ok(code) => code,
             Err(err) => {
                 eprintln!("sharky: {}", err.message);
                 2
             }
         };
+        // The parsed program is gone, so the tail pointer is cleared before
+        // the EXIT trap runs and restored only for an enclosing input unit.
+        self.shlvl_tail = None;
         let status = self.finish(status);
+        self.shlvl_tail = saved_tail;
         self.close_substitutions_from(0);
         status
+    }
+
+    fn eval_tail(&mut self, source: &str) -> Result<i32, parser::ParseError> {
+        self.mark_tail_on_eval = true;
+        let result = self.eval(source);
+        self.mark_tail_on_eval = false;
+        result
+    }
+
+    /// A process substitution child. Bash applies its no-fork SHLVL adjustment
+    /// there unless the substitution was created inside a pipeline member.
+    fn eval_substitution(&mut self, source: &str) -> Result<i32, parser::ParseError> {
+        if self.in_pipeline_member {
+            self.shlvl_tail = None;
+            self.eval(source)
+        } else {
+            self.eval_tail(source)
+        }
     }
 
     pub fn finish(&mut self, status: i32) -> i32 {
@@ -423,6 +514,9 @@ impl Shell {
         before_run: impl FnOnce(),
     ) -> Result<i32, parser::ParseError> {
         let program = parser::parse(source)?;
+        if std::mem::take(&mut self.mark_tail_on_eval) {
+            self.shlvl_tail = final_simple(&program);
+        }
         before_run();
         Ok(match self.run_program(&program) {
             Flow::Status(code) | Flow::Exit(code) | Flow::Discard(code) | Flow::Return(code) => code,
@@ -460,6 +554,7 @@ impl Shell {
         let mut names: Vec<String> = self.env.iter().map(|(key, _)| key.clone()).collect();
         names.extend(self.arrays.keys().cloned());
         names.extend(self.assoc.keys().cloned());
+        names.extend(self.exported.iter().cloned());
         names
     }
 
@@ -821,6 +916,7 @@ impl Shell {
                         let _ = setpgid(Pid::from_raw(0), target);
                     }
                     self.reset_child_traps();
+                    self.in_pipeline_member = true;
                     if let Some(fd) = stdin
                         && move_fd(fd, 0).is_err()
                     {
@@ -938,18 +1034,30 @@ impl Shell {
             return self.run_assignments(simple);
         }
 
+        let (flow, argument) = self.run_simple_dispatch(simple);
+        if let Some(argument) = argument {
+            self.remember_underscore(argument);
+        }
+        flow
+    }
+
+    // Runs one simple command and reports the last expanded argument, which
+    // becomes `$_` once the command finishes. Bash updates `_` after the
+    // command, so `read _` and `printf -v _` still see their own value
+    // overwritten by the command's last word.
+    fn run_simple_dispatch(&mut self, simple: &Simple) -> (Flow, Option<String>) {
         let mut prepared = match self.prepare(simple) {
             Ok(prepared) => prepared,
             Err(message) => {
                 if !message.is_empty() {
                     eprintln!("sharky: {message}");
                 }
-                return self.expansion_failure();
+                return (self.expansion_failure(), None);
             }
         };
 
         if self.nounset_failed {
-            return self.unset_parameter_failure();
+            return (self.unset_parameter_failure(), None);
         }
 
         if let Some(name) = prepared.argv.first()
@@ -959,29 +1067,42 @@ impl Shell {
             prepared.argv = argv;
         }
 
+        // `exec` applies its own adjustment, which differs inside a subshell.
+        if self.shlvl_tail == Some(simple as *const Simple)
+            && prepared.argv.first().map(String::as_str) != Some("exec")
+        {
+            self.adjust_shlvl_env(&mut prepared.env);
+        }
+
+        let argument = prepared.argv.last().cloned().unwrap_or_default();
+
         if prepared.argv.first().map(String::as_str) == Some("exec") {
             if !prepared.actions.is_empty()
                 && let Err(message) = apply_actions(&prepared.actions)
             {
                 eprintln!("sharky: {message}");
-                return Flow::Status(1);
+                return (Flow::Status(1), Some(argument));
             }
-            return self.exec_builtin(&prepared.argv[1..], &prepared.env);
+            return (
+                self.exec_builtin(&prepared.argv[1..], &prepared.env),
+                Some(argument),
+            );
         }
 
         if prepared.argv.is_empty() {
             if prepared.actions.is_empty() {
-                return Flow::Status(0);
+                return (Flow::Status(0), Some(argument));
             }
         } else if self.funcs.contains_key(&prepared.argv[0]) || is_builtin_name(&prepared.argv[0]) {
             let argv = &prepared.argv;
-            return self.with_actions(&prepared.actions, |shell| {
+            let flow = self.with_actions(&prepared.actions, |shell| {
                 shell.run_in_shell(argv, &prepared.declarations, &prepared.env)
             });
+            return (flow, Some(argument));
         }
 
         let command = prepared.argv.join(" ");
-        match self.spawn(
+        let flow = match self.spawn(
             &prepared.argv,
             &prepared.actions,
             &prepared.env,
@@ -992,7 +1113,20 @@ impl Shell {
                 eprintln!("sharky: {message}");
                 Flow::Status(1)
             }
-        }
+        };
+        (flow, Some(argument))
+    }
+
+    fn remember_underscore(&mut self, value: String) {
+        self.set_var("_", value);
+        // Bash's `_` update clears the export attribute, and `export _` never
+        // makes it exported; every child still gets it as the resolved path.
+        self.exported.remove("_");
+    }
+
+    fn adjust_shlvl_env(&self, env: &mut Vec<(String, String)>) {
+        let level = (self.shlvl_level - 1).max(0).to_string();
+        set_env_entry(env, "SHLVL", level);
     }
 
     // An assignment-only command keeps its assignments in the current shell.
@@ -1001,6 +1135,12 @@ impl Shell {
     // which bash still applies. Assignment words expand before the redirections
     // are applied, so an expansion failure creates and assigns nothing.
     fn run_assignments(&mut self, simple: &Simple) -> Flow {
+        let flow = self.run_assignments_inner(simple);
+        self.remember_underscore(String::new());
+        flow
+    }
+
+    fn run_assignments_inner(&mut self, simple: &Simple) -> Flow {
         let actions = match self.redirect_actions(&simple.redirects) {
             Ok(actions) => actions,
             Err(message) => {
@@ -1219,8 +1359,21 @@ impl Shell {
         argv.push(name.unwrap_or_else(|| program.clone()));
         argv.extend_from_slice(rest);
 
+        // Bash's explicit `exec` exports one shell level less, except inside a
+        // subshell, where the normal export value is kept.
+        let mut env = env.to_vec();
+        if self.in_subshell {
+            if self.exported.contains("SHLVL") {
+                set_env_entry(&mut env, "SHLVL", self.shlvl_level.to_string());
+            } else {
+                env.retain(|(name, _)| name != "SHLVL");
+            }
+        } else {
+            self.adjust_shlvl_env(&mut env);
+        }
+
         self.publish_json_exec();
-        match exec::exec_now(&path, &argv, env) {
+        match exec::exec_now_plain(&path, &argv, &env) {
             Ok(()) => Flow::Status(0),
             Err(err) => {
                 eprintln!("sharky: exec: {program}: {err}");
@@ -1357,6 +1510,9 @@ impl Shell {
                 }
                 self.reset_child_traps();
                 self.in_subshell = true;
+                // A subshell's last command is exec'd without a fork too, so
+                // it exports one shell level less.
+                self.shlvl_tail = final_simple_in_list(list);
                 let code = flow_status(self.run_list(list));
                 unsafe { _exit(code) }
             }
@@ -1634,7 +1790,7 @@ impl Shell {
 
         let actions = self.redirect_actions(&simple.redirects)?;
 
-        let mut env = self.env.clone();
+        let mut env = self.child_env();
         let mut declarations = Vec::new();
         let declaring = argv.first().is_some_and(|name| is_declaration_word(name));
         for assignment in &simple.assignments {
@@ -2138,6 +2294,7 @@ impl Shell {
         let mut print = false;
         let mut only_indexed = false;
         let mut only_assoc = false;
+        let mut export_flag = false;
         let mut index = 0;
         while index < args.len() {
             let argument = args[index].as_str();
@@ -2162,6 +2319,7 @@ impl Shell {
                         only_assoc = true;
                     }
                     'p' => print = true,
+                    'x' => export_flag = true,
                     other => {
                         eprintln!("sharky: {command}: -{other}: unsupported option");
                         return 2;
@@ -2182,7 +2340,11 @@ impl Shell {
                 return 0;
             }
             if names.is_empty() {
-                self.print_all_variables(only_indexed, only_assoc);
+                if export_flag {
+                    self.print_exported();
+                } else {
+                    self.print_all_variables(only_indexed, only_assoc);
+                }
                 return 0;
             }
             let mut status = 0;
@@ -2196,6 +2358,10 @@ impl Shell {
         }
 
         if names.is_empty() {
+            if export_flag {
+                self.print_exported();
+                return 0;
+            }
             eprintln!("sharky: {command}: usage: {command} [-a|-A] name[=value] ...");
             return 2;
         }
@@ -2315,6 +2481,9 @@ impl Shell {
                     }
                 }
             }
+            if export_flag {
+                self.mark_exported(name);
+            }
         }
         status
     }
@@ -2341,6 +2510,7 @@ impl Shell {
         let mut names: Vec<&String> = self.env.iter().map(|(name, _)| name).collect();
         names.extend(self.arrays.keys());
         names.extend(self.assoc.keys());
+        names.extend(self.exported.iter());
         names.sort();
         names.dedup();
         for name in names {
@@ -2392,10 +2562,11 @@ impl Shell {
     }
 
     fn declaration_line(&self, name: &str) -> Option<String> {
-        // Only the array kind is tracked, so `-a`/`-A` are the only flags that
-        // can appear; export and readonly have no stored attribute.
+        // The tracked attributes are the array kind and the export flag;
+        // readonly has no stored attribute.
         if let Some(map) = self.assoc.get(name) {
-            let mut line = format!("declare -A {name}");
+            let flags = if self.exported.contains(name) { "Ax" } else { "A" };
+            let mut line = format!("declare -{flags} {name}");
             if map.is_empty() {
                 line.push_str("=()");
             } else {
@@ -2416,7 +2587,8 @@ impl Shell {
             return Some(line);
         }
         if let Some(values) = self.arrays.get(name) {
-            let mut line = format!("declare -a {name}");
+            let flags = if self.exported.contains(name) { "ax" } else { "a" };
+            let mut line = format!("declare -{flags} {name}");
             // No "declared but unassigned" bit is kept, so a bare declaration
             // prints =() where bash prints only the name.
             if values.iter().all(Option::is_none) {
@@ -2439,9 +2611,18 @@ impl Shell {
             }
             return Some(line);
         }
-        self.env.iter().find(|(key, _)| key == name).map(|(_, value)| {
-            format!("declare -- {name}={}", quote_value(value))
-        })
+        self.env
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| {
+                let flags = if self.exported.contains(name) { "x" } else { "-" };
+                format!("declare -{flags} {name}={}", quote_value(value))
+            })
+            .or_else(|| {
+                self.exported
+                    .contains(name)
+                    .then(|| format!("declare -x {name}"))
+            })
     }
 
     fn save_local(&mut self, name: &str) -> bool {
@@ -2463,6 +2644,7 @@ impl Shell {
             var,
             array: self.arrays.get(name).cloned(),
             assoc: self.assoc.get(name).cloned(),
+            exported: self.exported.contains(name),
         };
         if let Some(frame) = self.local_scopes.last_mut() {
             frame.push(saved);
@@ -2478,6 +2660,11 @@ impl Shell {
             self.env.retain(|(key, _)| key != &saved.name);
             self.arrays.remove(&saved.name);
             self.assoc.remove(&saved.name);
+            if saved.exported {
+                self.exported.insert(saved.name.clone());
+            } else {
+                self.exported.remove(&saved.name);
+            }
             if let Some(value) = saved.var {
                 self.env.push((saved.name.clone(), value));
             }
@@ -2540,6 +2727,11 @@ impl Shell {
         if name == "OPTIND" {
             self.getopts_dirty = true;
         }
+        // `SHLVL` tracks its own numeric level so the no-fork final-command
+        // path can export one less without changing the value the shell shows.
+        if name == "SHLVL" {
+            self.shlvl_level = bash_atoi(&value);
+        }
         // A name is either a scalar or an array. Writing a scalar to an array
         // name stores it in element 0, the way bash keeps the array type.
         if self.assoc.contains_key(name) {
@@ -2559,6 +2751,28 @@ impl Shell {
         }
     }
 
+    /// The environment handed to a child: only exported variables. `_` is not
+    /// included here; `exec` replaces its value with the resolved command path.
+    fn child_env(&self) -> Vec<(String, String)> {
+        self.env
+            .iter()
+            .filter(|(name, _)| self.exported.contains(name))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect()
+    }
+
+    fn mark_exported(&mut self, name: &str) {
+        // Bash never gives `_` the export attribute, even when asked.
+        if name == "_" {
+            return;
+        }
+        self.exported.insert(name.to_string());
+    }
+
+    fn clear_exported(&mut self, name: &str) {
+        self.exported.remove(name);
+    }
+
     // Removes a scalar binding so a name that became an array is no longer
     // exported with a stale value.
     fn take_scalar(&mut self, name: &str) -> Option<String> {
@@ -2566,13 +2780,98 @@ impl Shell {
         Some(self.env.remove(position).1)
     }
 
+    // `export [-fn] [name[=value] ...]` and `export -p`. Bash keeps the export
+    // attribute on the name, so a later plain assignment keeps it and a later
+    // `export -n` drops it without touching the value.
     fn export(&mut self, args: &[String]) -> i32 {
-        for arg in args {
-            if let Some((name, value)) = arg.split_once('=') {
-                self.set_var(name, value.to_string());
+        let mut clear = false;
+        let mut print = false;
+        let mut functions = false;
+        let mut index = 0;
+        while let Some(argument) = args.get(index) {
+            if argument == "--" {
+                index += 1;
+                break;
+            }
+            if !argument.starts_with('-') || argument == "-" {
+                break;
+            }
+            for flag in argument.chars().skip(1) {
+                match flag {
+                    'n' => clear = true,
+                    'p' => print = true,
+                    'f' => functions = true,
+                    _ => {
+                        eprintln!("sharky: export: -{flag}: invalid option");
+                        eprintln!(
+                            "sharky: export: usage: export [-fn] [name[=value] ...] or export -p [-f]"
+                        );
+                        return 2;
+                    }
+                }
+            }
+            index += 1;
+        }
+
+        let names = &args[index..];
+        if names.is_empty() {
+            if print || clear {
+                self.print_exported();
+                return 0;
+            }
+            return 0;
+        }
+
+        let mut status = 0;
+        for argument in names {
+            if functions {
+                if !self.funcs.contains_key(argument) && !argument.contains('=') {
+                    eprintln!("sharky: export: {argument}: not a function");
+                    status = 1;
+                }
+                continue;
+            }
+            match argument.split_once('=') {
+                Some((name, value)) => {
+                    if !is_valid_array_name(name) {
+                        eprintln!("sharky: export: `{name}': not a valid identifier");
+                        status = 1;
+                        continue;
+                    }
+                    self.set_var(name, value.to_string());
+                    if clear {
+                        self.clear_exported(name);
+                    } else {
+                        self.mark_exported(name);
+                    }
+                }
+                None => {
+                    if !is_valid_array_name(argument) {
+                        eprintln!("sharky: export: `{argument}': not a valid identifier");
+                        status = 1;
+                        continue;
+                    }
+                    if clear {
+                        self.clear_exported(argument);
+                    } else {
+                        self.mark_exported(argument);
+                    }
+                }
             }
         }
-        0
+        status
+    }
+
+    fn print_exported(&self) {
+        let mut names: Vec<&String> = self.exported.iter().collect();
+        names.sort();
+        names.dedup();
+        for name in names {
+            match self.declaration_line(name) {
+                Some(line) => println!("{line}"),
+                None => println!("declare -x {name}"),
+            }
+        }
     }
 
     fn unset(&mut self, args: &[String]) -> i32 {
@@ -2595,6 +2894,10 @@ impl Shell {
             self.env.retain(|(key, _)| key != name);
             self.arrays.remove(name);
             self.assoc.remove(name);
+            self.clear_exported(name);
+            if name == "SHLVL" {
+                self.shlvl_level = 0;
+            }
         }
         0
     }
@@ -3153,6 +3456,10 @@ impl Shell {
         self.env.retain(|(key, _)| key != name);
         self.arrays.remove(name);
         self.assoc.remove(name);
+        self.clear_exported(name);
+        if name == "SHLVL" {
+            self.shlvl_level = 0;
+        }
     }
 
     fn bind_getopts_name(&mut self, name: &str, value: &str) -> i32 {
@@ -5419,7 +5726,7 @@ impl Shell {
                         let _ = nix::libc::close(fd);
                     }
                 }
-                let status = match self.eval(source) {
+                let status = match self.eval_substitution(source) {
                     Ok(code) => code,
                     Err(err) => {
                         eprintln!("sharky: {}", err.message);
@@ -5500,7 +5807,7 @@ impl Shell {
                 // Both ends are open now, so the name is no longer needed.
                 // Unlinking here avoids any global temp-directory sweep.
                 let _ = std::fs::remove_file(&path);
-                let status = match self.eval(source) {
+                let status = match self.eval_substitution(source) {
                     Ok(code) => code,
                     Err(err) => {
                         eprintln!("sharky: {}", err.message);
@@ -5620,7 +5927,14 @@ impl Shell {
                     nix::libc::close(write.as_raw_fd());
                 }
                 let code = match parser::parse(source) {
-                    Ok(program) => flow_status(self.run_program(&program)),
+                    Ok(program) => {
+                        self.shlvl_tail = if self.in_pipeline_member {
+                            None
+                        } else {
+                            final_simple(&program)
+                        };
+                        flow_status(self.run_program(&program))
+                    }
                     Err(err) => {
                         eprintln!("sharky: {}", err.message);
                         2
@@ -8101,6 +8415,82 @@ fn bash_assoc_bucket(key: &str) -> u32 {
         hash = hash.wrapping_mul(16_777_619) ^ u32::from(byte);
     }
     hash & 1023
+}
+
+/// Stores one scalar, replacing an existing entry in place so the order of the
+/// environment is preserved.
+fn set_env_entry(env: &mut Vec<(String, String)>, name: &str, value: String) {
+    match env.iter_mut().find(|(key, _)| key == name) {
+        Some(entry) => entry.1 = value,
+        None => env.push((name.to_string(), value)),
+    }
+}
+
+/// Bash's `atoi` for the `SHLVL` adjustment path: leading space, an optional
+/// sign, then digits, stopping at the first non-digit. Any overflow saturates.
+fn bash_atoi(text: &str) -> i64 {
+    let mut chars = text.chars().peekable();
+    while chars.peek().is_some_and(|char| char.is_ascii_whitespace()) {
+        chars.next();
+    }
+    let mut negative = false;
+    match chars.peek() {
+        Some('-') => {
+            negative = true;
+            chars.next();
+        }
+        Some('+') => {
+            chars.next();
+        }
+        _ => {}
+    }
+    let mut value: i64 = 0;
+    let mut digits = false;
+    while let Some(char) = chars.peek() {
+        let Some(digit) = char.to_digit(10) else {
+            break;
+        };
+        digits = true;
+        value = value.saturating_mul(10).saturating_add(digit as i64);
+        chars.next();
+    }
+    if !digits {
+        return 0;
+    }
+    if negative { value.saturating_neg() } else { value }
+}
+
+/// The simple command bash would exec without forking at the end of an input
+/// unit. The path only follows shapes bash optimizes: the last list entry, its
+/// last `&&`/`||` element, a single-command pipeline, plain redirection-free
+/// simple commands and nested subshells. Groups, functions, `if`, loops,
+/// negation, pipelines with more than one member and redirected commands all
+/// fork in bash and are deliberately excluded.
+fn final_simple(program: &Program) -> Option<*const Simple> {
+    final_simple_in_list(program.lines.last()?)
+}
+
+fn final_simple_in_list(list: &List) -> Option<*const Simple> {
+    let entry = list.entries.last()?;
+    if entry.background {
+        return None;
+    }
+    let pipeline = match entry.and_or.rest.last() {
+        Some((_, pipeline)) => pipeline,
+        None => &entry.and_or.first,
+    };
+    final_simple_in_pipeline(pipeline)
+}
+
+fn final_simple_in_pipeline(pipeline: &Pipeline) -> Option<*const Simple> {
+    if pipeline.timed.is_some() || pipeline.negate || pipeline.commands.len() != 1 {
+        return None;
+    }
+    match &pipeline.commands[0] {
+        Command::Simple(simple) => Some(simple as *const Simple),
+        Command::Subshell(list) => final_simple_in_list(list),
+        _ => None,
+    }
 }
 
 fn quote_value(value: &str) -> String {

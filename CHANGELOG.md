@@ -30,6 +30,17 @@ rather than a separate preview track.
 
 ### Added
 
+- `_` and `SHLVL` are tracked like bash: a normally spawned child environment
+  always carries `_` as the resolved path of the command being started, while
+  the shell's own `$_` is the last expanded argument of the previous simple
+  command (empty after an assignment-only command, unchanged across a pipeline
+  or subshell). `SHLVL` starts one above the inherited value (1 when unset or
+  invalid), saturates with bash's warning at 1000 and follows assignments. It is
+  exported one lower for the final command of a `-c` string, a command
+  substitution, a process substitution or a subshell, matching bash's no-fork
+  exec path; substitutions created inside a pipeline member keep the normal
+  level. The explicit `exec` builtin exports one less too, except inside a
+  subshell where the normal level is kept, and it does not rewrite `_`.
 - The `history` builtin searches, filters and deletes: `history [search]
   [--max N] [--reverse] [--show-time] [--null] [--case-sensitive]
   [--contains|--prefix|--exact] [PATTERN]` lists matching entries newest first
@@ -102,6 +113,16 @@ rather than a separate preview track.
 
 ### Fixed
 
+- Only exported variables reach a child process, as in bash. `Shell::env` is
+  still the single scalar store, so expansion, `declare -p` and `set` keep
+  seeing every variable, but the environment handed to a spawn, `exec`, a
+  command substitution, a process substitution or the `--json` path is filtered
+  by a new export attribute. Variables inherited from the parent start exported;
+  `export NAME`, `export NAME=value` and `declare -x` set the attribute;
+  `export -n` and `unset` clear it; and a plain assignment keeps the current
+  attribute. `VAR=val cmd` stays a temporary overlay for that one command.
+  `export -p` now lists only the exported variables in bash's
+  `declare -x NAME=value` form.
 - A login shell now executes its startup files through `Shell::eval` instead of
   scanning them for literal `NAME=value` assignments. It runs `/etc/profile`
   (which on NixOS sources `set-environment`, `/etc/profile.local` and

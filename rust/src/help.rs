@@ -209,8 +209,12 @@ fn builtin_text(id: &str) -> Option<&'static str> {
              With no argument, use the status of the last command.\n"
         }
         "export" => {
-            "export NAME=value ...  set variables for this shell and its children.\n\
-             Only assignments are accepted; names without = are ignored.\n"
+            "export [-fn] [NAME[=value] ...] or export -p\n\
+             Mark variables for the environment of child processes. `export NAME`\n\
+             marks an existing variable without changing its value; `export -n`\n\
+             removes the attribute and keeps the value; `export -p` lists only the\n\
+             exported variables. A plain assignment keeps the current attribute,\n\
+             and `unset` removes the name and its attribute.\n"
         }
         "unset" => {
             "unset NAME ...  remove variables and array elements.\n\

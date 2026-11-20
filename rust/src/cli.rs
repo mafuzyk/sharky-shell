@@ -395,6 +395,11 @@ fn run_json_command(shell: &mut Shell, source: &str, login: bool) -> i32 {
 fn env_delta(shell: &Shell, before: &[(String, String)]) -> String {
     let mut delta: Vec<(String, Option<String>)> = Vec::new();
     for (key, value) in &shell.env {
+        // `_` changes after every command by design and is an artifact of the
+        // shell, not part of the state a caller asked to observe.
+        if key == "_" {
+            continue;
+        }
         if before
             .iter()
             .find(|(name, _)| name == key)
@@ -405,6 +410,9 @@ fn env_delta(shell: &Shell, before: &[(String, String)]) -> String {
         }
     }
     for (key, _) in before {
+        if key == "_" {
+            continue;
+        }
         if !shell.env.iter().any(|(name, _)| name == key) {
             delta.push((key.clone(), None));
         }

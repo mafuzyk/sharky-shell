@@ -66,14 +66,43 @@ fn path_of(shell: &Shell) -> &str {
 }
 
 pub fn exec_now(path: &Path, argv: &[String], env: &[(String, String)]) -> Result<(), Errno> {
+    exec_env(path, argv, env, true)
+}
+
+/// The `exec` builtin path: bash does not rewrite `_` when the shell replaces
+/// itself, so the environment is passed exactly as built.
+pub fn exec_now_plain(
+    path: &Path,
+    argv: &[String],
+    env: &[(String, String)],
+) -> Result<(), Errno> {
+    exec_env(path, argv, env, false)
+}
+
+fn exec_env(
+    path: &Path,
+    argv: &[String],
+    env: &[(String, String)],
+    underscore: bool,
+) -> Result<(), Errno> {
     let argv: Vec<CString> = argv
         .iter()
         .map(|arg| CString::new(arg.as_bytes()).unwrap_or_default())
         .collect();
-    let envp: Vec<CString> = env
+    // Bash gives a normal child `_` the resolved path of the command it is
+    // about to run, overriding whatever value the shell's `_` holds.
+    let mut envp: Vec<CString> = env
         .iter()
+        .filter(|(key, _)| !(underscore && key == "_"))
         .filter_map(|(key, value)| CString::new(format!("{key}={value}")).ok())
         .collect();
+    if underscore {
+        let mut entry = Vec::from(&b"_="[..]);
+        entry.extend_from_slice(path.as_os_str().as_encoded_bytes());
+        if let Ok(entry) = CString::new(entry) {
+            envp.push(entry);
+        }
+    }
 
     let path_c = CString::new(path.as_os_str().as_encoded_bytes())
         .map_err(|_| Errno::EINVAL)?;
