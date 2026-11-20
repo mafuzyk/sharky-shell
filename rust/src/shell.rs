@@ -90,6 +90,16 @@ pub struct Shell {
     colors: HashMap<String, String>,
     styles: HashMap<String, String>,
     local_scopes: Vec<Vec<SavedLocal>>,
+    // `getopts` keeps its scan position between calls: the argv index (1-based,
+    // with $0 first) and the position inside a clustered word, the way bash's
+    // sh_getopt does. The last OPTIND written lets a user assignment be told
+    // apart from the shell's own update.
+    getopts_optind: usize,
+    getopts_pending: Option<(usize, usize)>,
+    getopts_written: Option<String>,
+    // Set by any assignment to OPTIND, so a write that repeats the current
+    // value still resets the scan the way bash's variable hook does.
+    getopts_dirty: bool,
 }
 
 struct SavedLocal {
@@ -241,6 +251,10 @@ impl Shell {
             colors: HashMap::new(),
             styles: HashMap::new(),
             local_scopes: Vec::new(),
+            getopts_optind: 0,
+            getopts_pending: None,
+            getopts_written: None,
+            getopts_dirty: false,
         };
         shell.set_var("PWD", cwd.display().to_string());
         shell
@@ -482,7 +496,7 @@ impl Shell {
             "alias", "abbr", "unabbr", "unalias", "history", "wait", "kill", "z", "zi",
             "reload", "trap", "read", "shift", "wake", "exec", "time", "shopt",
             "mapfile", "readarray", "command", "help", "echo", "printf",
-            "test", "[",
+            "test", "[", "eval", "umask", "getopts",
         ]
         .iter()
         .map(|word| word.to_string())
@@ -1789,6 +1803,9 @@ impl Shell {
             "source" | "." => Some(self.source(&words[1..])),
             "test" => Some(Flow::Status(self.test_builtin(&words[1..], false))),
             "[" => Some(Flow::Status(self.test_builtin(&words[1..], true))),
+            "eval" => Some(self.eval_builtin(&words[1..])),
+            "umask" => Some(Flow::Status(self.umask_builtin(&words[1..]))),
+            "getopts" => Some(Flow::Status(self.getopts_builtin(&words[1..]))),
             _ => None,
         }
     }
@@ -2407,6 +2424,10 @@ impl Shell {
     }
 
     pub(crate) fn set_var(&mut self, name: &str, value: String) {
+        // Assigning OPTIND resets `getopts`, even when the value is unchanged.
+        if name == "OPTIND" {
+            self.getopts_dirty = true;
+        }
         // A name is either a scalar or an array. Writing a scalar to an array
         // name stores it in element 0, the way bash keeps the array type.
         if self.assoc.contains_key(name) {
@@ -2650,6 +2671,313 @@ impl Shell {
                 2
             }
         }
+    }
+
+    /// `eval ARG ...`: join the arguments with spaces and run the result as
+    /// shell code in the current shell, so assignments, functions and exports
+    /// persist. The status is the last command's; `return`, `break`, `continue`
+    /// and `exit` are handed back to the enclosing construct.
+    fn eval_builtin(&mut self, args: &[String]) -> Flow {
+        let index = match skip_leading_options("eval", "eval: usage: eval [arg ...]", args) {
+            Ok(index) => index,
+            Err(status) => return Flow::Status(status),
+        };
+
+        let source = args[index..].join(" ");
+        let program = match parser::parse(&source) {
+            Ok(program) => program,
+            Err(err) => {
+                if err.line > 0 {
+                    eprintln!("sharky: eval: line {}: {}", err.line, err.message);
+                } else {
+                    eprintln!("sharky: eval: {}", err.message);
+                }
+                return Flow::Status(2);
+            }
+        };
+        // An empty or comment-only string is a success, whatever `$?` was.
+        if program.lines.is_empty() {
+            return Flow::Status(0);
+        }
+        match self.run_program(&program) {
+            // An expansion error abandons the evaluated string the way bash
+            // discards the rest of the input unit, leaving the caller running.
+            Flow::Discard(code) => Flow::Status(code),
+            other => other,
+        }
+    }
+
+    /// `umask [-p] [-S] [MODE]`: report or set the file-creation mask. The
+    /// kernel mask is the source of truth, so children inherit it and files the
+    /// shell creates are filtered by it.
+    fn umask_builtin(&mut self, args: &[String]) -> i32 {
+        let mut symbolic = false;
+        let mut reusable = false;
+        let mut index = 0;
+        while let Some(arg) = args.get(index) {
+            if arg == "--" {
+                index += 1;
+                break;
+            }
+            if arg == "--help" {
+                if let Some(text) = crate::help::topic("umask") {
+                    print!("{text}");
+                }
+                return 2;
+            }
+            if arg.len() > 1 && arg.starts_with('-') {
+                for flag in arg[1..].chars() {
+                    match flag {
+                        'S' => symbolic = true,
+                        'p' => reusable = true,
+                        _ => {
+                            eprintln!("sharky: umask: -{flag}: invalid option");
+                            eprintln!("umask: usage: umask [-p] [-S] [mode]");
+                            return 2;
+                        }
+                    }
+                }
+                index += 1;
+                continue;
+            }
+            break;
+        }
+
+        let Some(word) = args.get(index) else {
+            let current = umask_current();
+            if reusable {
+                print!("umask{} ", if symbolic { " -S" } else { "" });
+            }
+            if symbolic {
+                println!("{}", umask_symbolic(current));
+            } else {
+                println!("{current:04o}");
+            }
+            return 0;
+        };
+
+        let bits = if word.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+            match read_octal(word) {
+                Some(bits) => bits,
+                None => {
+                    eprintln!("sharky: umask: {word}: octal number out of range");
+                    return 1;
+                }
+            }
+        } else {
+            match umask_parse_symbolic(word, !umask_current() & 0o777) {
+                // The parser works with the permitted bits; the mask is their
+                // complement.
+                Some(bits) => !bits & 0o777,
+                None => return 1,
+            }
+        };
+        umask_set(bits);
+        if symbolic {
+            println!("{}", umask_symbolic(bits));
+        }
+        0
+    }
+
+    /// `getopts OPTSTRING NAME [ARG ...]`: POSIX option parsing over ARG (or
+    /// the positional parameters). State lives in OPTIND, OPTARG and OPTERR.
+    fn getopts_builtin(&mut self, args: &[String]) -> i32 {
+        let index = match skip_leading_options(
+            "getopts",
+            "getopts: usage: getopts optstring name [arg ...]",
+            args,
+        ) {
+            Ok(index) => index,
+            Err(status) => return status,
+        };
+        let args = &args[index..];
+        let (Some(optstring), Some(name)) = (args.first(), args.get(1)) else {
+            eprintln!("getopts: usage: getopts optstring name [arg ...]");
+            return 2;
+        };
+
+        // A leading colon asks for silent reporting: no diagnostics, and the
+        // offending option character is reported instead.
+        let silent = optstring.starts_with(':');
+        let options = if silent {
+            &optstring[1..]
+        } else {
+            optstring.as_str()
+        };
+        let opterr = if silent {
+            false
+        } else {
+            let value = self.var("OPTERR");
+            value.is_empty() || atoi_like(&value) != 0
+        };
+
+        let scanning: Vec<String> = if args.len() > 2 {
+            args[2..].to_vec()
+        } else {
+            self.positional.clone()
+        };
+
+        // A user assignment to OPTIND shows up as a value this shell did not
+        // write, or as the assignment flag; OPTIND=1 (or 0, or a negative)
+        // resets the scan, any other value moves the index.
+        let current = self.var("OPTIND");
+        if self.getopts_dirty || self.getopts_written.as_deref() != Some(current.as_str()) {
+            self.getopts_dirty = false;
+            let value = atoi_like(&current);
+            let optind = if value < 0 || value == 1 {
+                0
+            } else {
+                value as usize
+            };
+            self.getopts_optind = optind;
+            if optind == 0 {
+                self.getopts_pending = None;
+            }
+        }
+
+        enum Scan {
+            Char(u8),
+            Eof,
+            Invalid,
+            Missing,
+        }
+
+        let argc = scanning.len() + 1;
+        let mut optind = self.getopts_optind;
+        let mut pending = self.getopts_pending;
+        let mut outcome = Scan::Eof;
+        let mut optarg: Option<String> = None;
+        let mut optopt = b'?';
+
+        if optind >= argc {
+            optind = argc;
+        } else {
+            if optind == 0 {
+                optind = 1;
+                pending = None;
+            }
+            let mut decode = pending.is_some();
+            if pending.is_none() && optind < argc {
+                let word = &scanning[optind - 1];
+                if word == "--" {
+                    optind += 1;
+                } else if word.starts_with('-') && word.len() > 1 {
+                    pending = Some((optind, 1));
+                    decode = true;
+                }
+            }
+            if decode {
+                let (curopt, charindex) = pending.expect("pending option word");
+                // ARGS can change between calls; a word that no longer has the
+                // half-scanned position is skipped instead of read past.
+                let resumable = scanning
+                    .get(curopt - 1)
+                    .is_some_and(|word| charindex < word.len());
+                if !resumable {
+                    optind = (curopt + 1).min(argc);
+                    pending = None;
+                } else {
+                    let mut charindex = charindex;
+                    let element = scanning[curopt - 1].as_bytes();
+                    let c = element[charindex];
+                    charindex += 1;
+                    optopt = c;
+                    if charindex >= element.len() {
+                        optind += 1;
+                        pending = None;
+                    } else {
+                        pending = Some((curopt, charindex));
+                    }
+
+                    let position = options.as_bytes().iter().position(|&known| known == c);
+                    let wants_argument = position
+                        .is_some_and(|pos| options.as_bytes().get(pos + 1) == Some(&b':'));
+                    if position.is_none() || c == b':' {
+                        if opterr {
+                            eprintln!("sharky: illegal option -- {}", c as char);
+                        }
+                        outcome = Scan::Invalid;
+                    } else if wants_argument {
+                        if pending.is_some() {
+                            // The rest of the word is the option's argument.
+                            optarg = Some(scanning[curopt - 1][charindex..].to_string());
+                            optind += 1;
+                            outcome = Scan::Char(c);
+                        } else if optind == argc {
+                            if opterr {
+                                eprintln!("sharky: option requires an argument -- {}", c as char);
+                            }
+                            optopt = c;
+                            optarg = Some(String::new());
+                            outcome = Scan::Missing;
+                        } else {
+                            optarg = Some(scanning[optind - 1].clone());
+                            optind += 1;
+                            outcome = Scan::Char(c);
+                        }
+                        pending = None;
+                    } else {
+                        outcome = Scan::Char(c);
+                    }
+                }
+            }
+        }
+
+        self.getopts_optind = optind;
+        self.getopts_pending = pending;
+        self.set_var("OPTIND", optind.to_string());
+        self.getopts_written = Some(optind.to_string());
+        self.getopts_dirty = false;
+
+        match outcome {
+            Scan::Eof => {
+                self.unset_name("OPTARG");
+                self.bind_getopts_name(name, "?");
+                1
+            }
+            Scan::Invalid => {
+                let status = self.bind_getopts_name(name, "?");
+                if silent {
+                    self.set_var("OPTARG", (optopt as char).to_string());
+                } else {
+                    self.unset_name("OPTARG");
+                }
+                status
+            }
+            Scan::Missing => {
+                let status = self.bind_getopts_name(name, if silent { ":" } else { "?" });
+                if silent {
+                    self.set_var("OPTARG", (optopt as char).to_string());
+                } else {
+                    self.unset_name("OPTARG");
+                }
+                status
+            }
+            Scan::Char(c) => {
+                match optarg {
+                    Some(value) => self.set_var("OPTARG", value),
+                    // bash leaves OPTARG bound to a null value, which every
+                    // expansion treats as unset; remove it instead.
+                    None => self.unset_name("OPTARG"),
+                }
+                self.bind_getopts_name(name, &(c as char).to_string())
+            }
+        }
+    }
+
+    fn unset_name(&mut self, name: &str) {
+        self.env.retain(|(key, _)| key != name);
+        self.arrays.remove(name);
+        self.assoc.remove(name);
+    }
+
+    fn bind_getopts_name(&mut self, name: &str, value: &str) -> i32 {
+        if !is_valid_array_name(name) {
+            eprintln!("sharky: getopts: `{name}': not a valid identifier");
+            return 1;
+        }
+        self.set_var(name, value.to_string());
+        0
     }
 
     /// Warns on a refused history file and falls back to memory only. The failed
@@ -6944,6 +7272,234 @@ fn decimal_digits(input: &[u8], mut index: usize) -> (u64, usize, usize) {
     (value, index, taken)
 }
 
+/// The one leading option word bash accepts for `eval` and `getopts`: `--` is
+/// skipped, `--help` prints the topic and stops with status 2, and any other
+/// word starting with `-` is rejected with the usage line. Returns the index of
+/// the first operand.
+fn skip_leading_options(name: &str, usage: &str, args: &[String]) -> Result<usize, i32> {
+    match args.first().map(String::as_str) {
+        Some("--") => Ok(1),
+        Some("--help") => {
+            if let Some(text) = crate::help::topic(name) {
+                print!("{text}");
+            }
+            Err(2)
+        }
+        Some(arg) if arg.len() > 1 && arg.starts_with('-') => {
+            eprintln!("sharky: {name}: {arg}: invalid option");
+            eprintln!("{usage}");
+            Err(2)
+        }
+        _ => Ok(0),
+    }
+}
+
+/// bash's `read_octal`: at most four octal digits, none above 7, and the value
+/// must stay within 07777. Anything else is reported as out of range.
+fn read_octal(text: &str) -> Option<u32> {
+    let bytes = text.as_bytes();
+    let mut value: u32 = 0;
+    let mut digits = 0;
+    let mut index = 0;
+    while index < bytes.len() && bytes[index].is_ascii_digit() && bytes[index] <= b'7' {
+        value = value * 8 + u32::from(bytes[index] - b'0');
+        if value > 0o7777 {
+            return None;
+        }
+        digits += 1;
+        index += 1;
+    }
+    if digits == 0 || index != bytes.len() {
+        return None;
+    }
+    Some(value)
+}
+
+/// The process umask. Reading it needs a write, so the previous value is put
+/// back immediately; callers get the same state they had.
+fn umask_current() -> u32 {
+    // SAFETY: umask(2) touches only the process attribute, and the previous
+    // value is restored before anything else can observe the change.
+    let current = unsafe { nix::libc::umask(0) };
+    unsafe { nix::libc::umask(current) };
+    (current as u32) & 0o777
+}
+
+fn umask_set(bits: u32) {
+    // SAFETY: the value is masked to the nine mode bits the kernel stores.
+    unsafe { nix::libc::umask(bits as nix::libc::mode_t) };
+}
+
+/// `u=rwx,g=rx,o=` — a letter printed when the mask leaves that bit clear.
+fn umask_symbolic(mask: u32) -> String {
+    let class = |read: u32, write: u32, execute: u32| {
+        let mut out = String::new();
+        if mask & read == 0 {
+            out.push('r');
+        }
+        if mask & write == 0 {
+            out.push('w');
+        }
+        if mask & execute == 0 {
+            out.push('x');
+        }
+        out
+    };
+    format!(
+        "u={},g={},o={}",
+        class(0o400, 0o200, 0o100),
+        class(0o040, 0o020, 0o010),
+        class(0o004, 0o002, 0o001)
+    )
+}
+
+const UMASK_READ_ALL: u32 = 0o444;
+const UMASK_WRITE_ALL: u32 = 0o222;
+const UMASK_EXECUTE_ALL: u32 = 0o111;
+const UMASK_ALL: u32 = 0o777;
+
+fn umask_copy_user(bits: u32) -> u32 {
+    (if bits & 0o400 != 0 { UMASK_READ_ALL } else { 0 })
+        | (if bits & 0o200 != 0 { UMASK_WRITE_ALL } else { 0 })
+        | (if bits & 0o100 != 0 { UMASK_EXECUTE_ALL } else { 0 })
+}
+
+fn umask_copy_group(bits: u32) -> u32 {
+    (if bits & 0o040 != 0 { UMASK_READ_ALL } else { 0 })
+        | (if bits & 0o020 != 0 { UMASK_WRITE_ALL } else { 0 })
+        | (if bits & 0o010 != 0 { UMASK_EXECUTE_ALL } else { 0 })
+}
+
+fn umask_copy_other(bits: u32) -> u32 {
+    (if bits & 0o004 != 0 { UMASK_READ_ALL } else { 0 })
+        | (if bits & 0o002 != 0 { UMASK_WRITE_ALL } else { 0 })
+        | (if bits & 0o001 != 0 { UMASK_EXECUTE_ALL } else { 0 })
+}
+
+/// bash's `parse_symbolic_mode`, run on the permissions the current mask
+/// allows: `who` accumulates across a clause, an omitted `who` means `a`, an
+/// action may name permissions, copy another class, or start another operator.
+/// The search bit `X` applies only when the initial mode already allows one.
+fn umask_parse_symbolic(text: &str, initial: u32) -> Option<u32> {
+    let bytes = text.as_bytes();
+    let mut bits = initial;
+    let mut index = 0;
+    let mut who: u32 = 0;
+    // A comma starts a new clause and re-parses `who`; a second operator
+    // continues the clause and keeps the `who` already read.
+    let mut fresh_clause = true;
+
+    loop {
+        if fresh_clause {
+            who = 0;
+            while index < bytes.len() {
+                match bytes[index] {
+                    b'u' => who |= 0o700,
+                    b'g' => who |= 0o070,
+                    b'o' => who |= 0o007,
+                    b'a' => who |= UMASK_ALL,
+                    _ => break,
+                }
+                index += 1;
+            }
+            if who == 0 {
+                who = UMASK_ALL;
+            }
+        }
+
+        // The operator sits at the cursor; index past it even at the end, the
+        // way bash reads a NUL and reports it as invalid.
+        let op = bytes.get(index).copied().unwrap_or(0);
+        index += 1;
+        if !matches!(op, b'+' | b'-' | b'=') {
+            eprintln!(
+                "sharky: umask: `{}': invalid symbolic mode operator",
+                op as char
+            );
+            return None;
+        }
+
+        let mut perm: u32 = 0;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'u' => perm = umask_copy_user(initial),
+                b'g' => perm = umask_copy_group(initial),
+                b'o' => perm = umask_copy_other(initial),
+                b'r' => perm |= UMASK_READ_ALL,
+                b'w' => perm |= UMASK_WRITE_ALL,
+                b'x' => perm |= UMASK_EXECUTE_ALL,
+                // bash tests the initial bits, not the bits built so far.
+                b'X' => {
+                    if initial & UMASK_EXECUTE_ALL != 0 {
+                        perm |= UMASK_EXECUTE_ALL;
+                    }
+                }
+                b's' => perm |= 0o6000,
+                b't' => perm |= 0o1000,
+                _ => break,
+            }
+            index += 1;
+        }
+
+        // Setuid, setgid and sticky never reach the mask: `who` has no bit for
+        // them, so they drop out here exactly as they do in bash.
+        perm &= who;
+        match op {
+            b'+' => bits |= perm,
+            b'-' => bits &= !perm,
+            _ => {
+                bits &= !who;
+                bits |= perm;
+            }
+        }
+
+        if index >= bytes.len() {
+            break;
+        }
+        match bytes[index] {
+            b',' => {
+                index += 1;
+                fresh_clause = true;
+            }
+            b'+' | b'-' | b'=' => {
+                fresh_clause = false;
+            }
+            other => {
+                eprintln!(
+                    "sharky: umask: `{}': invalid symbolic mode character",
+                    other as char
+                );
+                return None;
+            }
+        }
+    }
+
+    Some(bits & 0o777)
+}
+
+/// `atoi`: leading whitespace, an optional sign, then digits, and 0 when none
+/// are found. `getopts` reads OPTIND and OPTERR this way.
+fn atoi_like(text: &str) -> i64 {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    let mut negative = false;
+    if index < bytes.len() && (bytes[index] == b'+' || bytes[index] == b'-') {
+        negative = bytes[index] == b'-';
+        index += 1;
+    }
+    let mut value: i64 = 0;
+    while index < bytes.len() && bytes[index].is_ascii_digit() {
+        value = value
+            .saturating_mul(10)
+            .saturating_add(i64::from(bytes[index] - b'0'));
+        index += 1;
+    }
+    if negative { -value } else { value }
+}
+
 fn is_builtin_name(name: &str) -> bool {
     matches!(
         name,
@@ -6993,6 +7549,9 @@ fn is_builtin_name(name: &str) -> bool {
             | "printf"
             | "test"
             | "["
+            | "eval"
+            | "umask"
+            | "getopts"
     )
 }
 

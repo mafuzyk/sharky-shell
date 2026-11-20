@@ -66,6 +66,9 @@ pub const BUILTINS: &[&str] = &[
     "help",
     "test",
     "[",
+    "eval",
+    "umask",
+    "getopts",
 ];
 
 /// Command-line flags and subcommands with their own `help TOPIC` entry.
@@ -350,6 +353,30 @@ fn builtin_text(id: &str) -> Option<&'static str> {
             "[ EXPRESSION ]  the same test builtin, requiring a closing `]'.\n\
              Runs without looking up `test` in PATH, so a login profile can rely\n\
              on it before PATH is set up.\n"
+        }
+        "eval" => {
+            "eval [ARG ...]  join ARG with spaces and run it as shell code.\n\
+             The code runs in the current shell, so assignments, functions and\n\
+             exports persist; the status is the last command's. `return' and\n\
+             `exit' in the code leave the enclosing function or shell. A syntax\n\
+             error reports a diagnostic and exits 2.\n"
+        }
+        "umask" => {
+            "umask [-p] [-S] [MODE]  show or set the file-creation mask.\n\
+             MODE is octal (for example 022) or symbolic like chmod's\n\
+             (u=rwx,g=rx,o=). The mask is a process attribute, so files the\n\
+             shell creates and processes it starts honour it. -S prints the\n\
+             symbolic form and -p prefixes a reusable `umask' command. An\n\
+             invalid MODE or option exits 1 or 2.\n"
+        }
+        "getopts" => {
+            "getopts OPTSTRING NAME [ARG ...]  parse options into NAME.\n\
+             Each call sets NAME to the next option letter, OPTARG to its\n\
+             argument when OPTSTRING ends that letter with a colon, and OPTIND\n\
+             to the next argument index. A leading colon silences diagnostics:\n\
+             an unknown option then sets OPTARG to the letter, and a missing\n\
+             argument sets NAME to `:'. Without ARG the positional parameters\n\
+             are parsed. Returns 1 at the end of the options.\n"
         }
         _ => return None,
     })
