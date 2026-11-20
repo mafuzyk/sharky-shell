@@ -480,3 +480,132 @@ fn concurrent_writers_lose_nothing_and_never_interleave() {
         assert!(entries.contains(command), "lost {command:.40}");
     }
 }
+
+/// Builds a v2 line through the encoder, so the codec tests exercise both sides.
+fn v2_line(command: &str, when: i64, cwd: Option<&str>, paths: &[&str]) -> String {
+    let mut record = history::Record::new(command);
+    record.when = Some(when);
+    record.cwd = cwd.map(str::to_string);
+    record.paths = paths.iter().map(|path| path.to_string()).collect();
+    record.encode()
+}
+
+#[test]
+fn v2_roundtrips_tabs_and_backslashes() {
+    let command = "printf 'a\tb' \\ x\ny café";
+    let cwd = "/tmp/a\tb \\ c\né";
+    let mut record = history::Record::new(command);
+    record.when = Some(1_700_000_000_000_000);
+    record.cwd = Some(cwd.to_string());
+
+    let line = record.encode();
+
+    // With no paths the line has exactly the four separators of its five fields.
+    assert_eq!(line.matches('\t').count(), 4, "line: {line:?}");
+    assert!(!line.contains('\n'), "one record per line: {line:?}");
+    assert_eq!(line.split('\t').next(), Some("h2"));
+
+    let decoded = history::decode(&line);
+
+    assert!(!decoded.is_legacy());
+    assert_eq!(decoded.command, command);
+    assert_eq!(decoded.cwd.as_deref(), Some(cwd));
+    assert_eq!(decoded.when, Some(1_700_000_000_000_000));
+    assert!(decoded.paths.is_empty());
+    assert_eq!(decoded.encode(), line, "re-encoding must be stable");
+}
+
+#[test]
+fn legacy_line_stays_a_legacy_record() {
+    let line = "echo a\\nb\\\\c";
+
+    let record = history::decode(line);
+
+    assert!(record.is_legacy());
+    assert_eq!(record.command, "echo a\nb\\c");
+    assert_eq!(record.when, None);
+    assert_eq!(record.cwd, None);
+    assert!(record.paths.is_empty());
+    assert_eq!(record.original_line(), Some(line));
+    assert_eq!(record.encode(), line, "legacy bytes are preserved verbatim");
+}
+
+#[test]
+fn unknown_trailing_fields_are_ignored() {
+    let no_paths = history::decode("h2\t17\t/tmp\t0\techo hi\tfuture\tmore");
+    assert!(!no_paths.is_legacy());
+    assert_eq!(no_paths.when, Some(17));
+    assert_eq!(no_paths.cwd.as_deref(), Some("/tmp"));
+    assert_eq!(no_paths.command, "echo hi");
+
+    // The command index follows the declared path count, not a fixed position.
+    let one_path = history::decode("h2\t18\t/src\t1\t/lib\techo hi\tjunk");
+    assert!(!one_path.is_legacy());
+    assert_eq!(one_path.paths, ["/lib"]);
+    assert_eq!(one_path.command, "echo hi");
+}
+
+#[test]
+fn mixed_legacy_and_v2_lines_load_in_file_order() {
+    let path = scratch("mixed").join("history");
+    // The v2 line carries the newest timestamp, so file order and time order differ.
+    let file = format!(
+        "oldest\n{}\nnewest\n",
+        v2_line("middle", 9_000_000, Some("/work"), &["/work/a.rs"])
+    );
+    std::fs::write(&path, file).unwrap();
+
+    let history = History::try_load(path, 100).unwrap();
+
+    assert_eq!(history.entries(), ["oldest", "middle", "newest"]);
+}
+
+#[test]
+fn v2_record_with_eight_paths_round_trips() {
+    let cwd = "/home/mafu/src/café";
+    let mut record = history::Record::new("make -j2");
+    record.when = Some(42);
+    record.cwd = Some(cwd.to_string());
+    record.paths = (0..8).map(|index| format!("/w/p\t{index}")).collect();
+
+    let line = record.encode();
+
+    assert_eq!(line.matches('\t').count(), 12, "line: {line:?}");
+    let decoded = history::decode(&line);
+    assert!(!decoded.is_legacy());
+    assert_eq!(decoded.paths, record.paths);
+    assert_eq!(decoded.command, "make -j2");
+    assert_eq!(decoded.cwd.as_deref(), Some(cwd));
+}
+
+#[test]
+fn torn_v2_tail_is_ignored() {
+    let path = scratch("torn-v2").join("history");
+    let kept = v2_line("kept", 5, Some("/work"), &["/work/a"]);
+    let torn = v2_line("torn", 6, Some("/work"), &["/work/a"]);
+    std::fs::write(&path, format!("{kept}\n{}", &torn[..torn.len() - 4])).unwrap();
+
+    let history = History::try_load(path, 100).unwrap();
+
+    assert_eq!(history.entries(), ["kept"]);
+}
+
+#[test]
+fn legacy_line_that_starts_with_h2_is_not_v2() {
+    let commands = [
+        "h2 not a header",
+        "h2\tone",
+        "h2\twhen\tcwd\tzero\techo",
+        "h2\t1\t/tmp\tnope\techo",
+    ];
+    let path = scratch("h2-legacy").join("history");
+    std::fs::write(&path, format!("{}\n", commands.join("\n"))).unwrap();
+
+    for command in commands {
+        let record = history::decode(command);
+        assert!(record.is_legacy(), "decoded as v2: {command:?}");
+        assert_eq!(record.command, command);
+        assert_eq!(record.original_line(), Some(command));
+    }
+    assert_eq!(History::try_load(path, 100).unwrap().entries(), commands);
+}
