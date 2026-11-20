@@ -2,6 +2,7 @@ use std::ffi::CString;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use nix::errno::Errno;
 use nix::libc::_exit;
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::{Pid, execve};
@@ -64,7 +65,7 @@ fn path_of(shell: &Shell) -> &str {
         .unwrap_or(DEFAULT_PATH)
 }
 
-pub fn exec_now(path: &Path, argv: &[String], env: &[(String, String)]) -> Result<(), String> {
+pub fn exec_now(path: &Path, argv: &[String], env: &[(String, String)]) -> Result<(), Errno> {
     let argv: Vec<CString> = argv
         .iter()
         .map(|arg| CString::new(arg.as_bytes()).unwrap_or_default())
@@ -75,17 +76,25 @@ pub fn exec_now(path: &Path, argv: &[String], env: &[(String, String)]) -> Resul
         .collect();
 
     let path_c = CString::new(path.as_os_str().as_encoded_bytes())
-        .map_err(|_| "invalid path".to_string())?;
+        .map_err(|_| Errno::EINVAL)?;
 
-    match execve(&path_c, &argv, &envp) {
-        Ok(_) => Ok(()),
-        Err(err) => Err(err.to_string()),
+    execve(&path_c, &argv, &envp).map(|_| ())
+}
+
+/// Bash reports a path that does not exist as 127 (command not found) and a
+/// path that exists but cannot be executed as 126 (not executable). Both come
+/// from the same `execve` failure, so the errno decides.
+pub fn exec_failure_status(err: Errno) -> i32 {
+    match err {
+        Errno::ENOENT => 127,
+        _ => 126,
     }
 }
 
 pub fn exec_replace(path: &Path, argv: &[String], env: &[(String, String)]) -> ! {
     if let Err(err) = exec_now(path, argv, env) {
         eprintln!("sharky: {}: {err}", path.display());
+        unsafe { _exit(exec_failure_status(err)) }
     }
     unsafe { _exit(126) }
 }

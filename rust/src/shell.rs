@@ -1169,7 +1169,7 @@ impl Shell {
             Ok(()) => Flow::Status(0),
             Err(err) => {
                 eprintln!("sharky: exec: {program}: {err}");
-                self.exec_failure(126)
+                self.exec_failure(exec::exec_failure_status(err))
             }
         }
     }

@@ -209,3 +209,36 @@ fn background_notification_does_not_leak_into_script_output() {
 }
 
 // ---------------------------------------------------------------------------
+// Hazard 4: a missing command path exits 127; an existing non-executable file
+// still exits 126.
+//
+// bash: `./missing` -> 127, `/abs/missing` -> 127, `./noexec` -> 126.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn missing_relative_command_exits_127() {
+    let dir = temp_dir("exit127");
+    let out = sharky_in(&dir, "./sharky-hazard-missing");
+    assert_eq!(status(&out), 127, "stderr: {}", stderr(&out));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn missing_absolute_command_exits_127() {
+    let dir = temp_dir("exit127abs");
+    let script = format!("{}/sharky-hazard-missing", dir.display());
+    let out = sharky_in(&dir, &script);
+    assert_eq!(status(&out), 127, "stderr: {}", stderr(&out));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn non_executable_file_still_exits_126() {
+    let dir = temp_dir("exit126");
+    std::fs::write(dir.join("noexec"), "#!/bin/sh\necho hi\n").unwrap();
+    let out = sharky_in(&dir, "./noexec");
+    assert_eq!(status(&out), 126, "stderr: {}", stderr(&out));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---------------------------------------------------------------------------
