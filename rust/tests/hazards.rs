@@ -435,3 +435,49 @@ fn wait_without_arguments_warns_about_a_stopped_job_and_returns_zero() {
 }
 
 // ---------------------------------------------------------------------------
+// Hazard 6: the here-document temp file must never open a predictable path.
+//
+// An attacker who pre-creates a symlink at the old predictable name had its
+// target truncated and overwritten with the here-document payload.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn heredoc_does_not_follow_a_precreated_symlink() {
+    let dir = temp_dir("heredoc");
+    let tmp = dir.join("tmp");
+    std::fs::create_dir_all(&tmp).unwrap();
+    let victim = dir.join("victim");
+    std::fs::write(&victim, "original\n").unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args(["--no-config"])
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .env("PATH", common::tool_path())
+        .env("TMPDIR", &tmp)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn sharky");
+
+    // The first here-document in a fresh process used the counter value 0.
+    let trap = tmp.join(format!("sharky-here-{}-0", child.id()));
+    std::os::unix::fs::symlink(&victim, &trap).unwrap();
+
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(b"cat <<EOF\npayload\nEOF\n")
+        .expect("write script");
+    drop(child.stdin.take());
+
+    let out = child.wait_with_output().expect("run sharky");
+    assert_eq!(stdout(&out), "payload\n", "the here-document broke: {}", stderr(&out));
+    assert_eq!(
+        std::fs::read_to_string(&victim).unwrap(),
+        "original\n",
+        "the here-document overwrote the symlink target"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

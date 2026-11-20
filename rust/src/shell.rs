@@ -7307,26 +7307,43 @@ fn discard_null_bytes(mut bytes: Vec<u8>) -> Vec<u8> {
 
 fn temp_file(text: &str) -> Result<std::fs::File, String> {
     use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    // The descriptor is all a here-document needs, so the name is removed as
+    // soon as it exists: from then on there is no path another process could
+    // open, replace or follow. `create_new` refuses a path that already exists,
+    // a symlink included, so a planted link can only cost a retry and never
+    // redirect the write.
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
-    let name = format!(
-        "sharky-here-{}-{}",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    );
-    let path = std::env::temp_dir().join(name);
+    let mut created = None;
+    let mut failure = String::new();
+    for _ in 0..16 {
+        let name = format!(
+            "sharky-here-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let path = std::env::temp_dir().join(name);
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(file) => {
+                let _ = std::fs::remove_file(&path);
+                created = Some(file);
+                break;
+            }
+            Err(err) => failure = format!("heredoc: {err}"),
+        }
+    }
 
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&path)
-        .map_err(|err| format!("heredoc: {err}"))?;
+    let mut file = created.ok_or(failure)?;
     file.write_all(text.as_bytes())
         .map_err(|err| format!("heredoc: {err}"))?;
-    let _ = std::fs::remove_file(&path);
     use std::io::Seek;
     file.seek(std::io::SeekFrom::Start(0))
         .map_err(|err| format!("heredoc: {err}"))?;
