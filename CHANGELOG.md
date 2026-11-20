@@ -22,6 +22,11 @@ rather than a separate preview track.
   what the others had loaded while their own commands survive, and a failed
   append stays expandable. Sessions no longer keep their own view until
   `history merge`.
+- Repeating an older command now moves it to the newest position in the history
+  view and increments its hit count, so `!!` resolves to the command just
+  repeated (`ls; pwd; ls` leaves `!!` = `ls`) rather than the intervening one.
+  Two identical consecutive commands are stored as a single record, and the
+  view keeps one copy of each command at its newest position.
 
 ### Added
 
@@ -60,6 +65,70 @@ rather than a separate preview track.
 - The flake now exposes `devShells` with the Rust toolchain, `nixosModules` and
   `homeManagerModules` for declarative setup, and `passthru.shellPath` on the
   package so it can be used as `users.users.<name>.shell` on NixOS.
+- Signal traps now execute instead of only being stored. A handler records the
+  signal in an atomic bitmask and the run loop dispatches it at a command
+  boundary, after the foreground command has finished and the terminal is back
+  with the shell, as bash does. `trap -l` lists the signal names, `trap -p`
+  lists installed actions and `trap -p -- SIG` narrows the listing; an EXIT
+  action sees the status the shell leaves with in `$?`, `trap ''` ignores a
+  signal in children that inherit the disposition, and `trap -` returns the
+  signal to where it started. ERR, DEBUG and RETURN are rejected with a
+  diagnostic instead of being silently stored.
+- `eval`, `umask` and `getopts` are builtins. `eval` joins its arguments with
+  spaces and runs the result in the current shell, so assignments, functions
+  and exports persist and `return`/`exit` reach the enclosing construct.
+  `umask` reads and sets the kernel file-creation mask in octal or symbolic
+  form, with `-S` for the symbolic form and `-p` for a reusable command; the
+  mask applies to files the shell creates and to child processes. `getopts`
+  keeps its state across calls with `OPTIND`, `OPTARG` and `OPTERR`, handling
+  clustered options, attached or following arguments, `--`, silent mode and
+  reassignment of `OPTIND`.
+- `echo` and `printf` are builtins, so they no longer fork a child per call.
+  `echo` handles `-n` and `-e`/`-E` with the Bash escape set. `printf` reuses
+  its format while arguments remain and supports the standard conversions and
+  flags, including `*` width and precision, `%b`, `%q` and `-v` to store the
+  result in a variable.
+- `declare`, `local`, `readonly` and `typeset` accept `-p` to print reusable
+  declarations with Bash quoting, sparse indices and associative keys in
+  Bash's bucket order. `type` gains `-t`, `-a`, `-p` and `-P` with Bash's flag
+  interactions; its plain output is unchanged.
+- Backtick command substitution (`` `cmd` ``) produces the same `Part::CmdSub`
+  as `$(...)`, sharing newline stripping, word splitting, globbing and status,
+  while applying Bash's backquote rules that remove one level of backslash
+  before `$`, `` ` `` and `\`. An unterminated backtick is a syntax error.
+- `test` and `[` are builtins following POSIX and Bash's argument-count and
+  operator rules, so a login profile can evaluate its guards before `PATH` is
+  set up. `[` requires its closing bracket, and malformed expressions exit 2.
+
+### Fixed
+
+- A login shell now executes its startup files through `Shell::eval` instead of
+  scanning them for literal `NAME=value` assignments. It runs `/etc/profile`
+  (which on NixOS sources `set-environment`, `/etc/profile.local` and
+  `/etc/bashrc`), then `/etc/sharky/profile.sharky`, then the first existing of
+  `~/.bash_profile`, `~/.bash_login` and `~/.profile`, then
+  `~/.config/sharky/profile.sharky`. A file with a parse error reports its path
+  and line, replays the statements above the error and lets the login continue.
+- Command substitution keeps output that is not valid UTF-8: captured bytes are
+  decoded lossily (invalid sequences become U+FFFD) instead of the whole
+  capture being dropped, and NUL bytes are discarded with one warning per
+  substitution as bash does. Preserving raw bytes remains a documented
+  limitation.
+- A broken pipe (EPIPE) now ends the shell quietly with status 141
+  (128+SIGPIPE) by restoring SIGPIPE's default disposition at startup, instead
+  of every write returning EPIPE and panicking in Rust.
+- Background job-id notices (`[id] pid`) are printed only in interactive
+  shells, so they no longer leak into command substitutions or scripts.
+- Running a missing command path now exits 127 (command not found); an existing
+  but non-executable file still exits 126.
+- `wait` on a stopped job uses `WUNTRACED`, reports 128+signal (147 for
+  SIGSTOP) and keeps the job in the table, so it stays listed and can be
+  resumed or signalled. Previously the job was removed and the wait hung.
+- Here-documents are written through a file created with `create_new` and
+  unlinked immediately, so a symlink planted at a predictable temp name can no
+  longer redirect the write; the descriptor alone serves the redirection.
+- The NixOS and Home Manager modules assert `x86_64-linux`, reporting a clear
+  error on an unsupported platform instead of evaluating with a missing binary.
 
 ## [3.6.0] - 2026-11-19
 
