@@ -26,6 +26,12 @@ pub fn run(shell: &mut Shell, private: bool) -> i32 {
         shell.reap_jobs();
         shell.reap_substitutions_idle();
 
+        // A trap delivered while the shell sat at the prompt runs here, before
+        // the next line is read, while the terminal is still in cooked mode.
+        if let Some(code) = shell.service_traps() {
+            return shell.finish(code);
+        }
+
         let primary = buffer.is_empty();
         let mut prompt = if primary {
             prompt::render(shell)
@@ -99,9 +105,15 @@ pub fn run(shell: &mut Shell, private: bool) -> i32 {
                 }
             }
             Ok(Line::Interrupted) => {
+                // The editor consumed Ctrl-C as a byte; an installed INT action
+                // still has to run, and may ask the shell to exit.
+                let exit = shell.interrupt_line();
                 buffer.clear();
                 shell.last_status = 130;
                 status = 130;
+                if let Some(code) = exit {
+                    return shell.finish(code);
+                }
             }
             Ok(Line::Eof) => return shell.finish(status),
             Err(err) => {

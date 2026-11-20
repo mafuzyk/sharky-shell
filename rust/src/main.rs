@@ -13,6 +13,7 @@ mod parser;
 mod profiles;
 mod prompt;
 mod repl;
+mod signal;
 mod term;
 mod test_expr;
 mod z;

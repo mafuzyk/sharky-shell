@@ -27,6 +27,9 @@ use crate::parser;
 pub struct Shell {
     pub env: Vec<(String, String)>,
     pub cwd: PathBuf,
+    /// The shell's own process, as `$$` reports it. A forked child keeps this
+    /// value, the way bash reports the parent shell from a subshell.
+    pid: Pid,
     pub last_status: i32,
     pub last_duration_ms: u64,
     funcs: HashMap<String, List>,
@@ -57,6 +60,13 @@ pub struct Shell {
     in_subshell: bool,
     traps: HashMap<String, String>,
     exit_trap_ran: bool,
+    // Guards the trap path: an action is shell code, so it can call `trap`,
+    // and a signal delivered while an action runs is kept for the next safe
+    // point instead of nesting.
+    trap_running: bool,
+    // Set when a trap action asked to exit while the run loop was waiting for a
+    // foreground job, where there is no flow value to return.
+    trap_exit: Option<i32>,
     history: Option<History>,
     history_load_error: Option<String>,
     histexpand: bool,
@@ -95,12 +105,6 @@ struct Job {
     command: String,
     stopped: bool,
 }
-
-const SIGNALS: &[&str] = &[
-    "HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "BUS", "FPE", "KILL", "USR1", "SEGV", "USR2",
-    "PIPE", "ALRM", "TERM", "CHLD", "CONT", "STOP", "TSTP", "TTIN", "TTOU", "URG", "XCPU",
-    "XFSZ", "VTALRM", "PROF", "WINCH", "IO", "SYS",
-];
 
 enum Flow {
     Status(i32),
@@ -176,6 +180,7 @@ impl Shell {
         let mut shell = Shell {
             env,
             cwd: cwd.clone(),
+            pid: getpid(),
             last_status: 0,
             last_duration_ms: 0,
             funcs: HashMap::new(),
@@ -200,6 +205,8 @@ impl Shell {
             in_subshell: false,
             traps: HashMap::new(),
             exit_trap_ran: false,
+            trap_running: false,
+            trap_exit: None,
             history: None,
             history_load_error: None,
             histexpand: true,
@@ -362,6 +369,8 @@ impl Shell {
             return status;
         }
 
+        // `$?` inside the EXIT action is the status the shell is leaving with.
+        self.last_status = status;
         let saved = self.exit_requested;
         self.exit_requested = None;
         let _ = self.run(&command);
@@ -539,6 +548,10 @@ impl Shell {
         let mut status = self.last_status;
 
         for entry in &list.entries {
+            if let Some(code) = self.service_traps() {
+                return Flow::Exit(code);
+            }
+
             if entry.background {
                 self.run_background(&entry.and_or);
                 status = 0;
@@ -553,6 +566,16 @@ impl Shell {
                 }
                 other => return other,
             }
+
+            // An action that asked to exit while the shell waited for the
+            // command has no flow value of its own yet.
+            if let Some(code) = self.service_traps() {
+                return Flow::Exit(code);
+            }
+        }
+
+        if let Some(code) = self.service_traps() {
+            return Flow::Exit(code);
         }
 
         Flow::Status(status)
@@ -577,7 +600,7 @@ impl Shell {
             }
             Ok(ForkResult::Child) => {
                 let _ = setpgid(Pid::from_raw(0), Pid::from_raw(0));
-                reset_child_signals();
+                self.reset_child_traps();
                 self.job_pgid = Some(getpid());
                 let code = flow_status(self.run_and_or(and_or));
                 unsafe { _exit(code) }
@@ -596,6 +619,10 @@ impl Shell {
         let mut flow = self.run_pipeline(&and_or.first);
 
         for (index, (is_and, pipeline)) in and_or.rest.iter().enumerate() {
+            if let Some(code) = self.service_traps() {
+                self.errexit_suppressed = previous;
+                return Flow::Exit(code);
+            }
             let status = match &flow {
                 Flow::Status(code) => *code,
                 _ => {
@@ -724,7 +751,7 @@ impl Shell {
                         let target = self.job_pgid.or(leader).unwrap_or(Pid::from_raw(0));
                         let _ = setpgid(Pid::from_raw(0), target);
                     }
-                    reset_child_signals();
+                    self.reset_child_traps();
                     if let Some(fd) = stdin
                         && move_fd(fd, 0).is_err()
                     {
@@ -1208,7 +1235,7 @@ impl Shell {
                 Flow::Status(status)
             }
             Ok(ForkResult::Child) => {
-                reset_child_signals();
+                self.reset_child_traps();
                 self.in_subshell = true;
                 let code = flow_status(self.run_list(list));
                 unsafe { _exit(code) }
@@ -1260,7 +1287,7 @@ impl Shell {
                 Flow::Status(status)
             }
             Ok(ForkResult::Child) => {
-                reset_child_signals();
+                self.reset_child_traps();
                 if let Err(message) = apply_actions(&actions) {
                     eprintln!("sharky: {message}");
                     unsafe { _exit(1) }
@@ -1626,7 +1653,7 @@ impl Shell {
                     let target = self.job_pgid.or(leader).unwrap_or(Pid::from_raw(0));
                     let _ = setpgid(Pid::from_raw(0), target);
                 }
-                reset_child_signals();
+                self.reset_child_traps();
                 if let Some(fd) = stdin
                     && move_fd(fd, 0).is_err()
                 {
@@ -1809,6 +1836,7 @@ impl Shell {
         }
 
         match name {
+            "$" => return self.pid.to_string(),
             "?" => return self.last_status.to_string(),
             "#" => return self.positional.len().to_string(),
             "!" => {
@@ -2477,6 +2505,10 @@ impl Shell {
         }
 
         self.reclaim_terminal();
+
+        // The terminal is the shell's again and the job has finished: this is
+        // the point where bash runs a trap that arrived while it waited.
+        self.dispatch_traps();
 
         if stopped && self.interactive {
             let id = self.next_job;
@@ -3213,53 +3245,258 @@ impl Shell {
     }
 
     fn trap(&mut self, args: &[String]) -> i32 {
-        if matches!(args.first().map(String::as_str), Some("-l" | "-L")) {
-            println!("EXIT {}", SIGNALS.join(" "));
-            return 0;
+        let mut args = args;
+
+        if let Some(first) = args.first() {
+            if first == "-l" || first == "-L" {
+                let names: Vec<&str> = crate::signal::NAMES
+                    .iter()
+                    .map(|(name, _)| *name)
+                    .collect();
+                println!("EXIT {}", names.join(" "));
+                return 0;
+            }
+            if first == "-p" {
+                args = &args[1..];
+                if args.first().map(String::as_str) == Some("--") {
+                    args = &args[1..];
+                }
+                if args.is_empty() {
+                    self.print_traps(None);
+                    return 0;
+                }
+                return self.print_traps(Some(args));
+            }
+            if first == "--" {
+                args = &args[1..];
+                if args.is_empty() {
+                    self.print_traps(None);
+                    return 0;
+                }
+            }
         }
 
         if args.is_empty() {
-            let mut entries: Vec<_> = self.traps.iter().collect();
-            entries.sort_by(|left, right| left.0.cmp(right.0));
-            for (signal, command) in entries {
-                println!("trap -- '{command}' {signal}");
-            }
+            self.print_traps(None);
             return 0;
         }
 
-        let (action, signals) = if args[0] == "--" {
+        if args[0] == "-" {
             if args.len() == 1 {
-                return 0;
+                eprintln!("sharky: trap: usage: trap [-Plp] [[action] signal_spec ...]");
+                return 2;
             }
-            (&args[1], &args[2..])
-        } else if args[0] == "-" {
+            let mut status = 0;
             for name in &args[1..] {
-                let Some(signal) = normalize_signal(name) else {
-                    eprintln!("sharky: trap: invalid signal specification");
-                    return 1;
-                };
-                self.traps.remove(signal);
+                match trap_signal(name) {
+                    Some(signal) => self.clear_trap(signal),
+                    None => {
+                        eprintln!("sharky: trap: {name}: invalid signal specification");
+                        status = 1;
+                    }
+                }
             }
-            return 0;
-        } else {
-            (&args[0], &args[1..])
-        };
+            return status;
+        }
 
-        if signals.is_empty() {
-            eprintln!("sharky: trap: action required");
-            return 1;
+        let action = args[0].clone();
+        if args.len() == 1 {
+            eprintln!("sharky: trap: usage: trap [-Plp] [[action] signal_spec ...]");
+            return 2;
         }
 
         let mut status = 0;
-        for name in signals {
-            let Some(signal) = normalize_signal(name) else {
-                eprintln!("sharky: trap: invalid signal specification");
-                status = 1;
-                continue;
-            };
-            self.traps.insert(signal.to_string(), action.clone());
+        for name in &args[1..] {
+            match trap_signal(name) {
+                Some(signal) => self.set_trap(signal, &action),
+                None => {
+                    eprintln!("sharky: trap: {name}: invalid signal specification");
+                    status = 1;
+                }
+            }
         }
         status
+    }
+
+    /// Stores an action and makes the signal reach it. `EXIT` has no
+    /// disposition to change; `KILL` and `STOP` are stored but can never fire,
+    /// which is what bash does with them.
+    fn set_trap(&mut self, signal: &'static str, action: &str) {
+        self.traps.insert(signal.to_string(), action.to_string());
+        let Some(number) = crate::signal::number(signal) else {
+            return;
+        };
+        if crate::signal::cannot_catch(signal) {
+            return;
+        }
+        if action.is_empty() {
+            crate::signal::ignore(number);
+        } else {
+            crate::signal::catch(number);
+        }
+    }
+
+    /// Removes an action and puts the signal back where it started: ignored for
+    /// the line editor, terminal-restoring for the interactive fatal signals,
+    /// default everywhere else.
+    fn clear_trap(&mut self, signal: &'static str) {
+        self.traps.remove(signal);
+        let Some(number) = crate::signal::number(signal) else {
+            return;
+        };
+        if crate::signal::cannot_catch(signal) {
+            return;
+        }
+        self.restore_disposition(number);
+    }
+
+    fn restore_disposition(&self, number: i32) {
+        if !self.interactive {
+            crate::signal::reset(number);
+            return;
+        }
+        match number {
+            nix::libc::SIGINT
+            | nix::libc::SIGQUIT
+            | nix::libc::SIGTSTP
+            | nix::libc::SIGTTIN
+            | nix::libc::SIGTTOU => crate::signal::ignore(number),
+            nix::libc::SIGTERM | nix::libc::SIGHUP => crate::signal::restore_terminal(number),
+            _ => crate::signal::reset(number),
+        }
+    }
+
+    fn print_traps(&mut self, only: Option<&[String]>) -> i32 {
+        let wanted: Option<Vec<&'static str>> = match only {
+            None => None,
+            Some(names) => {
+                let mut wanted = Vec::new();
+                for name in names {
+                    match trap_signal(name) {
+                        Some(signal) => wanted.push(signal),
+                        None => {
+                            eprintln!("sharky: trap: {name}: invalid signal specification");
+                            return 1;
+                        }
+                    }
+                }
+                Some(wanted)
+            }
+        };
+
+        for (signal, action) in self.installed_traps() {
+            if let Some(wanted) = &wanted
+                && !wanted.contains(&signal.as_str())
+            {
+                continue;
+            }
+            println!("trap -- '{action}' {}", trap_label(&signal));
+        }
+        0
+    }
+
+    /// Installed traps in the order bash prints them: `EXIT` first, then the
+    /// signals by number.
+    fn installed_traps(&self) -> Vec<(String, String)> {
+        let mut entries = Vec::new();
+        if let Some(action) = self.traps.get("EXIT") {
+            entries.push(("EXIT".to_string(), action.clone()));
+        }
+        let mut signals: Vec<&(&str, i32)> = crate::signal::NAMES.iter().collect();
+        signals.sort_by_key(|(_, number)| *number);
+        for (name, _) in signals {
+            if let Some(action) = self.traps.get(*name) {
+                entries.push((name.to_string(), action.clone()));
+            }
+        }
+        entries
+    }
+
+    /// Runs the actions whose signals arrived since the last safe point. Called
+    /// only between commands: never from a handler, never while a child owns
+    /// the foreground process group.
+    fn dispatch_traps(&mut self) {
+        if self.trap_running || self.exit_requested.is_some() {
+            return;
+        }
+        for number in crate::signal::take_pending() {
+            let Some(name) = crate::signal::name(number) else {
+                continue;
+            };
+            let Some(action) = self.traps.get(name).cloned() else {
+                continue;
+            };
+            if action.trim().is_empty() {
+                continue;
+            }
+            self.run_trap_action(&action);
+            if self.trap_exit.is_some() {
+                break;
+            }
+        }
+    }
+
+    fn run_trap_action(&mut self, action: &str) {
+        // The action sees the status of the command it interrupted, and its own
+        // status does not leak out: bash keeps `$?` from the interrupted command.
+        let saved = self.last_status;
+        self.trap_running = true;
+        if let Err(err) = self.eval(action) {
+            eprintln!("sharky: {}", err.message);
+        }
+        self.trap_running = false;
+        if let Some(code) = self.exit_requested.take() {
+            self.trap_exit = Some(code);
+        }
+        self.last_status = saved;
+    }
+
+    /// Dispatches what has arrived and reports an exit an action asked for, so
+    /// the caller can unwind with the same flow a builtin `exit` produces.
+    pub fn service_traps(&mut self) -> Option<i32> {
+        self.dispatch_traps();
+        let code = self.trap_exit.take();
+        if code.is_some() {
+            self.exit_requested = code;
+        }
+        code
+    }
+
+    /// Ctrl-C reaches the line editor as a byte, not a signal, because the
+    /// terminal is in raw mode. Feed it back through the trap path so an
+    /// `INT` action runs the way bash runs it, without touching the editor.
+    pub fn interrupt_line(&mut self) -> Option<i32> {        if self
+            .traps
+            .get("INT")
+            .is_some_and(|action| !action.trim().is_empty())
+            && let Some(action) = self.traps.get("INT").cloned()
+        {
+            self.run_trap_action(&action);
+        }
+        let code = self.trap_exit.take();
+        if code.is_some() {
+            self.exit_requested = code;
+        }
+        code
+    }
+
+    /// A forked child keeps the trap list, which is why `( trap )` still prints
+    /// the parent's actions, but bash puts every caught signal back to its
+    /// default action there. Ignored signals stay ignored; pending deliveries
+    /// belong to the parent.
+    fn reset_child_traps(&mut self) {
+        for (name, action) in &self.traps {
+            if name == "EXIT" || action.is_empty() || crate::signal::cannot_catch(name) {
+                continue;
+            }
+            if let Some(number) = crate::signal::number(name) {
+                crate::signal::reset(number);
+            }
+        }
+        crate::signal::clear_pending();
+        self.trap_running = false;
+        self.trap_exit = None;
+        reset_child_signals();
     }
 
     fn read(&mut self, args: &[String]) -> i32 {
@@ -4294,7 +4531,7 @@ impl Shell {
         // SAFETY: the child only dup2s pipe ends, runs shell code and exits.
         match unsafe { fork() } {
             Ok(ForkResult::Child) => {
-                reset_child_signals();
+                self.reset_child_traps();
                 self.interactive = false;
                 self.job_pgid = None;
                 let keep = if input {
@@ -4370,7 +4607,7 @@ impl Shell {
         // SAFETY: the child opens the FIFO, runs shell code and exits.
         match unsafe { fork() } {
             Ok(ForkResult::Child) => {
-                reset_child_signals();
+                self.reset_child_traps();
                 self.interactive = false;
                 self.job_pgid = None;
                 drop(ready_read);
@@ -4488,7 +4725,7 @@ impl Shell {
                 output
             }
             Ok(ForkResult::Child) => {
-                reset_child_signals();
+                self.reset_child_traps();
                 self.interactive = false;
                 self.job_pgid = None;
                 let _ = move_fd(write.as_raw_fd(), 1);
@@ -6784,13 +7021,28 @@ fn contains_shell_metas(value: &str) -> bool {
     false
 }
 
-fn normalize_signal(name: &str) -> Option<&'static str> {
+/// How `trap` spells an installed signal: `EXIT` stays bare, everything else
+/// carries the `SIG` prefix bash prints.
+fn trap_label(signal: &str) -> String {
+    if signal == "EXIT" {
+        signal.to_string()
+    } else {
+        format!("SIG{signal}")
+    }
+}
+
+/// Canonical trap name for a specification: `EXIT` or `0`, a signal name with
+/// an optional `SIG` prefix in any case, or a signal number.
+fn trap_signal(name: &str) -> Option<&'static str> {
     let upper = name.to_ascii_uppercase();
-    let signal = upper.strip_prefix("SIG").unwrap_or(&upper);
-    if signal == "0" || signal == "EXIT" {
+    let bare = upper.strip_prefix("SIG").unwrap_or(&upper);
+    if bare == "EXIT" || bare == "0" {
         return Some("EXIT");
     }
-    SIGNALS.iter().copied().find(|candidate| *candidate == signal)
+    if let Ok(number) = bare.parse::<i32>() {
+        return crate::signal::name(number);
+    }
+    crate::signal::number(bare).and_then(crate::signal::name)
 }
 
 fn read_stdin_line() -> Option<String> {
