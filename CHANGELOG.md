@@ -45,6 +45,18 @@ rather than a separate preview track.
   keeps `when = None` and its original bytes. Downgrading to a 3.6.0 binary is
   non-destructive: that binary reads v2 lines as opaque commands and its vacuum
   keeps them opaque, so the 3.6.0 history file is never lost or corrupted.
+- The ghost autosuggestion completes the token under the cursor instead of
+  requiring a whole-line prefix: it scans history newest first and prefers an
+  exact case-sensitive token match over a case-insensitive one. A record whose
+  referenced paths no longer resolve relative to where the command ran is
+  skipped; a command whose output path did not exist at record time, and legacy
+  records without paths, stay eligible. Ctrl-R ranks a non-empty query by
+  substring and conservative frecency (hits times an age weight of 4 within a
+  day, 2 within 30 days and 1 beyond, with legacy records counted as old),
+  breaking ties on the newer timestamp and then the file position, and pins the
+  newest exact case-sensitive prefix match first so repeated Ctrl-R finds the
+  command just typed; an empty query and ordinary Up/Down recall stay
+  chronological.
 - The flake now exposes `devShells` with the Rust toolchain, `nixosModules` and
   `homeManagerModules` for declarative setup, and `passthru.shellPath` on the
   package so it can be used as `users.users.<name>.shell` on NixOS.

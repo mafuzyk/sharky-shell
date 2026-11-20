@@ -308,6 +308,24 @@ and its original bytes. Downgrading to a 3.6.0 binary is non-destructive, as it
 reads v2 lines as opaque commands and its vacuum keeps them opaque, so the
 history file is never lost or corrupted.
 .PP
+Ghost autosuggest completes the token under the cursor instead of requiring a
+whole-line prefix, so typing \fBx = ech\fR can ghost the rest of a previously
+run \fBx = echo hi\fR. The scan is chronological, newest first, and prefers an
+exact case-sensitive token match over a case-insensitive one. A record whose
+referenced paths no longer resolve is skipped (relative paths resolve against
+the directory the command ran in); a command whose output path did not exist yet
+at record time named no paths and stays eligible, as do legacy records without
+paths. Right or End accepts the ghost and \fBtide autosuggest off\fR disables it.
+.PP
+\fBCtrl\-R\fR reverse search matches a non-empty query by substring and ranks
+the matches by conservative frecency: hits times an age weight (4 within a day,
+2 within 30 days, 1 beyond; a legacy record without a timestamp counts as old),
+with ties broken by the newer timestamp and then the newer file position. The
+newest exact case-sensitive prefix match is pinned first, so repeated
+\fBCtrl\-R\fR still finds the command just typed, and further presses page
+through the ranked matches. An empty query keeps chronological order, as does
+ordinary Up/Down recall.
+.PP
 \fBhistory [\-\-max N] [\-\-reverse] [\-\-show\-time] [\-\-null]
 [\-\-case\-sensitive] [\-\-contains|\-\-prefix|\-\-exact] [PATTERN]\fR
 searches entries with a case-insensitive substring match by default, newest

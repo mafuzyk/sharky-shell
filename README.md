@@ -219,6 +219,24 @@ migration is lazy, so nothing is rewritten on load and a legacy record keeps
 non-destructive — it reads v2 lines as opaque commands and its vacuum keeps them
 opaque — so the history file is never lost or corrupted.
 
+At the prompt the ghost text completes the token under the cursor, not just a
+whole-line prefix: typing `x = ech` can ghost the rest of a previously run
+`x = echo hi`. Suggestions scan history newest first and prefer an exact,
+case-sensitive token match over a case-insensitive one. A record whose
+referenced paths no longer exist is skipped (relative paths resolve against the
+directory the command ran in); a command whose output path did not exist at
+record time named no paths and stays eligible, as do legacy records without
+paths. Right/End accepts the ghost and `tide autosuggest off` disables it.
+
+Ctrl-R reverse search matches a non-empty query by substring and ranks the
+matches by conservative frecency: hits times an age weight (4 within a day, 2
+within 30 days, 1 beyond; a legacy record without a timestamp counts as old),
+breaking ties on the newer timestamp and then the newer file position. The
+newest exact, case-sensitive prefix match is pinned first, so pressing Ctrl-R
+repeatedly still finds the command just typed, and further presses page through
+the ranked matches. An empty query keeps chronological order, as does ordinary
+Up/Down recall.
+
 `history [--max N] [--reverse] [--show-time] [--null] [--case-sensitive]
 [--contains|--prefix|--exact] [PATTERN]` searches entries with a
 case-insensitive substring match by default, newest first; `--max 0` prints

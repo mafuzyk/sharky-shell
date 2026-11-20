@@ -306,7 +306,22 @@ fn builtin_text(id: &str) -> Option<&'static str> {
              event designs resolve only entries loaded at startup or run by this\n\
              session, never one picked up from another terminal. After a refresh the\n\
              expansion list (Loaded + Local) can be shorter than this listing, and\n\
-             `!n` numbers within that expansion list.\n"
+             `!n` numbers within that expansion list.\n\
+             Ghost autosuggest completes the token under the cursor, not just a\n\
+             whole-line prefix: it scans history newest first and prefers an exact\n\
+             case-sensitive token match over a case-insensitive one. A record whose\n\
+             referenced paths no longer resolve is skipped, with relative paths\n\
+             resolved against the directory the command ran in; a command whose\n\
+             output path did not exist at record time, and legacy records without\n\
+             paths, stay eligible. Right or End accepts the ghost and `tide\n\
+             autosuggest off` disables it. Ctrl-R ranks a non-empty query by\n\
+             substring frecency: hits times an age weight (4 within a day, 2 within\n\
+             30 days, 1 beyond, with legacy records counted as old), breaking ties on\n\
+             the newer timestamp and then the file position. The newest exact\n\
+             case-sensitive prefix match is pinned first so repeated Ctrl-R still\n\
+             finds the command just typed, and further presses page through the\n\
+             ranked matches. An empty query and ordinary Up/Down recall stay\n\
+             chronological.\n"
         }
         "wake" => {
             "wake COMMAND  register a command to run at interactive startup.\n\
