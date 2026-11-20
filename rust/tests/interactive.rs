@@ -1289,10 +1289,13 @@ fn skips_a_suggestion_whose_path_is_gone() {
     session.run("touch stale.txt stale.yml");
     session.run("cat stale.yml");
     session.run("cat stale.txt");
-    session.run("rm stale.txt");
+    // Removed here, not by `rm`: a removal the shell runs is itself recorded after
+    // it took effect, so that record names no paths and stays suggestible, which
+    // would put `.txt` back in the ghost for a longer prefix.
+    std::fs::remove_file(dir.join("stale.txt")).unwrap();
 
-    // `rm stale.txt` and `cat stale.txt` are newer, but the file they named is
-    // gone; the search has to keep walking back to `cat stale.yml`.
+    // `cat stale.txt` is newer, but the file it named is gone; the search has to
+    // keep walking back to `cat stale.yml`.
     let _ = session.writer.write_all(b"cat stale");
     let seen = read_until(session.master.as_raw_fd(), ".yml", Duration::from_secs(5));
     assert!(seen.contains(".yml"), "no fallback ghost: {seen:?}");
@@ -1997,8 +2000,13 @@ fn fuzzy_file_search_inserts_a_match() {
     let mut session = history_session();
     session.run(&format!("cd {}", dir.display()));
     let _ = session.writer.write_all(b"cat \x14");
-    let seen = read_until(session.master.as_raw_fd(), "fuzzy>", Duration::from_secs(5));
-    assert!(seen.contains("beta.txt"), "fuzzy list missing files: {seen:?}");
+    // The picker draws its prompt and its list in one frame, and the pty may hand
+    // that frame over in pieces: wait for the entry the assertion is about.
+    let seen = read_until(session.master.as_raw_fd(), "beta.txt", Duration::from_secs(5));
+    assert!(
+        seen.contains("fuzzy>") && seen.contains("beta.txt"),
+        "fuzzy list missing files: {seen:?}"
+    );
 
     let _ = session.writer.write_all(b"bet");
     read_until(
