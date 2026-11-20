@@ -7,11 +7,13 @@
 //! finished. Deferral therefore falls out of the delivery design instead of
 //! being emulated, and no trap can start while a child owns the terminal.
 //!
-//! Handlers are installed with `SA_RESTART` so a trap never turns a wait for a
-//! child into a spurious failure: the wait restarts, the child keeps the
-//! foreground process group, and the action runs after the wait returns.
+//! Handlers for trapped signals are installed with `SA_RESTART` so a trap never
+//! turns a wait for a child into a spurious failure: the wait restarts, the
+//! child keeps the foreground process group, and the action runs after the wait
+//! returns. The fatal and child notices use no `SA_RESTART` on purpose, because
+//! their whole point is to interrupt the prompt's read or the wait for a child.
 
-use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 
 use nix::errno::Errno;
 use nix::libc;
@@ -138,6 +140,73 @@ pub fn clear_interrupt() {
     INTERRUPTED.store(false, Ordering::SeqCst);
 }
 
+/// A signal whose default action ends the shell. Bash still runs the EXIT
+/// action before it dies, so the handler cannot exit: it restores the terminal,
+/// records the number, and lets the shell notice at a safe point. The read and
+/// wait syscalls it interrupts are installed without `SA_RESTART` so the notice
+/// is not lost behind a restarted call.
+static FATAL: AtomicI32 = AtomicI32::new(0);
+
+/// A child changed state. The handler only raises this flag; the prompt wait
+/// and the command boundary reap the job table when they observe it.
+static CHILD: AtomicBool = AtomicBool::new(false);
+
+// SAFETY: the handler restores the terminal with async-signal-safe syscalls and
+// records the number in an atomic. It never allocates or runs shell code.
+extern "C" fn note_fatal(number: libc::c_int) {
+    crate::term::fatal_signal(number);
+}
+
+/// Records the first fatal signal, so the shell that notices it later runs the
+/// EXIT action once and leaves with 128+signal.
+pub fn record_fatal(number: i32) {
+    let _ = FATAL.compare_exchange(0, number, Ordering::SeqCst, Ordering::SeqCst);
+}
+
+pub fn fatal_signal() -> Option<i32> {
+    let number = FATAL.load(Ordering::SeqCst);
+    (number > 0).then_some(number)
+}
+
+/// Restores the shell's own fatal-signal handling for a signal `trap` released.
+pub fn clear_fatal() {
+    FATAL.store(0, Ordering::SeqCst);
+}
+
+// SAFETY: the handler only stores into an atomic and returns.
+extern "C" fn note_child(_: libc::c_int) {
+    CHILD.store(true, Ordering::SeqCst);
+}
+
+pub fn child_pending() -> bool {
+    CHILD.load(Ordering::SeqCst)
+}
+
+pub fn take_child_pending() -> bool {
+    CHILD.swap(false, Ordering::SeqCst)
+}
+
+pub fn clear_child_pending() {
+    CHILD.store(false, Ordering::SeqCst);
+}
+
+/// The shell's baseline for a terminating signal with no `trap` action: notice
+/// it instead of dying, so the EXIT action can run. No `SA_RESTART`, because a
+/// restarted `read` or `waitpid` would hide the notice until the next command.
+pub fn fatal(number: i32) {
+    install(number, SigHandler::Handler(note_fatal), SaFlags::empty());
+}
+
+/// The interactive shell's SIGCHLD action. No `SA_RESTART` so the prompt's read
+/// returns `EINTR` and the editor can print the job notice.
+pub fn watch_children() {
+    install(
+        libc::SIGCHLD,
+        SigHandler::Handler(note_child),
+        SaFlags::empty(),
+    );
+}
+
 /// Upper bound on the job groups a hangup forwards to. A shell that keeps more
 /// jobs than this still gets its own terminal restored; the extra ones are not
 /// reachable from a signal handler, which may not allocate.
@@ -203,12 +272,9 @@ pub fn reset(number: i32) {
     install(number, SigHandler::SigDfl, SaFlags::empty());
 }
 
-/// The interactive shell's fatal-signal handler, which restores the terminal
-/// before dying. An interactive `trap - TERM` returns to this, not to SIG_DFL.
+/// The interactive shell's fatal-signal handling, which restores the terminal
+/// and records the signal. An interactive `trap - TERM` returns to this, not to
+/// `SIG_DFL`.
 pub fn restore_terminal(number: i32) {
-    install(
-        number,
-        SigHandler::Handler(crate::term::restore_terminal_and_exit),
-        SaFlags::SA_RESTART,
-    );
+    fatal(number);
 }

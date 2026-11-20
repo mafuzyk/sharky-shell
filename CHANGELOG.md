@@ -132,6 +132,17 @@ rather than a separate preview track.
   `$0` set to the resolved path, the arguments forwarded and the script's exit
   status preserved; a NUL byte or the `ELF` magic in the first block still
   reports 126 and is never executed.
+- An untrapped fatal signal no longer skips the EXIT action. `TERM`, `HUP` and,
+  in a script, `INT` are caught by a handler that restores the terminal,
+  forwards a hangup to the jobs and only records the signal; the shell notices
+  it through the interrupted `waitpid`, the command boundary or the prompt
+  wait, runs the EXIT action once and leaves with 128+signal, as bash does.
+- A background job that finishes while the prompt is idle is reaped and
+  announced without a typed command. A SIGCHLD handler records the change, the
+  editor's input wait wakes for it, and the bash-compatible notice (the 27
+  column status field, `Done`, `Exit N`, `Terminated` and the other signal
+  descriptions, `+`/`-` job markers) prints above the line being edited, which
+  is then redrawn intact.
 - Only exported variables reach a child process, as in bash. `Shell::env` is
   still the single scalar store, so expansion, `declare -p` and `set` keep
   seeing every variable, but the environment handed to a spawn, `exec`, a

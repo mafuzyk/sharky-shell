@@ -212,6 +212,18 @@ impl Shell {
             let _ = signal(Signal::SIGPIPE, SigHandler::SigDfl);
         }
 
+        // An untrapped fatal signal still runs the EXIT action before the shell
+        // leaves, as bash does, so these are noticed instead of taking their
+        // default action. The interactive shell replaces INT with its line
+        // editor action when it installs its own handlers.
+        for number in [
+            nix::libc::SIGINT,
+            nix::libc::SIGTERM,
+            nix::libc::SIGHUP,
+        ] {
+            crate::signal::fatal(number);
+        }
+
         let mut env: Vec<(String, String)> = std::env::vars_os()
             .map(|(key, value)| {
                 (
@@ -494,6 +506,9 @@ impl Shell {
 
         // `$?` inside the EXIT action is the status the shell is leaving with.
         self.last_status = status;
+        // A fatal signal that brought us here must not abort its own cleanup:
+        // the flag has done its job once the action starts.
+        crate::signal::clear_fatal();
         let saved = self.exit_requested;
         self.exit_requested = None;
         let _ = self.run(&command);
@@ -759,6 +774,9 @@ impl Shell {
             if let Some(code) = self.service_traps() {
                 return Flow::Exit(code);
             }
+            if let Some(signal) = crate::signal::fatal_signal() {
+                return Flow::Exit(128 + signal);
+            }
             if crate::signal::take_interrupt() {
                 return Flow::Interrupt;
             }
@@ -783,6 +801,9 @@ impl Shell {
             if let Some(code) = self.service_traps() {
                 return Flow::Exit(code);
             }
+            if let Some(signal) = crate::signal::fatal_signal() {
+                return Flow::Exit(128 + signal);
+            }
             if crate::signal::take_interrupt() {
                 return Flow::Interrupt;
             }
@@ -790,6 +811,9 @@ impl Shell {
 
         if let Some(code) = self.service_traps() {
             return Flow::Exit(code);
+        }
+        if let Some(signal) = crate::signal::fatal_signal() {
+            return Flow::Exit(128 + signal);
         }
         if crate::signal::take_interrupt() {
             return Flow::Interrupt;
@@ -845,6 +869,10 @@ impl Shell {
             if let Some(code) = self.service_traps() {
                 self.errexit_suppressed = previous;
                 return Flow::Exit(code);
+            }
+            if let Some(signal) = crate::signal::fatal_signal() {
+                self.errexit_suppressed = previous;
+                return Flow::Exit(128 + signal);
             }
             if crate::signal::take_interrupt() {
                 self.errexit_suppressed = previous;
@@ -2979,24 +3007,70 @@ impl Shell {
     }
 
     pub fn reap_jobs(&mut self) {
+        for line in self.collect_job_notices() {
+            println!("{line}");
+        }
+    }
+
+    /// Reaps the job table and returns the notices without printing them, so
+    /// the line editor can place them above the input line it redraws. The
+    /// prompt calls this when SIGCHLD reported a child and no command is
+    /// running; the command boundary still uses `reap_jobs`.
+    pub fn take_job_notices(&mut self) -> Vec<String> {
+        self.collect_job_notices()
+    }
+
+    fn collect_job_notices(&mut self) -> Vec<String> {
         if self.jobs.is_empty() {
-            return;
+            return Vec::new();
         }
 
+        // Bash marks the newest job `+` and the one before it `-`, whether or
+        // not that job is in this batch of notices.
+        let ids: Vec<usize> = self.jobs.iter().map(|job| job.id).collect();
+        let newest = ids.iter().copied().max().unwrap_or(0);
+        let previous = ids
+            .iter()
+            .copied()
+            .filter(|id| *id != newest)
+            .max()
+            .unwrap_or(0);
+        let marker = |id: usize| {
+            if id == newest {
+                '+'
+            } else if id == previous {
+                '-'
+            } else {
+                ' '
+            }
+        };
+
         let mut finished = Vec::new();
-        let mut announcements = Vec::new();
+        let mut notices = Vec::new();
         for (index, job) in self.jobs.iter_mut().enumerate() {
             // A job owns every process in it: a pipeline whose first member
             // exited is still running when its last one has not. Reaping only
             // the leader would leave the others as zombies and the job forever
-            // "Running".
+            // "Running". The last member's status is the one bash reports.
+            let last = job.pids.len().saturating_sub(1);
             let mut alive = Vec::with_capacity(job.pids.len());
             let mut stopped = None;
             let mut continued = false;
-            for pid in &job.pids {
+            let mut ended: Option<(String, bool)> = None;
+            for (position, pid) in job.pids.iter().enumerate() {
                 match exec::wait_scan(*pid) {
-                    // Already reaped, or terminated now.
-                    None | Some(WaitStatus::Exited(_, _)) | Some(WaitStatus::Signaled(_, _, _)) => {}
+                    // Already reaped elsewhere, or terminated now.
+                    None => {}
+                    Some(WaitStatus::Exited(_, code)) => {
+                        if position == last {
+                            ended = Some(exit_text(code));
+                        }
+                    }
+                    Some(WaitStatus::Signaled(_, signal, dumped)) => {
+                        if position == last {
+                            ended = Some((signal_text(signal as i32), dumped));
+                        }
+                    }
                     Some(WaitStatus::Stopped(_, signal)) => {
                         stopped.get_or_insert(signal as i32);
                         alive.push(*pid);
@@ -3018,28 +3092,31 @@ impl Shell {
                 && job.stop.is_none()
             {
                 job.stop = Some(signal);
-                announcements.push(format!("[{}]+  Stopped                 {}", job.id, job.command));
+                // Bash separates a stop notice from the line above it.
+                notices.push(String::new());
+                notices.push(job_notice(job.id, marker(job.id), "Stopped", false, &job.command));
             }
             if job.pids.is_empty() {
                 finished.push(index);
-            }
-        }
-
-        if !announcements.is_empty() {
-            println!();
-            for line in announcements {
-                println!("{line}");
+                if self.interactive {
+                    let (status, dumped) = ended.unwrap_or_else(|| exit_text(0));
+                    notices.push(job_notice(
+                        job.id,
+                        marker(job.id),
+                        &status,
+                        dumped,
+                        &job.command,
+                    ));
+                }
             }
         }
 
         for index in finished.into_iter().rev() {
-            let job = self.jobs.remove(index);
-            if self.interactive {
-                println!("[{}]+  Done                    {}", job.id, job.command);
-            }
+            self.jobs.remove(index);
         }
 
         self.publish_jobs();
+        notices
     }
 
     fn wait_foreground(&mut self, pids: &[Pid], pgid: Pid, command: String) -> i32 {
@@ -3066,7 +3143,10 @@ impl Shell {
             stop: Some(signal),
         });
         self.publish_jobs();
-        println!("\n[{id}]+  Stopped                 {command}");
+        println!(
+            "\n{}",
+            job_notice(id, '+', "Stopped", false, &command)
+        );
     }
 
     fn wait_pipeline(&mut self, pids: &[Pid], pgid: Pid, command: String) -> i32 {
@@ -3123,7 +3203,10 @@ impl Shell {
                 stop: stopped,
             });
             self.publish_jobs();
-            println!("\n[{id}]+  Stopped                 {command}");
+            println!(
+                "\n{}",
+                job_notice(id, '+', "Stopped", false, &command)
+            );
         }
 
         status
@@ -4566,7 +4649,16 @@ impl Shell {
 
     fn restore_disposition(&self, number: i32) {
         if !self.interactive {
-            crate::signal::reset(number);
+            // A batch shell keeps the notice handler for the signals that would
+            // otherwise kill it outright, so an EXIT action still runs when an
+            // untrapped TERM, HUP or INT ends the script, exactly as bash does
+            // after `trap - TERM`.
+            match number {
+                nix::libc::SIGINT | nix::libc::SIGTERM | nix::libc::SIGHUP => {
+                    crate::signal::fatal(number);
+                }
+                _ => crate::signal::reset(number),
+            }
             return;
         }
         match number {
@@ -4708,6 +4800,8 @@ impl Shell {
             }
         }
         crate::signal::clear_pending();
+        crate::signal::clear_fatal();
+        crate::signal::clear_child_pending();
         self.trap_running = false;
         self.trap_exit = None;
         reset_child_signals();
@@ -6990,6 +7084,8 @@ fn reset_child_signals() {
         let _ = signal(Signal::SIGTTOU, SigHandler::SigDfl);
         let _ = signal(Signal::SIGTTIN, SigHandler::SigDfl);
         let _ = signal(Signal::SIGPIPE, SigHandler::SigDfl);
+        // The interactive shell's child watcher must not run in a child.
+        let _ = signal(Signal::SIGCHLD, SigHandler::SigDfl);
     }
 }
 
@@ -6999,6 +7095,64 @@ fn flow_status(flow: Flow) -> i32 {
         Flow::Interrupt => 130,
         Flow::Break | Flow::Continue => 0,
     }
+}
+
+/// The status column bash prints in a job notice: `Done` for a clean exit and
+/// `Exit N` otherwise.
+fn exit_text(code: i32) -> (String, bool) {
+    if code == 0 {
+        ("Done".to_string(), false)
+    } else {
+        (format!("Exit {code}"), false)
+    }
+}
+
+/// The description bash uses for a job that died from `signal`. The strings are
+/// the ones bash 5.3 prints under `LC_ALL=C`.
+fn signal_text(signal: i32) -> String {
+    let text = match signal {
+        nix::libc::SIGHUP => "Hangup",
+        nix::libc::SIGINT => "Interrupt",
+        nix::libc::SIGQUIT => "Quit",
+        nix::libc::SIGILL => "Illegal instruction",
+        nix::libc::SIGTRAP => "Trace/breakpoint trap",
+        nix::libc::SIGABRT => "Aborted",
+        nix::libc::SIGBUS => "Bus error",
+        nix::libc::SIGFPE => "Floating point exception",
+        nix::libc::SIGKILL => "Killed",
+        nix::libc::SIGUSR1 => "User defined signal 1",
+        nix::libc::SIGSEGV => "Segmentation fault",
+        nix::libc::SIGUSR2 => "User defined signal 2",
+        nix::libc::SIGPIPE => "Broken pipe",
+        nix::libc::SIGALRM => "Alarm clock",
+        nix::libc::SIGTERM => "Terminated",
+        nix::libc::SIGSTKFLT => "Stack fault",
+        nix::libc::SIGCHLD => "Child exited",
+        nix::libc::SIGCONT => "Continued",
+        nix::libc::SIGSTOP => "Stopped (signal)",
+        nix::libc::SIGTSTP => "Stopped",
+        nix::libc::SIGTTIN => "Stopped (tty input)",
+        nix::libc::SIGTTOU => "Stopped (tty output)",
+        nix::libc::SIGURG => "Urgent I/O condition",
+        nix::libc::SIGXCPU => "CPU time limit exceeded",
+        nix::libc::SIGXFSZ => "File size limit exceeded",
+        nix::libc::SIGVTALRM => "Virtual timer expired",
+        nix::libc::SIGPROF => "Profiling timer expired",
+        nix::libc::SIGWINCH => "Window changed",
+        nix::libc::SIGIO => "I/O possible",
+        nix::libc::SIGSYS => "Bad system call",
+        _ => return format!("Signal {signal}"),
+    };
+    text.to_string()
+}
+
+/// One bash-compatible job notice. The status field is 27 columns wide in bash
+/// 5.3, and a dumped core is marked before the command.
+fn job_notice(id: usize, marker: char, status: &str, dumped: bool, command: &str) -> String {
+    format!(
+        "[{id}]{marker}  {status:<27}{}{command}",
+        if dumped { "(core dumped) " } else { "" }
+    )
 }
 
 fn negate_flow(flow: Flow, negate: bool) -> Flow {
@@ -8701,7 +8855,7 @@ fn read_stdin_line() -> LineInput {
             if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
                 // Without SA_RESTART the handler interrupts the read, which is
                 // the only way a blocked `read` builtin learns about Ctrl-C.
-                if crate::signal::interrupt_pending() {
+                if crate::signal::interrupt_pending() || crate::signal::fatal_signal().is_some() {
                     return LineInput::Interrupted;
                 }
                 continue;

@@ -195,7 +195,15 @@ pub fn wait(pid: Pid) -> i32 {
             Ok(WaitStatus::Exited(_, status)) => return status,
             Ok(WaitStatus::Signaled(_, signal, _)) => return 128 + signal as i32,
             Ok(_) => return 1,
-            Err(Errno::EINTR) => continue,
+            // A fatal signal interrupts the wait; the shell is leaving, so
+            // report its status instead of blocking again behind a restarted
+            // wait. Other interruptions keep waiting.
+            Err(Errno::EINTR) => {
+                if let Some(signal) = crate::signal::fatal_signal() {
+                    return 128 + signal;
+                }
+                continue;
+            }
             Err(err) => {
                 eprintln!("sharky: wait: {err}");
                 return 1;
@@ -221,7 +229,14 @@ fn wait_member(pid: Pid) -> Option<WaitStatus> {
     loop {
         match waitpid(pid, Some(WaitPidFlag::WUNTRACED)) {
             Ok(status) => return Some(status),
-            Err(Errno::EINTR) => continue,
+            // Abandon the wait when the shell itself was told to die: the
+            // caller unwinds, runs the EXIT action and exits 128+signal.
+            Err(Errno::EINTR) => {
+                if crate::signal::fatal_signal().is_some() {
+                    return None;
+                }
+                continue;
+            }
             Err(Errno::ECHILD) => return None,
             Err(err) => {
                 eprintln!("sharky: wait: {err}");

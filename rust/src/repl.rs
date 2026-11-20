@@ -24,12 +24,20 @@ pub fn run(shell: &mut Shell, private: bool) -> i32 {
 
     loop {
         shell.reap_jobs();
+        // The boundary reaped whatever the prompt did not; the flag it raised
+        // must not wake the editor for a job that is no longer there.
+        crate::signal::take_child_pending();
         shell.reap_substitutions_idle();
 
         // A trap delivered while the shell sat at the prompt runs here, before
         // the next line is read, while the terminal is still in cooked mode.
         if let Some(code) = shell.service_traps() {
             return shell.finish(code);
+        }
+        // An untrapped fatal signal recorded by the handler ends the shell
+        // here, with the same status a killed command would report.
+        if let Some(signal) = crate::signal::fatal_signal() {
+            return shell.finish(128 + signal);
         }
 
         let primary = buffer.is_empty();
@@ -126,8 +134,25 @@ pub fn run(shell: &mut Shell, private: bool) -> i32 {
                     return shell.finish(code);
                 }
             }
-            Ok(Line::Eof) => return shell.finish(status),
+            Ok(Line::Eof) => {
+                // A terminal hangup reaches the editor as end of input; the
+                // fatal handler recorded the signal, and the EXIT action still
+                // has to run before the shell leaves. A hangup whose SIGHUP is
+                // still in flight is recognized by the terminal itself.
+                let code = match crate::signal::fatal_signal() {
+                    Some(signal) => 128 + signal,
+                    None if term::terminal_lost() => 129,
+                    None => status,
+                };
+                return shell.finish(code);
+            }
             Err(err) => {
+                if let Some(signal) = crate::signal::fatal_signal() {
+                    return shell.finish(128 + signal);
+                }
+                if term::terminal_lost() {
+                    return shell.finish(129);
+                }
                 eprintln!("sharky: {err}");
                 return 1;
             }
@@ -148,9 +173,10 @@ fn install_signals() {
         let _ = signal(Signal::SIGTSTP, SigHandler::SigIgn);
         let _ = signal(Signal::SIGTTOU, SigHandler::SigIgn);
         let _ = signal(Signal::SIGTTIN, SigHandler::SigIgn);
-        let _ =
-            signal(Signal::SIGTERM, SigHandler::Handler(crate::term::restore_terminal_and_exit));
-        let _ =
-            signal(Signal::SIGHUP, SigHandler::Handler(crate::term::restore_terminal_and_exit));
+        crate::signal::fatal(Signal::SIGTERM as i32);
+        crate::signal::fatal(Signal::SIGHUP as i32);
+        // Finished background jobs are announced while the prompt waits, so
+        // the handler both interrupts the input read and records the change.
+        crate::signal::watch_children();
     }
 }

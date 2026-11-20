@@ -47,14 +47,18 @@ unsafe impl Sync for SavedTermios {}
 
 static SAVED_TERMIOS: SavedTermios = SavedTermios(UnsafeCell::new(MaybeUninit::uninit()));
 
-pub extern "C" fn restore_terminal_and_exit(signal: libc::c_int) {
+/// The shell's fatal-signal action. It cannot run shell code, so it restores the
+/// terminal, lets a hangup reach the jobs, and records the signal; the shell
+/// notices at a safe point, runs the EXIT action and leaves with 128+signal.
+pub extern "C" fn fatal_signal(signal: libc::c_int) {
     // A terminal hangup must take the jobs with it, as bash does. This runs
     // before anything else so a job that ignores the hangup still dies from the
     // `SIGCONT` that follows it.
     if signal == libc::SIGHUP {
         crate::signal::forward_hangup();
     }
-    // SAFETY: the handler only performs async-signal-safe syscalls and exits.
+    // SAFETY: the handler only performs async-signal-safe syscalls and records
+    // the signal in an atomic.
     unsafe {
         if RAW_ACTIVE.load(Ordering::Acquire) {
             let saved = (*SAVED_TERMIOS.0.get()).assume_init_ref();
@@ -62,24 +66,26 @@ pub extern "C" fn restore_terminal_and_exit(signal: libc::c_int) {
             // forever when nobody is reading the terminal.
             libc::tcsetattr(0, libc::TCSANOW, saved);
         }
-        // Never block on a full terminal: the process is dying either way. The
-        // status flags are shared by every descriptor duplicated from the same
-        // open file, so they are put back before exiting.
+        // Never block on a terminal nobody drains: the shell is leaving, and a
+        // retried write must fail with `EAGAIN` instead of parking forever. A
+        // live terminal still accepts the small writes an EXIT action makes.
         let flags = libc::fcntl(1, libc::F_GETFL);
-        if flags >= 0 {
+        if flags >= 0 && flags & libc::O_NONBLOCK == 0 {
             libc::fcntl(1, libc::F_SETFL, flags | libc::O_NONBLOCK);
         }
-        let clear = b"\x1b[?2004l";
-        libc::write(1, clear.as_ptr() as *const _, clear.len());
-        if ALTERNATE.load(Ordering::Acquire) {
-            let leave = b"\x1b[?1049l";
-            libc::write(1, leave.as_ptr() as *const _, leave.len());
+        // Escape sequences only matter when the shell owns an interactive
+        // terminal; a script's output must stay exactly what its actions print.
+        let interactive = RAW_ACTIVE.load(Ordering::Acquire) || ALTERNATE.load(Ordering::Acquire);
+        if interactive {
+            let clear = b"\x1b[?2004l";
+            libc::write(1, clear.as_ptr() as *const _, clear.len());
+            if ALTERNATE.load(Ordering::Acquire) {
+                let leave = b"\x1b[?1049l";
+                libc::write(1, leave.as_ptr() as *const _, leave.len());
+            }
         }
-        if flags >= 0 {
-            libc::fcntl(1, libc::F_SETFL, flags);
-        }
-        libc::_exit(128 + signal);
     }
+    crate::signal::record_fatal(signal);
 }
 
 impl RawMode {
@@ -127,6 +133,20 @@ impl Drop for RawMode {
 
 pub fn is_tty(fd: i32) -> bool {
     unsafe { libc::isatty(fd) == 1 }
+}
+
+/// True when standard input was a terminal whose peer is gone. A real terminal
+/// answers `tcgetattr`; a hung-up pty answers `EIO`, and a non-tty answers
+/// `ENOTTY`, which is not a hangup.
+pub fn terminal_lost() -> bool {
+    // SAFETY: termios is a plain C struct written by tcgetattr on success.
+    unsafe {
+        let mut termios: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(0, &mut termios) == 0 {
+            return false;
+        }
+        io::Error::last_os_error().raw_os_error() == Some(libc::EIO)
+    }
 }
 
 pub fn width() -> usize {
@@ -183,21 +203,79 @@ pub fn leave_alternate_screen() -> io::Result<()> {
     write_stdout("\x1b[?1049l")
 }
 
-pub fn read_key_timeout(millis: i32) -> io::Result<Option<Key>> {
+/// Signals the prompt wait must not sleep through: a fatal signal and a child
+/// changing state. They are blocked while the flags are checked and unblocked
+/// atomically inside `ppoll`, so a delivery between the shell's check and its
+/// blocking wait cannot be lost behind a full sleep.
+fn notice_mask() -> libc::sigset_t {
+    // SAFETY: sigemptyset and sigaddset only write into the set.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGHUP);
+        libc::sigaddset(&mut set, libc::SIGTERM);
+        libc::sigaddset(&mut set, libc::SIGCHLD);
+        set
+    }
+}
+
+/// Waits for standard input to become readable, or for a notice to arrive.
+/// Returns `None` when a notice interrupted the wait, which the editor turns
+/// into another loop iteration where it services its flags.
+fn wait_for_input(milliseconds: Option<i32>) -> io::Result<Option<()>> {
+    let block = notice_mask();
+    let mut old: libc::sigset_t = unsafe { std::mem::zeroed() };
+    // SAFETY: both sets are initialised by the calls above.
+    if unsafe { libc::sigprocmask(libc::SIG_BLOCK, &block, &mut old) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // A notice delivered before the block is already decided: do not sleep.
+    if crate::signal::fatal_signal().is_some() || crate::signal::child_pending() {
+        unsafe { libc::sigprocmask(libc::SIG_SETMASK, &old, std::ptr::null_mut()) };
+        return Ok(None);
+    }
+
     let mut pollfd = libc::pollfd {
         fd: 0,
         events: libc::POLLIN,
         revents: 0,
     };
-    // SAFETY: one valid pollfd for standard input.
-    let ready = unsafe { libc::poll(&mut pollfd, 1, millis) };
-    if ready <= 0 {
+    let timeout = milliseconds.map_or(std::ptr::null(), |millis| &libc::timespec {
+        tv_sec: 0,
+        tv_nsec: millis as i64 * 1_000_000,
+    } as *const libc::timespec);
+    // SAFETY: one valid pollfd and a static timespec; `old` unblocks the notice
+    // signals only for the duration of the wait.
+    let ready = unsafe { libc::ppoll(&mut pollfd, 1, timeout, &old) };
+    let errno = io::Error::last_os_error();
+    unsafe { libc::sigprocmask(libc::SIG_SETMASK, &old, std::ptr::null_mut()) };
+
+    if ready < 0 {
+        if errno.kind() == io::ErrorKind::Interrupted {
+            return Ok(None);
+        }
+        return Err(errno);
+    }
+    if ready == 0 {
+        return Ok(None);
+    }
+    Ok(Some(()))
+}
+
+pub fn read_key_timeout(millis: i32) -> io::Result<Option<Key>> {
+    if wait_for_input(Some(millis))?.is_none() {
         return Ok(None);
     }
     read_key().map(Some)
 }
 
 pub fn read_key() -> io::Result<Key> {
+    // Blocking here must still wake for a notice: the shell waits with the
+    // notice mask open atomically, so a signal delivered between the editor's
+    // flag check and this call cannot be slept through.
+    if wait_for_input(None)?.is_none() {
+        return Ok(Key::Unknown);
+    }
     let mut byte = [0u8; 1];
     let count = unsafe { libc::read(0, byte.as_mut_ptr() as *mut _, 1) };
     if count == 0 {

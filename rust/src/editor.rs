@@ -52,6 +52,36 @@ impl Editor {
         let mut last_row = prompt_width / term::width().max(1);
 
         loop {
+            // A fatal signal ends the shell with its EXIT action; there is no
+            // line left to keep, so hand control back to the REPL, which runs
+            // the action and leaves with 128+signal.
+            if crate::signal::fatal_signal().is_some() {
+                term::write_stdout("\r\n")?;
+                return Ok(Line::Eof);
+            }
+            // A background job finished while the prompt was idle. The notice
+            // is printed above the input and the line is redrawn intact by the
+            // render below, which is why the reaping happens here and not in
+            // the signal handler.
+            if crate::signal::take_child_pending() {
+                let notices = shell.take_job_notices();
+                if !notices.is_empty() {
+                    let columns = term::width().max(1);
+                    let prompt_row = prompt_width / columns;
+                    let mut out = String::new();
+                    if last_row > prompt_row {
+                        out.push_str(&format!("\x1b[{}A", last_row - prompt_row));
+                    }
+                    out.push_str("\r\x1b[J");
+                    for notice in &notices {
+                        out.push_str(notice);
+                        out.push_str("\r\n");
+                    }
+                    out.push_str(prompt);
+                    term::write_stdout(&out)?;
+                    last_row = prompt_row;
+                }
+            }
             if menu.is_some() && term::width() < 20 {
                 menu = None;
             }
