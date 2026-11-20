@@ -190,3 +190,22 @@ fn broken_stderr_pipe_ends_the_shell_with_sigpipe() {
 }
 
 // ---------------------------------------------------------------------------
+// Hazard 3: background job notifications are interactive-only.
+//
+// bash: `x=$(true &); printf "[%s]\n" "$x"` prints `[]`, and `true & printf hi`
+// prints only `hi`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn background_notification_does_not_leak_into_command_substitution() {
+    let out = sharky(r#"x=$(true &); printf '[%s]\n' "$x""#);
+    assert_eq!(stdout(&out), "[]\n");
+}
+
+#[test]
+fn background_notification_does_not_leak_into_script_output() {
+    let out = sharky("true & printf hi");
+    assert_eq!(stdout(&out), "hi");
+}
+
+// ---------------------------------------------------------------------------

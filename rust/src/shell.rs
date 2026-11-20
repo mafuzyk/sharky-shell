@@ -600,7 +600,12 @@ impl Shell {
                 let id = self.next_job;
                 self.next_job += 1;
                 self.last_bg_pid = Some(child);
-                println!("[{id}] {child}");
+                // Like the Done/Stopped notices, the job id line belongs to
+                // interactive use: in a script or a command substitution it
+                // would land in the output bash keeps clean.
+                if self.interactive {
+                    println!("[{id}] {child}");
+                }
                 self.jobs.push(Job {
                     id,
                     pgid: child,
