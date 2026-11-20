@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::path::Path;
 
 use crate::highlight;
+use crate::history::Entry as HistoryEntry;
 use crate::prompt;
 use crate::shell::Shell;
 use crate::term::{self, Key};
@@ -1180,23 +1182,99 @@ impl Editor {
     }
 }
 
-fn find_suggestion(entries: &[String], buffer: &[char], cursor: usize) -> Option<String> {
-    if buffer.is_empty() || cursor != buffer.len() {
+/// The word the cursor sits in: the run of non-whitespace characters that ends at
+/// the cursor. An empty slice means the cursor follows whitespace, where there is
+/// no prefix to complete yet.
+fn token_under_cursor(buffer: &[char], cursor: usize) -> &[char] {
+    let mut start = cursor;
+    while start > 0 && !buffer[start - 1].is_whitespace() {
+        start -= 1;
+    }
+    &buffer[start..cursor]
+}
+
+/// The rest of `command` from the end of the word that `token` prefixes, so the
+/// ghost completes the token and then keeps the line the history record ran. A
+/// token that already is the word still yields that line's remainder, and an entry
+/// that ends at the token has nothing to add.
+///
+/// A `true` match compares the typed casing; `false` folds ASCII case, which the
+/// caller reaches only when nothing matched exactly.
+fn complete_token(command: &str, token: &str, exact: bool) -> Option<String> {
+    let chars: Vec<char> = command.chars().collect();
+    let width = token.chars().count();
+    let mut start = 0;
+    for end in 0..=chars.len() {
+        if end < chars.len() && !chars[end].is_whitespace() {
+            continue;
+        }
+        if end > start {
+            let word = &chars[start..end];
+            let head: String = word.iter().take(width).collect();
+            let matches = if exact {
+                head == token
+            } else {
+                head.eq_ignore_ascii_case(token)
+            };
+            if matches {
+                let suffix: String = chars[start + width..].iter().collect();
+                if !suffix.is_empty() {
+                    return Some(suffix);
+                }
+            }
+        }
+        start = end + 1;
+    }
+    None
+}
+
+/// Whether every path a record named still resolves. Relative paths resolve against
+/// the directory the command ran in, not today's, and a record that named nothing
+/// (legacy, or a command whose output path did not exist yet) is always eligible.
+fn paths_exist(record: &HistoryEntry) -> bool {
+    if record.paths.is_empty() {
+        return true;
+    }
+    let base = record.cwd.as_deref().map(Path::new);
+    record.paths.iter().all(|path| {
+        let path = Path::new(path);
+        match base {
+            Some(base) if !path.is_absolute() => base.join(path).exists(),
+            _ => path.exists(),
+        }
+    })
+}
+
+fn find_suggestion(records: &[HistoryEntry], buffer: &[char], cursor: usize) -> Option<String> {
+    if cursor != buffer.len() {
         return None;
     }
-    let prefix: String = buffer.iter().collect();
-    entries
-        .iter()
-        .rev()
-        .find(|entry| entry.len() > prefix.len() && entry.starts_with(&prefix))
-        .map(|entry| entry[prefix.len()..].to_string())
+    let token = token_under_cursor(buffer, cursor);
+    if token.is_empty() {
+        return None;
+    }
+    let token: String = token.iter().collect();
+    // Chronological, newest first: the ghost is the line the user last ran, not the
+    // one they run most. A case-sensitive match is what they actually typed, so the
+    // whole scan finishes once before a differently cased match is considered.
+    for exact in [true, false] {
+        for record in records.iter().rev() {
+            if !paths_exist(record) {
+                continue;
+            }
+            if let Some(suffix) = complete_token(&record.command, &token, exact) {
+                return Some(suffix);
+            }
+        }
+    }
+    None
 }
 
 fn autosuggest(shell: &Shell, buffer: &[char], cursor: usize, prompt_width: usize) -> Option<String> {
     if shell.setting("autosuggest") == Some("off") {
         return None;
     }
-    let suffix = find_suggestion(shell.history_entries(), buffer, cursor)?;
+    let suffix = find_suggestion(&shell.history_records(), buffer, cursor)?;
     if suffix.contains('\n') || suffix.contains('\t') {
         return None;
     }
@@ -2051,31 +2129,161 @@ mod tests {
 
 #[cfg(test)]
 mod suggestion_tests {
-    use super::find_suggestion;
+    use std::path::{Path, PathBuf};
 
-    fn entries() -> Vec<String> {
-        vec![
-            "echo alpha".to_string(),
-            "ls".to_string(),
-            "echo beta".to_string(),
-        ]
+    use super::find_suggestion;
+    use crate::history::{Entry, Origin};
+
+    fn entry(command: &str) -> Entry {
+        Entry {
+            command: command.to_string(),
+            when: None,
+            origin: Origin::Loaded,
+            cwd: None,
+            paths: Vec::new(),
+        }
+    }
+
+    fn located(command: &str, cwd: &Path, paths: &[&str]) -> Entry {
+        Entry {
+            command: command.to_string(),
+            when: None,
+            origin: Origin::Loaded,
+            cwd: Some(cwd.to_string_lossy().into_owned()),
+            paths: paths.iter().map(|path| path.to_string()).collect(),
+        }
+    }
+
+    fn entries() -> Vec<Entry> {
+        vec![entry("echo alpha"), entry("ls"), entry("echo beta")]
+    }
+
+    fn buffer(text: &str) -> Vec<char> {
+        text.chars().collect()
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "sharky-suggest-{}-{name}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     #[test]
     fn finds_the_newest_longer_prefix_match() {
-        let buffer: Vec<char> = "echo".chars().collect();
-        assert_eq!(find_suggestion(&entries(), &buffer, 4), Some(" beta".to_string()));
-
-        let buffer: Vec<char> = "echo beta".chars().collect();
-        assert_eq!(find_suggestion(&entries(), &buffer, 9), None);
+        assert_eq!(
+            find_suggestion(&entries(), &buffer("echo"), 4),
+            Some(" beta".to_string())
+        );
+        assert_eq!(find_suggestion(&entries(), &buffer("echo beta"), 9), None);
     }
 
     #[test]
     fn ignores_mid_line_and_empty_buffers() {
-        let buffer: Vec<char> = "echo".chars().collect();
-        assert_eq!(find_suggestion(&entries(), &buffer, 2), None);
+        assert_eq!(find_suggestion(&entries(), &buffer("echo"), 2), None);
         assert_eq!(find_suggestion(&entries(), &[], 0), None);
-        assert_eq!(find_suggestion(&entries(), &"zzz".chars().collect::<Vec<_>>(), 3), None);
+        assert_eq!(find_suggestion(&entries(), &buffer("zzz"), 3), None);
+    }
+
+    #[test]
+    fn suggests_a_token_prefix_before_the_cursor() {
+        let history = vec![entry("echo hi"), entry("ls -la")];
+        assert_eq!(
+            find_suggestion(&history, &buffer("x = ech"), 7),
+            Some("o hi".to_string())
+        );
+        // A complete token still offers the rest of the line the record ran.
+        assert_eq!(
+            find_suggestion(&history, &buffer("x = echo"), 8),
+            Some(" hi".to_string())
+        );
+        // A trailing space starts a new token, which no prefix can complete yet.
+        assert_eq!(find_suggestion(&history, &buffer("x = echo "), 9), None);
+    }
+
+    #[test]
+    fn searches_chronologically_newest_first() {
+        let history = vec![entry("echo alpha GHOSTOLD"), entry("echo alpha GHOSTNEW")];
+        assert_eq!(
+            find_suggestion(&history, &buffer("echo alpha GH"), 13),
+            Some("OSTNEW".to_string())
+        );
+    }
+
+    #[test]
+    fn skips_a_suggestion_whose_path_is_gone() {
+        let dir = scratch("gone");
+        std::fs::write(dir.join("stale.txt"), b"x").unwrap();
+        std::fs::write(dir.join("stale.yml"), b"x").unwrap();
+        let history = vec![
+            located("cat stale.yml", &dir, &["stale.yml"]),
+            located("cat stale.txt", &dir, &["stale.txt"]),
+        ];
+        assert_eq!(
+            find_suggestion(&history, &buffer("cat stale"), 9),
+            Some(".txt".to_string())
+        );
+        std::fs::remove_file(dir.join("stale.txt")).unwrap();
+        // Newest first, so the record naming the deleted file would win if it were
+        // still eligible; the search has to fall back to the older valid one.
+        assert_eq!(
+            find_suggestion(&history, &buffer("cat stale"), 9),
+            Some(".yml".to_string())
+        );
+        std::fs::remove_file(dir.join("stale.yml")).unwrap();
+        assert_eq!(find_suggestion(&history, &buffer("cat stale"), 9), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolves_recorded_paths_against_the_record_cwd() {
+        let dir = scratch("cwd");
+        std::fs::write(dir.join("here.txt"), b"x").unwrap();
+        let history = vec![located("cat here.txt", &dir, &["here.txt"])];
+        // The file is nowhere near the process cwd, so only the record's own cwd
+        // can make this candidate eligible.
+        assert_eq!(
+            find_suggestion(&history, &buffer("cat here"), 8),
+            Some(".txt".to_string())
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn prefers_case_sensitive_over_case_insensitive() {
+        let history = vec![entry("echo CASETHING"), entry("echo caseOther")];
+        assert_eq!(
+            find_suggestion(&history, &buffer("echo CASE"), 9),
+            Some("THING".to_string())
+        );
+        // A case-insensitive match still answers when nothing matches exactly.
+        assert_eq!(
+            find_suggestion(&history, &buffer("echo Cas"), 8),
+            Some("eOther".to_string())
+        );
+    }
+
+    #[test]
+    fn keeps_a_command_whose_output_path_does_not_exist() {
+        // `mkdir out` named nothing that existed when it was recorded, which is
+        // exactly why the command stays suggestible: the path it creates is not a
+        // reason to hide it.
+        let history = vec![entry("mkdir out")];
+        assert_eq!(
+            find_suggestion(&history, &buffer("mkdir ou"), 8),
+            Some("t".to_string())
+        );
+    }
+
+    #[test]
+    fn legacy_entries_without_paths_stay_eligible() {
+        let history = vec![entry("echo LEGACYWITNESS")];
+        assert_eq!(
+            find_suggestion(&history, &buffer("echo LEG"), 8),
+            Some("ACYWITNESS".to_string())
+        );
     }
 }
 

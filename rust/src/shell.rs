@@ -3024,11 +3024,48 @@ impl Shell {
     }
 
     pub fn push_history(&mut self, line: &str) {
+        let cwd = self.cwd.to_string_lossy().into_owned();
+        let paths = Shell::history_paths(line, &self.cwd);
+        let named: Vec<&str> = paths.iter().map(String::as_str).collect();
         if let Some(history) = &mut self.history {
-            if let Err(err) = history.try_add(line) {
+            if let Err(err) = history.try_add_with(line, Some(&cwd), &named) {
                 eprintln!("sharky: {err}");
             }
         }
+    }
+
+    /// The words of `line` that name something that exists under `cwd` right now, at
+    /// most [`history::MAX_PATHS`](crate::history::MAX_PATHS) of them.
+    ///
+    /// Recording only the paths that exist is what keeps the suggestion honest: a
+    /// command whose output path does not exist yet names nothing and stays
+    /// suggestible, while a later check can tell a candidate whose inputs are gone
+    /// from one that is simply a repeat. Discovery happens once, at record time, so
+    /// the editor never parses a command line.
+    fn history_paths(line: &str, cwd: &Path) -> Vec<String> {
+        let mut paths: Vec<String> = Vec::new();
+        for word in line.split_whitespace() {
+            if paths.len() == crate::history::MAX_PATHS {
+                break;
+            }
+            let word = word.trim_matches(|c| c == '\'' || c == '"');
+            if word.is_empty() || word.contains(|c: char| "|&;<>()$`\\".contains(c)) {
+                continue;
+            }
+            if paths.iter().any(|seen| seen == word) {
+                continue;
+            }
+            let candidate = Path::new(word);
+            let resolved = if candidate.is_absolute() {
+                candidate.to_path_buf()
+            } else {
+                cwd.join(candidate)
+            };
+            if resolved.exists() {
+                paths.push(word.to_string());
+            }
+        }
+        paths
     }
 
     pub fn history_entries(&self) -> &[String] {
@@ -9228,5 +9265,62 @@ mod tests {
             push_utf8(*value, &mut out);
             assert_eq!(out, *expected, "{value:#x}");
         }
+    }
+
+    fn history_scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "sharky-history-paths-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn history_paths_records_only_what_exists_at_record_time() {
+        let dir = history_scratch("existing");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("note.txt"), b"x").unwrap();
+
+        let paths = Shell::history_paths("cat note.txt sub missing.txt", &dir);
+        assert_eq!(paths, vec!["note.txt".to_string(), "sub".to_string()]);
+
+        // A word that is not a path is not metadata, and neither is a redirect
+        // target that has not been created yet.
+        let paths = Shell::history_paths("printf 'X' > note.txt", &dir);
+        assert_eq!(paths, vec!["note.txt".to_string()]);
+
+        let paths = Shell::history_paths("mkdir fresh-dir", &dir);
+        assert!(paths.is_empty(), "recorded {paths:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn history_paths_keeps_at_most_the_codec_limit() {
+        let dir = history_scratch("limit");
+        for index in 0..12 {
+            std::fs::write(dir.join(format!("f{index}")), b"x").unwrap();
+        }
+        let line: String = (0..12)
+            .map(|index| format!("f{index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let paths = Shell::history_paths(&line, &dir);
+        assert_eq!(paths.len(), crate::history::MAX_PATHS);
+        assert_eq!(paths[0], "f0");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn history_paths_resolves_absolute_words_as_they_are() {
+        let dir = history_scratch("absolute");
+        let file = dir.join("abs.txt");
+        std::fs::write(&file, b"x").unwrap();
+        let line = format!("cat {}", file.display());
+        let paths = Shell::history_paths(&line, &dir);
+        assert_eq!(paths, vec![file.display().to_string()]);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

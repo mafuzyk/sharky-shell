@@ -209,6 +209,9 @@ pub struct History {
     /// The newest hit count known for each entry, keyed by command. Kept beside the
     /// view so a repeat can carry the count forward without re-reading the file.
     hits: HashMap<String, u64>,
+    /// The location and paths each entry named, keyed by command. Like `hits`, it is
+    /// keyed rather than parallel so an entry can drop without leaving a hole.
+    meta: HashMap<String, Meta>,
     path: Option<PathBuf>,
     limit: usize,
     appends: usize,
@@ -243,6 +246,19 @@ pub struct Entry {
     pub when: Option<i64>,
     #[allow(dead_code)] // read by the suggest path, not by the `history` builtin
     pub origin: Origin,
+    #[allow(dead_code)] // read by the suggest path to validate the paths it names
+    pub cwd: Option<String>,
+    #[allow(dead_code)] // read by the suggest path to validate the paths it names
+    pub paths: Vec<String>,
+}
+
+/// Where a command ran and the paths it named, kept beside the view so the suggest
+/// path can decide whether a candidate still applies. Empty paths mean the record
+/// named nothing that existed when it was written, which never disqualifies it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Meta {
+    cwd: Option<String>,
+    paths: Vec<String>,
 }
 
 /// The state of the file the in-memory view was built from, as one `stat` reports
@@ -317,13 +333,14 @@ impl History {
         // shows up as a difference, and the next refresh reads again instead of
         // missing it. The other order could hide a record for good.
         let seen = Snapshot::current(&path);
-        let (entries, hits, whens) = view(read_history(&path)?);
-        let origins = vec![Origin::Loaded; entries.len()];
+        let loaded = view(read_history(&path)?);
+        let origins = vec![Origin::Loaded; loaded.entries.len()];
         let mut history = History {
-            entries,
+            entries: loaded.entries,
             origins,
-            whens,
-            hits,
+            whens: loaded.whens,
+            hits: loaded.hits,
+            meta: loaded.meta,
             path: Some(path),
             limit,
             appends: initial_vacuum_offset(),
@@ -340,6 +357,7 @@ impl History {
             origins: Vec::new(),
             whens: Vec::new(),
             hits: HashMap::new(),
+            meta: HashMap::new(),
             path: None,
             limit,
             appends: initial_vacuum_offset(),
@@ -359,10 +377,15 @@ impl History {
             .iter()
             .zip(&self.whens)
             .zip(&self.origins)
-            .map(|((command, when), origin)| Entry {
-                command: command.clone(),
-                when: *when,
-                origin: *origin,
+            .map(|((command, when), origin)| {
+                let meta = self.meta.get(command);
+                Entry {
+                    command: command.clone(),
+                    when: *when,
+                    origin: *origin,
+                    cwd: meta.and_then(|meta| meta.cwd.clone()),
+                    paths: meta.map(|meta| meta.paths.clone()).unwrap_or_default(),
+                }
             })
             .collect()
     }
@@ -419,6 +442,10 @@ impl History {
     /// that command, so the second one writes nothing. A repeat of an older command
     /// moves back to the newest position and appends a record with one more hit than
     /// the count this session knows for it, so `!!` resolves to the repeat.
+    /// The short form of [`History::try_add_with`], for callers that carry no
+    /// metadata: the shell records through the full form, and the codec tests use
+    /// this one.
+    #[allow(dead_code)]
     pub fn try_add(&mut self, command: &str) -> Result<(), String> {
         self.try_add_with(command, None, &[])
     }
@@ -456,10 +483,22 @@ impl History {
             None => 1,
         };
         let when = now_micros();
+        let paths: Vec<String> = paths
+            .iter()
+            .take(MAX_PATHS)
+            .map(|path| path.to_string())
+            .collect();
         self.entries.push(command.to_string());
         self.origins.push(Origin::Local);
         self.whens.push(Some(when));
         self.hits.insert(command.to_string(), hits);
+        self.meta.insert(
+            command.to_string(),
+            Meta {
+                cwd: cwd.map(str::to_string),
+                paths: paths.clone(),
+            },
+        );
         self.trim();
         if self.path.is_none() {
             return Ok(());
@@ -467,11 +506,7 @@ impl History {
         let mut record = Record::new(command);
         record.when = Some(when);
         record.cwd = cwd.map(str::to_string);
-        record.paths = paths
-            .iter()
-            .take(MAX_PATHS)
-            .map(|path| path.to_string())
-            .collect();
+        record.paths = paths;
         record.hits = hits;
         self.append(&record)
     }
@@ -530,11 +565,17 @@ impl History {
     /// have stays, at the end, where memory-only entries have always gone; an entry
     /// the disk dropped was never local to this session and goes away.
     fn reload(&mut self, path: &Path) -> Result<(), String> {
-        let (entries, mut hits, mut whens) = view(read_history(path)?);
+        let View {
+            entries,
+            mut hits,
+            mut whens,
+            mut meta,
+        } = view(read_history(path)?);
         let old_entries = std::mem::take(&mut self.entries);
         let old_origins = std::mem::take(&mut self.origins);
         let old_whens = std::mem::take(&mut self.whens);
         let old_hits = std::mem::take(&mut self.hits);
+        let mut old_meta = std::mem::take(&mut self.meta);
         let mut previous: HashMap<String, Origin> = old_entries
             .iter()
             .cloned()
@@ -562,6 +603,9 @@ impl History {
             }
             let count = old_hits.get(&command).copied().unwrap_or(1);
             hits.insert(command.clone(), count);
+            if let Some(found) = old_meta.remove(&command) {
+                meta.insert(command.clone(), found);
+            }
             origins.push(Origin::Local);
             whens.push(old_when.remove(&command).flatten());
             merged.push(command);
@@ -570,6 +614,7 @@ impl History {
         self.origins = origins;
         self.whens = whens;
         self.hits = hits;
+        self.meta = meta;
         self.trim();
         Ok(())
     }
@@ -581,6 +626,7 @@ impl History {
             self.entries.clear();
             self.origins.clear();
             self.whens.clear();
+            self.meta.clear();
             return Ok(());
         };
         let dir = parent(&path);
@@ -608,6 +654,7 @@ impl History {
         self.origins.clear();
         self.whens.clear();
         self.hits.clear();
+        self.meta.clear();
         Ok(())
     }
 
@@ -711,6 +758,7 @@ impl History {
                 self.origins.remove(index);
                 self.whens.remove(index);
                 self.hits.remove(pattern);
+                self.meta.remove(pattern);
                 removed += 1;
             } else {
                 index += 1;
@@ -830,6 +878,7 @@ impl History {
             self.whens.drain(..excess);
             for command in self.entries.drain(..excess) {
                 self.hits.remove(&command);
+                self.meta.remove(&command);
             }
         }
     }
@@ -968,21 +1017,41 @@ fn read_history(path: &Path) -> Result<Vec<Record>, String> {
 /// of its newest record, carrying that record's hit count. Older duplicates on disk
 /// never reach the view, so a repeat has to be appended again to become the newest
 /// entry.
-fn view(records: Vec<Record>) -> (Vec<String>, HashMap<String, u64>, Vec<Option<i64>>) {
+struct View {
+    entries: Vec<String>,
+    hits: HashMap<String, u64>,
+    whens: Vec<Option<i64>>,
+    meta: HashMap<String, Meta>,
+}
+
+fn view(records: Vec<Record>) -> View {
     let mut hits = HashMap::with_capacity(records.len());
     let mut entries = Vec::with_capacity(records.len());
     let mut whens = Vec::with_capacity(records.len());
+    let mut meta = HashMap::with_capacity(records.len());
     for record in records.into_iter().rev() {
         if hits.contains_key(&record.command) {
             continue;
         }
         hits.insert(record.command.clone(), record.hits);
         whens.push(record.when);
+        meta.insert(
+            record.command.clone(),
+            Meta {
+                cwd: record.cwd.clone(),
+                paths: record.paths.clone(),
+            },
+        );
         entries.push(record.command);
     }
     entries.reverse();
     whens.reverse();
-    (entries, hits, whens)
+    View {
+        entries,
+        hits,
+        whens,
+        meta,
+    }
 }
 
 /// Only newline-terminated records count: a crash can leave a partial tail, which

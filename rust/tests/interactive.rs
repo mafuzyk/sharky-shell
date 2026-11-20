@@ -1012,6 +1012,169 @@ fn autosuggest_off_shows_no_ghost() {
 }
 
 #[test]
+fn suggests_a_token_prefix_before_the_cursor() {
+    let mut session = history_session();
+    session.run("printf 'GHOSTTOKEN-%s' ran");
+
+    // The token under the cursor is the only part matched, so the ghost completes
+    // it and drops the rest of the line after it.
+    let _ = session.writer.write_all(b"print");
+    let seen = read_until(
+        session.master.as_raw_fd(),
+        "f 'GHOSTTOKEN-%s' ran",
+        Duration::from_secs(5),
+    );
+    assert!(seen.contains("f 'GHOSTTOKEN-%s' ran"), "no token ghost: {seen:?}");
+
+    // Right accepts the suffix, so the completed line really runs.
+    let _ = session.writer.write_all(b"\x1b[C\r");
+    let out = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    assert!(out.contains("GHOSTTOKEN-ran"), "token ghost did not run: {out:?}");
+
+    // Mid-line, after words the history record never had, the same token still
+    // drives the ghost.
+    let _ = session.writer.write_all(b"x = print");
+    let seen = read_until(
+        session.master.as_raw_fd(),
+        "f 'GHOSTTOKEN-%s' ran",
+        Duration::from_secs(5),
+    );
+    assert!(seen.contains("f 'GHOSTTOKEN-%s' ran"), "no mid-line ghost: {seen:?}");
+
+    let _ = session.writer.write_all(b"\x03");
+    let _ = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    session.finish();
+}
+
+#[test]
+fn skips_a_suggestion_whose_path_is_gone() {
+    let mut session = history_session();
+    let dir = session.data.join("work-7788");
+    std::fs::create_dir_all(&dir).unwrap();
+    // Quoted: the session directory carries parentheses in its name.
+    session.run(&format!("cd '{}'", dir.display()));
+    let out = session.run("pwd");
+    assert!(out.contains("work-7788"), "cd did not land: {out:?}");
+    session.run("touch stale.txt stale.yml");
+    session.run("cat stale.yml");
+    session.run("cat stale.txt");
+    session.run("rm stale.txt");
+
+    // `rm stale.txt` and `cat stale.txt` are newer, but the file they named is
+    // gone; the search has to keep walking back to `cat stale.yml`.
+    let _ = session.writer.write_all(b"cat stale");
+    let seen = read_until(session.master.as_raw_fd(), ".yml", Duration::from_secs(5));
+    assert!(seen.contains(".yml"), "no fallback ghost: {seen:?}");
+    assert!(!seen.contains(".txt"), "stale path suggested anyway: {seen:?}");
+
+    let _ = session.writer.write_all(b"\x03");
+    let _ = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    session.finish();
+}
+
+#[test]
+fn suggests_a_command_that_named_a_missing_path() {
+    let mut session = history_session();
+    // Nothing exists at the path, so the record names no paths at all; the command
+    // stays suggestible instead of being hidden for naming something absent.
+    session.run("cat GHOSTMISSING");
+
+    let _ = session.writer.write_all(b"cat GHOSTMIS");
+    let seen = read_until(session.master.as_raw_fd(), "SING", Duration::from_secs(5));
+    assert!(seen.contains("SING"), "missing path hid the command: {seen:?}");
+
+    let _ = session.writer.write_all(b"\x03");
+    let _ = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    session.finish();
+}
+
+#[test]
+fn prefers_case_sensitive_over_case_insensitive() {
+    let mut session = history_session();
+    session.run("echo CASETHING");
+    session.run("echo caseOther");
+
+    // The newer entry only matches case-insensitively; the exact-cased older one
+    // wins. The redraws typed before the last character are drained first, so the
+    // assertion only sees what the folded case would have shown.
+    let _ = session.writer.write_all(b"echo CAS");
+    read_until(
+        session.master.as_raw_fd(),
+        "\u{0}",
+        Duration::from_millis(100),
+    );
+    let _ = session.writer.write_all(b"E");
+    let seen = read_until(session.master.as_raw_fd(), "THING", Duration::from_secs(5));
+    assert!(seen.contains("THING"), "no exact-case ghost: {seen:?}");
+    assert!(!seen.contains("Other"), "folded-case ghost won: {seen:?}");
+
+    let _ = session.writer.write_all(b"\x03");
+    let _ = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    session.finish();
+}
+
+#[test]
+fn suggests_the_newest_match_first() {
+    let mut session = history_session();
+    session.run("echo alpha GHOSTOLD");
+    session.run("echo alpha GHOSTNEW");
+
+    let _ = session.writer.write_all(b"echo alpha GH");
+    let seen = read_until(session.master.as_raw_fd(), "OSTNEW", Duration::from_secs(5));
+    assert!(seen.contains("OSTNEW"), "newest match did not win: {seen:?}");
+    assert!(!seen.contains("OSTOLD"), "old match won: {seen:?}");
+
+    let _ = session.writer.write_all(b"\x03");
+    let _ = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    session.finish();
+}
+
+#[test]
+fn suggests_a_legacy_record_without_paths() {
+    let mut session = history_session();
+    let file = session.data.join("sharky/history");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "echo LEGACYWITNESS\n").unwrap();
+    session.run("true");
+
+    let _ = session.writer.write_all(b"echo LEG");
+    let seen = read_until(session.master.as_raw_fd(), "ACYWITNESS", Duration::from_secs(5));
+    assert!(seen.contains("ACYWITNESS"), "legacy record hidden: {seen:?}");
+
+    let _ = session.writer.write_all(b"\x03");
+    let _ = read_until(
+        session.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    session.finish();
+}
+
+#[test]
 fn autosuggest_is_silent_mid_line() {
     let mut session = history_session();
     session.run("echo suggested");
