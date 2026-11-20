@@ -1,28 +1,80 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::shell::Shell;
 
+/// Startup files that only other shells read. A login shell executes the bash
+/// login chain instead, so these are not scanned for `PATH` edits here.
 const FILES: &[&str] = &[
-    ".profile",
-    ".bash_profile",
-    ".bash_login",
     ".bashrc",
     ".zshrc",
     ".zprofile",
     ".config/fish/config.fish",
 ];
 
-pub fn login(shell: &mut Shell) {
-    let home = Path::new(&shell.var("HOME")).to_path_buf();
+/// User login profiles, in the order bash tries them. Only the first one that
+/// exists is executed.
+const LOGIN_FILES: &[&str] = &[".bash_profile", ".bash_login", ".profile"];
 
-    for path in [
-        std::path::PathBuf::from("/etc/sharky/profile.sharky"),
-        home.join(".config/sharky/profile.sharky"),
-    ] {
-        let Ok(source) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        if let Err(err) = shell.eval(&source) {
+/// Runs the login startup files, executing each one the way bash does.
+///
+/// The order mirrors bash's login sequence, with the sharky-specific files in
+/// their own layer so they are never discarded by the standard files:
+///
+/// 1. `/etc/profile`, which on NixOS also pulls in `set-environment`,
+///    `/etc/profile.local` and `/etc/bashrc`.
+/// 2. `/etc/sharky/profile.sharky`, the system-wide sharky hook. It runs after
+///    `/etc/profile` because NixOS assigns `PATH` there and would otherwise
+///    drop anything the hook prepends.
+/// 3. The first existing of `~/.bash_profile`, `~/.bash_login` and `~/.profile`.
+/// 4. `~/.config/sharky/profile.sharky`, so a user's sharky settings win.
+///
+/// A file that fails to parse is reported with its path and line and the login
+/// continues with the next file, matching bash's survival of a broken profile.
+pub fn login(shell: &mut Shell) {
+    source(shell, Path::new("/etc/profile"));
+    source(shell, Path::new("/etc/sharky/profile.sharky"));
+
+    let home = PathBuf::from(shell.var("HOME"));
+    if home.as_os_str().is_empty() {
+        return;
+    }
+    if let Some(path) = LOGIN_FILES
+        .iter()
+        .map(|name| home.join(name))
+        .find(|path| path.is_file())
+    {
+        source(shell, &path);
+    }
+    source(shell, &home.join(".config/sharky/profile.sharky"));
+}
+
+/// Executes one startup file through [`Shell::eval`], so expansions, `export`,
+/// conditionals and `.` all behave as they would interactively.
+fn source(shell: &mut Shell, path: &Path) {
+    let source = match std::fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+        Err(err) => {
+            eprintln!("sharky: {}: {err}", path.display());
+            return;
+        }
+    };
+
+    match shell.eval(&source) {
+        Ok(_) => {}
+        Err(err) => {
+            // bash parses a profile statement by statement, so everything
+            // above the offending line has already run. Replay that prefix so
+            // one unsupported construct does not discard the whole file; the
+            // replay repeats the same error, which is why it is ignored.
+            if err.line > 1 {
+                let lines: Vec<&str> = source.lines().collect();
+                if let Some(prefix) = lines.get(..err.line - 1) {
+                    let mut prefix = prefix.join("\n");
+                    prefix.push('\n');
+                    let _ = shell.eval(&prefix);
+                }
+            }
             let line = if err.line > 0 {
                 format!(":{}", err.line)
             } else {
@@ -31,82 +83,6 @@ pub fn login(shell: &mut Shell) {
             eprintln!("sharky: {}{line}: {}", path.display(), err.message);
         }
     }
-
-    for path in [
-        std::path::PathBuf::from("/etc/profile"),
-        home.join(".profile"),
-        home.join(".bash_profile"),
-        home.join(".zshprofile"),
-    ] {
-        let Ok(source) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        for line in source.lines() {
-            if let Some((name, value)) = literal_assignment(line) {
-                shell.set_var(&name, value);
-            }
-        }
-    }
-}
-
-fn literal_assignment(line: &str) -> Option<(String, String)> {
-    let line = line.trim();
-    if line.is_empty() || line.starts_with('#') {
-        return None;
-    }
-    let line = line.strip_prefix("export ").unwrap_or(line).trim();
-    let (name, value) = line.split_once('=')?;
-    let name = name.trim();
-    if name.is_empty()
-        || !name
-            .chars()
-            .next()
-            .is_some_and(|char| char.is_ascii_alphabetic() || char == '_')
-        || !name
-            .chars()
-            .all(|char| char.is_ascii_alphanumeric() || char == '_')
-    {
-        return None;
-    }
-
-    let value = value.trim();
-    if value.contains("$(")
-        || value.contains('`')
-        || value.contains(';')
-        || value.contains("&&")
-        || value.contains("||")
-        || value.contains('|')
-        || value.contains('<')
-        || value.contains('>')
-    {
-        return None;
-    }
-
-    let value = if let Some(inner) = value
-        .strip_prefix('"')
-        .and_then(|inner| inner.strip_suffix('"'))
-    {
-        if inner.contains('$') || inner.contains('"') {
-            return None;
-        }
-        inner.to_string()
-    } else if let Some(inner) = value
-        .strip_prefix('\'')
-        .and_then(|inner| inner.strip_suffix('\''))
-    {
-        if inner.contains('\'') {
-            return None;
-        }
-        inner.to_string()
-    } else {
-        if value.contains('"') || value.contains('\'') || value.contains('$') || value.contains('\\')
-        {
-            return None;
-        }
-        value.to_string()
-    };
-
-    Some((name.to_string(), value))
 }
 
 pub fn discover(home: &Path) -> Vec<String> {

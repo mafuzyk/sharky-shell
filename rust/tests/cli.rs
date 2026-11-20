@@ -3098,28 +3098,6 @@ fn login_profile_errors_report_file_and_line_and_stop_the_file() {
 }
 
 #[test]
-fn login_imports_only_literal_standard_assignments() {
-    let home = login_home("imports");
-    std::fs::write(
-        home.join(".profile"),
-        "export IMPORTED=literal\nBAD=$(date)\nDANGER=foo; rm -rf /tmp/sharky-login\n",
-    )
-    .unwrap();
-    std::fs::write(home.join(".bash_profile"), "PLAIN=value\n").unwrap();
-
-    let out = sharky_with_home(
-        &home,
-        &[
-            "-l",
-            "-c",
-            r#"printf '%s|%s|%s' "$IMPORTED" "$PLAIN" "$BAD""#,
-        ],
-    );
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "literal|value|");
-    std::fs::remove_dir_all(&home).ok();
-}
-
-#[test]
 fn argv_zero_starting_with_a_dash_enters_login_mode() {
     use std::os::unix::process::CommandExt;
 
