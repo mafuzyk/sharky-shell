@@ -341,6 +341,10 @@ impl Lexer {
                 '"' => parts.push(Part::Double(self.scan_double()?)),
                 '\\' => self.scan_escape(&mut parts)?,
                 '$' => parts.push(self.scan_dollar()?),
+                '`' => {
+                    let start = self.pos;
+                    parts.push(self.scan_backtick(start, false)?);
+                }
                 '?' | '*' | '+' | '@' | '!' if self.peek() == Some('(') => {
                     let start = self.pos;
                     let text = self.scan_extglob(start)?;
@@ -378,6 +382,10 @@ impl Lexer {
                 '"' => parts.push(Part::Double(self.scan_double()?)),
                 '\\' => self.scan_escape(&mut parts)?,
                 '$' => parts.push(self.scan_dollar()?),
+                '`' => {
+                    let start = self.pos;
+                    parts.push(self.scan_backtick(start, false)?);
+                }
                 '?' | '*' | '+' | '@' | '!' if self.peek() == Some('(') => {
                     let start = self.pos;
                     let text = self.scan_extglob(start)?;
@@ -808,6 +816,10 @@ impl Lexer {
                     self.pos += 1;
                 }
                 Some('$') => parts.push(self.scan_dollar()?),
+                Some('`') => {
+                    let start = self.pos;
+                    parts.push(self.scan_backtick(start, true)?);
+                }
                 Some(char) => {
                     push_literal(&mut parts, char);
                     self.pos += 1;
@@ -1080,6 +1092,67 @@ impl Lexer {
         Err(LexError::new("unclosed arithmetic expansion", start, true))
     }
 
+    /// Old-style command substitution: `` `cmd` ``.
+    ///
+    /// The result is the same `Part::CmdSub` the `$(...)` form produces, so
+    /// newline stripping, word splitting, globbing and the substitution status
+    /// are shared with `$()` instead of being reimplemented here.
+    ///
+    /// Two scan-time rules are bash's backquote rules and differ from `$(...)`:
+    ///
+    /// * One level of backslash is removed before `$`, `` ` `` and `\` *before*
+    ///   the inner command is parsed. That is why `` `echo \$HOME` `` still
+    ///   expands HOME while `$(echo \$HOME)` prints a literal `$HOME`, why
+    ///   `` `echo \\$HOME` `` yields the literal text `$HOME`, and why a nested
+    ///   substitution must be written `` \`cmd\` ``.
+    /// * A backslash protects the character after it from ending the
+    ///   substitution, and double quotes are tracked while looking for the
+    ///   closing backtick, so a backtick inside a `"..."` string inside the
+    ///   substitution does not close it. Single quotes are not tracked: bash
+    ///   ends the substitution at the first backtick that is not inside double
+    ///   quotes and not preceded by a backslash.
+    /// * A backtick appearing inside a double-quoted word is scanned with the
+    ///   double-quote escaping set, so `\"` loses its backslash as well:
+    ///   `` "`echo \"q\"`" `` runs `echo "q"` and prints `q`, while
+    ///   `` `echo \"q\"` `` keeps both quotes.
+    fn scan_backtick(&mut self, start: usize, double: bool) -> Result<Part, LexError> {
+        self.pos += 1;
+        let mut source = String::new();
+        let mut quoted = false;
+
+        while let Some(char) = self.current() {
+            match char {
+                '`' if !quoted => {
+                    self.pos += 1;
+                    return Ok(Part::CmdSub(source));
+                }
+                '\\' => {
+                    let Some(next) = self.peek() else { break };
+                    let escaped = matches!(next, '$' | '`' | '\\')
+                        || (double && next == '"');
+                    if escaped {
+                        source.push(next);
+                    } else {
+                        source.push('\\');
+                        source.push(next);
+                    }
+                    self.pos += 2;
+                }
+                '"' => {
+                    quoted = !quoted;
+                    source.push(char);
+                    self.pos += 1;
+                }
+                _ => {
+                    source.push(char);
+                    self.pos += 1;
+                }
+            }
+        }
+
+        Err(LexError::new("unclosed command substitution", start, true))
+    }
+
     fn scan_command_substitution(&mut self, start: usize) -> Result<Part, LexError> {
         let content_start = self.pos + 1;
         let mut index = content_start;
@@ -1310,6 +1383,10 @@ pub fn heredoc_word(text: &str) -> Result<Word, LexError> {
                 lexer.pos += 1;
             }
             '$' => parts.push(lexer.scan_dollar()?),
+            '`' => {
+                let start = lexer.pos;
+                parts.push(lexer.scan_backtick(start, false)?);
+            }
             '\\' => match lexer.peek() {
                 Some(next @ ('$' | '`' | '\\')) => {
                     parts.push(Part::Escaped(next.to_string()));
