@@ -64,6 +64,8 @@ pub const BUILTINS: &[&str] = &[
     "exec",
     "time",
     "help",
+    "test",
+    "[",
 ];
 
 /// Command-line flags and subcommands with their own `help TOPIC` entry.
@@ -336,6 +338,18 @@ fn builtin_text(id: &str) -> Option<&'static str> {
             "help [TOPIC]  print the help index, or the text for one topic.\n\
              Topics are builtin names, command-line flags and subcommands, and the\n\
              configuration topics of `sharky config explain`.\n"
+        }
+        "test" => {
+            "test EXPRESSION  evaluate a conditional expression.\n\
+             Exits 0 when true, 1 when false and 2 when the expression is malformed.\n\
+             Unary tests include -n, -z, -e, -f, -d, -L, -s, -r, -w, -x and -t;\n\
+             binary tests include =, !=, <, >, -eq, -ne, -lt, -le, -gt, -ge, -nt,\n\
+             -ot and -ef; combine with !, -a, -o and parentheses.\n"
+        }
+        "[" => {
+            "[ EXPRESSION ]  the same test builtin, requiring a closing `]'.\n\
+             Runs without looking up `test` in PATH, so a login profile can rely\n\
+             on it before PATH is set up.\n"
         }
         _ => return None,
     })

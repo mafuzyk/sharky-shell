@@ -20,6 +20,7 @@ use crate::arith;
 use crate::exec;
 use crate::history::History;
 use crate::test_expr;
+use crate::test_posix;
 use crate::z::Z;
 use crate::lexer::{self, ParamOp, Parameter, Part, TokenKind, Word};
 use crate::parser;
@@ -470,6 +471,7 @@ impl Shell {
             "alias", "abbr", "unabbr", "unalias", "history", "wait", "kill", "z", "zi",
             "reload", "trap", "read", "shift", "wake", "exec", "time", "shopt",
             "mapfile", "readarray", "command", "help", "echo", "printf",
+            "test", "[",
         ]
         .iter()
         .map(|word| word.to_string())
@@ -1769,6 +1771,8 @@ impl Shell {
             "fg" => Some(Flow::Status(self.fg(&words[1..]))),
             "bg" => Some(Flow::Status(self.bg(&words[1..]))),
             "source" | "." => Some(self.source(&words[1..])),
+            "test" => Some(Flow::Status(self.test_builtin(&words[1..], false))),
+            "[" => Some(Flow::Status(self.test_builtin(&words[1..], true))),
             _ => None,
         }
     }
@@ -2615,6 +2619,20 @@ impl Shell {
         match flow {
             Flow::Discard(code) => Flow::Status(code),
             other => other,
+        }
+    }
+
+    /// `test` and `[`: status 0 when true, 1 when false, 2 for a malformed
+    /// expression, which is reported with the invoking name.
+    fn test_builtin(&self, args: &[String], bracket: bool) -> i32 {
+        match test_posix::run(args, bracket) {
+            Ok(true) => 0,
+            Ok(false) => 1,
+            Err(message) => {
+                let name = if bracket { "[" } else { "test" };
+                eprintln!("sharky: {name}: {message}");
+                2
+            }
         }
     }
 
@@ -6891,6 +6909,8 @@ fn is_builtin_name(name: &str) -> bool {
             | "help"
             | "echo"
             | "printf"
+            | "test"
+            | "["
     )
 }
 

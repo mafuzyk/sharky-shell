@@ -16,6 +16,7 @@ mod repl;
 mod signal;
 mod term;
 mod test_expr;
+mod test_posix;
 mod z;
 mod shell;
 

@@ -221,12 +221,12 @@ The prompt, `-c` and script files share one grammar:
 | options | `set -e`, `set -u`, `set -x`, `set -o pipefail`, `set -H`/`+H`, `set -o vi`/`+o vi`, `set -- a b`, `shopt -s/-u globstar`, `shopt globstar` |
 | traps | `trap 'cleanup' EXIT`, `trap -l` |
 | read and shift | `read -r name`, `shift 2` |
-| conditionals | `if`, `elif`, `else`, `fi`, `[[ -f x && "$y" =~ ^f ]]` |
+| conditionals | `if`, `elif`, `else`, `fi`, `[[ -f x && "$y" =~ ^f ]]`, `[ -n "$x" ]`, `test "$a" = b` |
 | loops | `for x in a b; do ...; done`, `for ((i=0; i<3; i++))`, `while`, `until` |
 | case | `case $x in f*) ...;; *) ...;; esac`, `;;&`, `;&` |
 | functions | `greet() { printf 'hi %s\n' "$1"; }` |
 | groups and subshells | `{ a; b; }`, `( a; b )` |
-| builtins | `type`, `command`, `help`, `alias`, `unalias`, `abbr`, `unabbr`, `history`, `pwd`, `read`, `mapfile`, `readarray`, `shift`, `local`, `exec`, `time` |
+| builtins | `type`, `command`, `help`, `alias`, `unalias`, `abbr`, `unabbr`, `history`, `pwd`, `read`, `mapfile`, `readarray`, `shift`, `local`, `exec`, `time`, `test`, `[` |
 | history search | Ctrl-R, type to filter, Enter runs the match, Ctrl-G cancels |
 | paste and multiline | bracketed paste inserts text verbatim; Enter submits the whole buffer; Up/Down, Home/End work per line |
 | autosuggest | history suffix ghost text; Right/End accepts, `tide autosuggest off` disables |
