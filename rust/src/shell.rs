@@ -5224,8 +5224,11 @@ impl Shell {
             if attempt >= 8 {
                 return String::new();
             }
+            let Some(suffix) = random_hex(16) else {
+                return String::new();
+            };
             let path = std::env::temp_dir().join(format!(
-                "sharky-psub-{}-{attempt}",
+                "sharky-psub-{}-{suffix}",
                 std::process::id()
             ));
             attempt += 1;
@@ -5319,15 +5322,24 @@ impl Shell {
             {
                 let wake = wake_fifo(&path);
                 if ready >= 0 {
-                    let mut byte = [0u8; 1];
-                    // SAFETY: the descriptor is the read end of the FIFO
-                    // readiness pipe created for this substitution.
+                    // The readiness byte is only a barrier: once the child has
+                    // opened the FIFO it is safe to drop `wake` and unlink the
+                    // path. Bound the wait so a stopped child cannot hang the
+                    // shell indefinitely; drain the byte if it did arrive.
+                    if wait_fifo_ready(ready) {
+                        let mut byte = [0u8; 1];
+                        // SAFETY: `ready` is the read end of this substitution's
+                        // readiness pipe, and poll reported a byte available.
+                        unsafe {
+                            let _ = nix::libc::read(
+                                ready,
+                                byte.as_mut_ptr() as *mut _,
+                                byte.len(),
+                            );
+                        }
+                    }
+                    // SAFETY: closing a descriptor we own exactly once.
                     unsafe {
-                        let _ = nix::libc::read(
-                            ready,
-                            byte.as_mut_ptr() as *mut _,
-                            byte.len(),
-                        );
                         let _ = nix::libc::close(ready);
                     }
                 }
@@ -5416,7 +5428,9 @@ fn open_fifo_end(path: &Path, write: bool) -> Option<std::os::fd::OwnedFd> {
     } else {
         OFlag::O_RDONLY
     };
-    open(path, flags, Mode::empty()).ok()
+    // A symlink planted at the path between mkfifo and this open must be
+    // refused, not followed to an arbitrary file.
+    open(path, flags | OFlag::O_NOFOLLOW, Mode::empty()).ok()
 }
 
 fn wake_fifo(path: &str) -> Option<std::os::fd::OwnedFd> {
@@ -5430,7 +5444,14 @@ fn wake_fifo(path: &str) -> Option<std::os::fd::OwnedFd> {
     if !meta.file_type().is_fifo() {
         return None;
     }
-    open(Path::new(path), OFlag::O_RDWR | OFlag::O_NONBLOCK, Mode::empty()).ok()
+    // O_NOFOLLOW closes the metadata-to-open race: if the path turns into a
+    // symlink after the check above, refuse it instead of opening the target.
+    open(
+        Path::new(path),
+        OFlag::O_RDWR | OFlag::O_NONBLOCK | OFlag::O_NOFOLLOW,
+        Mode::empty(),
+    )
+    .ok()
 }
 
 fn signal_fifo_ready(fd: RawFd, status: u8) {
@@ -5441,6 +5462,41 @@ fn signal_fifo_ready(fd: RawFd, status: u8) {
         let _ = nix::libc::write(fd, &status as *const u8 as *const _, 1);
         let _ = nix::libc::signal(nix::libc::SIGPIPE, previous);
     }
+}
+
+/// Wait for the process-substitution child's readiness byte without ever
+/// blocking indefinitely. A child stopped before it signals ready (for example
+/// by Ctrl-Z during expansion) used to freeze the interactive shell forever on
+/// a bare `read`. `poll` with a finite budget keeps the wait responsive, retries
+/// on `EINTR`, and never busy-waits. A healthy child signals in microseconds,
+/// so the timeout only ever fires for a stopped or wedged child.
+fn wait_fifo_ready(fd: RawFd) -> bool {
+    use nix::errno::Errno;
+    use nix::libc::{POLLIN, poll, pollfd};
+
+    let mut descriptor = pollfd {
+        fd,
+        events: POLLIN,
+        revents: 0,
+    };
+    // 500 ms total in 50 ms slices: far longer than a local fork + fifo open +
+    // pipe write needs, but short enough that an interactive shell stays
+    // responsive if the child never arrives.
+    let mut remaining = 10;
+    while remaining > 0 {
+        let result = unsafe { poll(&mut descriptor, 1, 50) };
+        if result > 0 {
+            return descriptor.revents & POLLIN != 0;
+        }
+        if result < 0 {
+            if Errno::last() == Errno::EINTR {
+                continue;
+            }
+            return false;
+        }
+        remaining -= 1;
+    }
+    false
 }
 
 /// A name bash accepts as the target of an indirect expansion: an identifier
@@ -8079,25 +8135,37 @@ fn discard_null_bytes(mut bytes: Vec<u8>) -> Vec<u8> {
     bytes
 }
 
+/// `len` CSPRNG bytes from the system random device, rendered as lowercase hex.
+///
+/// Temporary names carry a random suffix so a local user cannot predict the
+/// next path and pre-create it (a denial of service) or plant a symlink at it.
+/// Returns `None` only when the random device is unavailable; callers then fail
+/// closed rather than falling back to a guessable name.
+fn random_hex(len: usize) -> Option<String> {
+    use std::io::Read;
+
+    let mut urandom = std::fs::File::open("/dev/urandom").ok()?;
+    let mut bytes = vec![0u8; len];
+    urandom.read_exact(&mut bytes).ok()?;
+    Some(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 fn temp_file(text: &str) -> Result<std::fs::File, String> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     // The descriptor is all a here-document needs, so the name is removed as
     // soon as it exists: from then on there is no path another process could
     // open, replace or follow. `create_new` refuses a path that already exists,
     // a symlink included, so a planted link can only cost a retry and never
-    // redirect the write.
-    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    // redirect the write. The suffix comes from the CSPRNG so the name cannot
+    // be predicted and occupied ahead of time.
     let mut created = None;
     let mut failure = String::new();
     for _ in 0..16 {
-        let name = format!(
-            "sharky-here-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        );
+        let suffix =
+            random_hex(16).ok_or_else(|| "heredoc: cannot read /dev/urandom".to_string())?;
+        let name = format!("sharky-here-{}-{suffix}", std::process::id());
         let path = std::env::temp_dir().join(name);
         match std::fs::OpenOptions::new()
             .read(true)
