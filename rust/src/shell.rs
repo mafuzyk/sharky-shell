@@ -4733,10 +4733,16 @@ impl Shell {
             Ok(ForkResult::Parent { child }) => {
                 drop(write);
                 let mut file = unsafe { std::fs::File::from_raw_fd(read.into_raw_fd()) };
-                let mut output = String::new();
-                let _ = file.read_to_string(&mut output);
+                let mut captured = Vec::new();
+                let _ = file.read_to_end(&mut captured);
                 let status = exec::wait(child);
                 self.substitution_status = Some(status);
+                // Reading into a String failed on the first byte that was not
+                // valid UTF-8 and left the whole capture empty. The capture is
+                // bytes now; decoding is lossy only because a word is a String
+                // here, and bash's rule for NUL bytes is applied first.
+                let mut output =
+                    String::from_utf8_lossy(&discard_null_bytes(captured)).into_owned();
                 while output.ends_with('\n') {
                     output.pop();
                 }
@@ -7210,6 +7216,17 @@ fn strip_trailing_ifs_space(chars: &[(char, bool)], is_ifs_space: &impl Fn(char)
         end -= 1;
     }
     chars[..end].iter().map(|(char, _)| *char).collect()
+}
+
+/// Bash drops every NUL byte from a command substitution result and warns once
+/// per substitution, because a NUL cannot survive in a C string either.
+fn discard_null_bytes(mut bytes: Vec<u8>) -> Vec<u8> {
+    if !bytes.contains(&0) {
+        return bytes;
+    }
+    eprintln!("sharky: warning: command substitution: ignored null byte in input");
+    bytes.retain(|byte| *byte != 0);
+    bytes
 }
 
 fn temp_file(text: &str) -> Result<std::fs::File, String> {
