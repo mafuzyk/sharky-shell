@@ -242,3 +242,196 @@ fn non_executable_file_still_exits_126() {
 }
 
 // ---------------------------------------------------------------------------
+// Hazard 5: `wait` on a stopped job returns bash's stop status and keeps the
+// job in the table, so fg/bg/kill can still reach it.
+//
+// bash in a pty: `sleep 100 & kill -STOP %1; wait %1; echo "st=$?"` prints
+// st=147 (128+SIGSTOP) and `jobs` still lists the stopped job. `wait` with no
+// arguments warns about the stopped job and returns 0.
+// ---------------------------------------------------------------------------
+
+struct Session {
+    child: Pid,
+    master: std::os::fd::OwnedFd,
+}
+
+impl Session {
+    fn start() -> Self {
+        let path = std::ffi::CString::new(env!("CARGO_BIN_EXE_sharky")).unwrap();
+        let argv = [std::ffi::CString::new("sharky").unwrap()];
+        let search = std::ffi::CString::new(format!(
+            "PATH={}",
+            common::tool_path().to_string_lossy()
+        ))
+        .expect("PATH must not contain NUL bytes");
+        let env = [
+            std::ffi::CString::new(format!("SHARKY_CONFIG={NO_CONFIG}")).unwrap(),
+            std::ffi::CString::new("HOME=/tmp").unwrap(),
+            search,
+            std::ffi::CString::new("TERM=xterm").unwrap(),
+        ];
+
+        // SAFETY: the child only execs; every string it needs exists before the fork.
+        match unsafe { forkpty(None::<&Winsize>, None::<&Termios>) }.expect("forkpty") {
+            ForkptyResult::Child => {
+                for fd in 3..256 {
+                    let _ = unsafe { libc::close(fd) };
+                }
+                let _ = execve(&path, &argv, &env);
+                unsafe { libc::_exit(1) }
+            }
+            ForkptyResult::Parent { child, master } => Session { child, master },
+        }
+    }
+
+    fn fd(&self) -> RawFd {
+        self.master.as_raw_fd()
+    }
+
+    fn send(&mut self, text: &str) {
+        let mut writer = std::fs::File::from(self.master.try_clone().expect("clone pty"));
+        writer.write_all(text.as_bytes()).expect("write pty");
+    }
+
+    fn read_until(&self, needle: &str, timeout: Duration) -> String {
+        let deadline = Instant::now() + timeout;
+        let mut collected = String::new();
+        let mut buffer = [0u8; 4096];
+
+        while Instant::now() < deadline {
+            if collected.contains(needle) {
+                return collected;
+            }
+            let mut pollfd = libc::pollfd {
+                fd: self.fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one valid pollfd and one valid read buffer.
+            let ready = unsafe { libc::poll(&mut pollfd, 1, 50) };
+            if ready > 0 {
+                let count = unsafe { libc::read(self.fd(), buffer.as_mut_ptr() as *mut _, buffer.len()) };
+                if count > 0 {
+                    collected.push_str(&String::from_utf8_lossy(&buffer[..count as usize]));
+                }
+            }
+        }
+        collected
+    }
+
+    fn wait_for_exit(self, timeout: Duration) -> i32 {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            match waitpid(self.child, Some(WaitPidFlag::WNOHANG)) {
+                Ok(WaitStatus::StillAlive) => std::thread::sleep(Duration::from_millis(20)),
+                Ok(WaitStatus::Exited(_, code)) => return code,
+                Ok(WaitStatus::Signaled(_, signal, _)) => return 128 + signal as i32,
+                Ok(_) => continue,
+                Err(_) => return -1,
+            }
+        }
+        -1
+    }
+
+    /// Sends one line and waits for `needle`, which must be a string the
+    /// command *prints* rather than one the terminal echoes back. The prompt
+    /// is then read so the next line is never typed ahead of the shell.
+    fn run(&mut self, line: &str, needle: &str) -> String {
+        self.send(&format!("{line}\r"));
+        let seen = self.read_until(needle, Duration::from_secs(15));
+        let _ = self.read_until("❯", Duration::from_secs(2));
+        seen
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        // Only processes this session started: the shell's own job children
+        // (they run in their own process group) and then the shell itself.
+        for child in job_children(self.child) {
+            let _ = nix::sys::signal::kill(child, nix::sys::signal::Signal::SIGKILL);
+        }
+        let _ = nix::sys::signal::killpg(self.child, nix::sys::signal::Signal::SIGKILL);
+        let _ = waitpid(self.child, Some(WaitPidFlag::WNOHANG));
+    }
+}
+
+/// Direct children of `parent`, read from /proc so a hung session can clean up
+/// the background job it started without touching any other process.
+fn job_children(parent: Pid) -> Vec<Pid> {
+    let path = format!("/proc/{}/task/{}/children", parent.as_raw(), parent.as_raw());
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .split_whitespace()
+        .filter_map(|field| field.parse::<i32>().ok())
+        .map(Pid::from_raw)
+        .collect()
+}
+
+fn start_session() -> Session {
+    let session = Session::start();
+    let prompt = session.read_until("❯", Duration::from_secs(10));
+    assert!(prompt.contains('❯'), "no prompt: {prompt:?}");
+    session
+}
+
+#[test]
+fn wait_on_a_stopped_job_reports_the_stop_status_and_keeps_the_job() {
+    let mut session = start_session();
+
+    let seen = session.run("sleep 100 &", "[1] ");
+    assert!(seen.contains("[1] "), "no job id: {seen:?}");
+    session.run("kill -STOP %1", "Stopped");
+
+    let seen = session.run("wait %1; echo \"st=$?\"", "st=147");
+    assert!(
+        seen.contains("st=147"),
+        "wait did not report 128+SIGSTOP: {seen:?}"
+    );
+
+    let seen = session.run("jobs", "Stopped");
+    assert!(
+        seen.contains("Stopped"),
+        "the stopped job left the table: {seen:?}"
+    );
+
+    // The job must still be reachable by job spec.
+    let seen = session.run("kill -KILL %1; echo \"killed=$?\"", "killed=0");
+    assert!(
+        seen.contains("killed=0"),
+        "kill %1 could not reach the stopped job: {seen:?}"
+    );
+
+    session.send("exit\r");
+    assert_eq!(session.wait_for_exit(Duration::from_secs(10)), 0);
+}
+
+#[test]
+fn wait_without_arguments_warns_about_a_stopped_job_and_returns_zero() {
+    let mut session = start_session();
+
+    session.run("sleep 100 &", "[1] ");
+    session.run("kill -STOP %1", "Stopped");
+
+    let seen = session.run("wait; echo \"st=$?\"", "st=0");
+    assert!(
+        seen.contains("st=0"),
+        "wait returned a failure status: {seen:?}"
+    );
+
+    let seen = session.run("jobs", "Stopped");
+    assert!(
+        seen.contains("Stopped"),
+        "the stopped job left the table: {seen:?}"
+    );
+
+    let seen = session.run("kill -KILL %1; echo \"killed=$?\"", "killed=0");
+    assert!(
+        seen.contains("killed=0"),
+        "kill %1 could not reach the stopped job: {seen:?}"
+    );
+    session.send("exit\r");
+    assert_eq!(session.wait_for_exit(Duration::from_secs(10)), 0);
+}
+
+// ---------------------------------------------------------------------------

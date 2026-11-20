@@ -104,7 +104,9 @@ struct Job {
     pgid: Pid,
     pids: Vec<Pid>,
     command: String,
-    stopped: bool,
+    /// The signal that stopped the job, kept so `wait` can report 128+signal
+    /// after the stop status itself has already been consumed.
+    stop: Option<i32>,
 }
 
 enum Flow {
@@ -611,7 +613,7 @@ impl Shell {
                     pgid: child,
                     pids: vec![child],
                     command: describe_and_or(and_or),
-                    stopped: false,
+                    stop: None,
                 });
             }
             Ok(ForkResult::Child) => {
@@ -2475,8 +2477,8 @@ impl Shell {
                 WaitStatus::Exited(_, _) | WaitStatus::Signaled(_, _, _) => {
                     finished.push(index);
                 }
-                WaitStatus::Stopped(_, _) if !job.stopped => {
-                    job.stopped = true;
+                WaitStatus::Stopped(_, signal) if job.stop.is_none() => {
+                    job.stop = Some(signal as i32);
                     println!("\n[{}]+  Stopped                 {}", job.id, job.command);
                 }
                 _ => {}
@@ -2502,15 +2504,15 @@ impl Shell {
     fn wait_job(&mut self, pids: &[Pid], pgid: Pid, command: String, pipefail: bool) -> i32 {
         let mut status = 0;
         let mut statuses = Vec::new();
-        let mut stopped = false;
+        let mut stopped = None;
 
         for pid in pids {
             let code = match exec::wait_traced(*pid) {
                 WaitStatus::Exited(_, code) => code,
                 WaitStatus::Signaled(_, signal, _) => 128 + signal as i32,
-                WaitStatus::Stopped(_, _) => {
-                    stopped = true;
-                    128 + Signal::SIGTSTP as i32
+                WaitStatus::Stopped(_, signal) => {
+                    stopped = Some(signal as i32);
+                    128 + signal as i32
                 }
                 _ => 0,
             };
@@ -2528,7 +2530,7 @@ impl Shell {
         // the point where bash runs a trap that arrived while it waited.
         self.dispatch_traps();
 
-        if stopped && self.interactive {
+        if stopped.is_some() && self.interactive {
             let id = self.next_job;
             self.next_job += 1;
             self.jobs.push(Job {
@@ -2536,7 +2538,7 @@ impl Shell {
                 pgid,
                 pids: pids.to_vec(),
                 command: command.clone(),
-                stopped: true,
+                stop: stopped,
             });
             println!("\n[{id}]+  Stopped                 {command}");
         }
@@ -2554,7 +2556,7 @@ impl Shell {
             } else {
                 ' '
             };
-            let state = if job.stopped { "Stopped" } else { "Running" };
+            let state = if job.stop.is_some() { "Stopped" } else { "Running" };
             println!("[{}]{}  {state:<24}{}", job.id, marker, job.command);
         }
         0
@@ -2579,7 +2581,7 @@ impl Shell {
         };
 
         let mut job = self.jobs.remove(index);
-        job.stopped = false;
+        job.stop = None;
         println!("{}", job.command);
 
         self.set_foreground(job.pgid);
@@ -2595,7 +2597,7 @@ impl Shell {
         };
 
         let job = &mut self.jobs[index];
-        job.stopped = false;
+        job.stop = None;
         let _ = killpg(job.pgid, Signal::SIGCONT);
         println!("[{}]+ {} &", job.id, job.command);
         0
@@ -2749,11 +2751,33 @@ impl Shell {
 
     fn wait_builtin(&mut self, args: &[String]) -> i32 {
         if args.is_empty() {
-            let jobs = std::mem::take(&mut self.jobs);
-            for job in jobs {
-                for pid in &job.pids {
-                    let _ = exec::wait(*pid);
+            let jobs: Vec<(usize, Vec<Pid>)> = self
+                .jobs
+                .iter()
+                .map(|job| (job.id, job.pids.clone()))
+                .collect();
+            for (id, pids) in jobs {
+                let known = self
+                    .jobs
+                    .iter()
+                    .find(|job| job.id == id)
+                    .and_then(|job| job.stop);
+                let claimed = match known {
+                    Some(signal) => Some(signal),
+                    None => self.wait_group(&pids).1,
+                };
+                if let Some(signal) = claimed {
+                    // Bash warns and keeps the job: it is not done yet, and
+                    // fg/bg/kill still have to reach it.
+                    if known.is_none()
+                        && let Some(job) = self.jobs.iter_mut().find(|job| job.id == id)
+                    {
+                        job.stop = Some(signal);
+                    }
+                    eprintln!("sharky: wait: warning: job {id}[{}] stopped", pids[0]);
+                    continue;
                 }
+                self.jobs.retain(|job| job.id != id);
             }
             for pid in std::mem::take(&mut self.substitution_pids) {
                 let _ = exec::wait(pid);
@@ -2767,12 +2791,9 @@ impl Shell {
                 eprintln!("sharky: wait: {target}: no such process");
                 return 127;
             };
-            let job = self.jobs.remove(index);
-            let mut status = 0;
-            for pid in &job.pids {
-                status = exec::wait(*pid);
-            }
-            return status;
+            let id = self.jobs[index].id;
+            let pids = self.jobs[index].pids.clone();
+            return self.finish_wait(id, &pids);
         }
 
         let Ok(pid) = target.parse::<i32>() else {
@@ -2784,15 +2805,56 @@ impl Shell {
             .iter()
             .position(|job| job.pids.iter().any(|child| child.as_raw() == pid))
         {
-            let job = self.jobs.remove(index);
-            let mut status = 0;
-            for child in &job.pids {
-                status = exec::wait(*child);
-            }
-            return status;
+            let id = self.jobs[index].id;
+            let pids = self.jobs[index].pids.clone();
+            return self.finish_wait(id, &pids);
         }
 
         exec::wait(Pid::from_raw(pid))
+    }
+
+    /// Waits for one job and reports a stop the way bash does: the job stays
+    /// in the table, because a stopped job is not finished and `fg`, `bg` or
+    /// `kill %job` must still be able to reach it.
+    fn finish_wait(&mut self, id: usize, pids: &[Pid]) -> i32 {
+        // The stop status of a job that already reported itself stopped was
+        // consumed by the notification path, so waiting again would block
+        // forever. The recorded signal answers for it.
+        if let Some(signal) = self
+            .jobs
+            .iter()
+            .find(|job| job.id == id)
+            .and_then(|job| job.stop)
+        {
+            eprintln!("sharky: warning: wait: job {id} is stopped");
+            return 128 + signal;
+        }
+
+        let (status, stopped) = self.wait_group(pids);
+        let Some(signal) = stopped else {
+            self.jobs.retain(|job| job.id != id);
+            return status;
+        };
+        if let Some(job) = self.jobs.iter_mut().find(|job| job.id == id) {
+            job.stop = Some(signal);
+        }
+        eprintln!("sharky: warning: wait: job {id} is stopped");
+        128 + signal
+    }
+
+    /// Waits for every process of a job, returning 128+signal and that signal
+    /// when one of them stops instead of exiting.
+    fn wait_group(&self, pids: &[Pid]) -> (i32, Option<i32>) {
+        let mut status = 0;
+        for pid in pids {
+            match exec::wait_stopped(*pid) {
+                WaitStatus::Exited(_, code) => status = code,
+                WaitStatus::Signaled(_, signal, _) => status = 128 + signal as i32,
+                WaitStatus::Stopped(_, signal) => return (128 + signal as i32, Some(signal as i32)),
+                _ => {}
+            }
+        }
+        (status, None)
     }
 
     fn kill_builtin(&mut self, args: &[String]) -> i32 {

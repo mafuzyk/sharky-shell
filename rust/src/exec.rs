@@ -111,6 +111,16 @@ pub fn wait(pid: Pid) -> i32 {
     }
 }
 
+/// Waits for a pid and reports a job-control stop instead of blocking on it.
+/// Plain `waitpid` never returns for a stopped child, so `wait %job` on a
+/// SIGSTOPed job would hang forever.
+pub fn wait_stopped(pid: Pid) -> WaitStatus {
+    waitpid(pid, Some(WaitPidFlag::WUNTRACED)).unwrap_or_else(|err| {
+        eprintln!("sharky: wait: {err}");
+        WaitStatus::Exited(pid, 1)
+    })
+}
+
 pub fn wait_traced(pid: Pid) -> WaitStatus {
     waitpid(pid, Some(WaitPidFlag::WUNTRACED))
         .unwrap_or(WaitStatus::Exited(pid, 1))
