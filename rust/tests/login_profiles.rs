@@ -214,6 +214,49 @@ fn login_runs_a_file_sourced_by_a_profile() {
 }
 
 #[test]
+fn login_runs_the_complete_statements_above_an_unclosed_construct() {
+    let home = scratch("unclosed");
+    // bash reads a profile statement by statement: the complete `echo A` runs,
+    // the still-open `if` never does, and the error names the EOF line.
+    std::fs::write(home.join(".profile"), "echo A\nif :; then\n echo B\n").unwrap();
+
+    let out = run(&home, &["-l", "-c", "echo done"]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "A\ndone\n", "{out:?}");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(&format!("{}/.profile:4:", home.display())),
+        "{stderr}"
+    );
+
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn login_reports_a_reserved_word_error_and_skips_the_rest_of_the_file() {
+    let home = scratch("reserved");
+    // bash: profile line 2 is `done`; `BEFORE=yes` has already run when the
+    // syntax error is reported, and `AFTER=no` never runs.
+    std::fs::write(home.join(".profile"), "BEFORE=yes\ndone\nAFTER=no\n").unwrap();
+
+    let out = run(
+        &home,
+        &["-l", "-c", r#"printf '%s|%s' "$BEFORE" "$AFTER""#],
+    );
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "yes|", "{out:?}");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(&format!("{}/.profile:2:", home.display())),
+        "{stderr}"
+    );
+
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
 fn login_reports_a_broken_profile_and_keeps_going() {
     let home = scratch("broken");
     std::fs::write(home.join(".profile"), "BEFORE=yes\n)\nAFTER=no\n").unwrap();

@@ -152,6 +152,76 @@ fn double_dash_is_skipped() {
     assert_eq!(stdout(&out), "hi\n", "{out:?}");
 }
 
+// bash parses `eval` one complete statement at a time and runs each statement
+// before reading the next. A syntax error therefore reports status 2 without
+// undoing anything above it: `eval $'echo one\nif'` prints `one` and the next
+// `$?` is 2, while `eval $'echo a; echo b; done'` (one physical line) prints
+// nothing because the whole line is discarded.
+#[test]
+fn complete_statements_above_a_syntax_error_have_already_run() {
+    let home = scratch("partial");
+    let out = sharky(&home, "eval 'echo one\nif'; echo \"s=$?\"");
+    assert_eq!(stdout(&out), "one\ns=2\n", "{out:?}");
+    assert_eq!(status(&out), 0);
+    assert!(stderr(&out).contains("eval"), "{out:?}");
+}
+
+#[test]
+fn state_from_statements_above_the_error_persists() {
+    let home = scratch("partial-state");
+    let out = sharky(
+        &home,
+        "eval 'X=5; export E=9; echo hi\nif'; echo \"s=$? X=$X E=$E\"; printenv E",
+    );
+    assert_eq!(stdout(&out), "hi\ns=2 X=5 E=9\n9\n", "{out:?}");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn an_error_discards_only_the_statement_that_contains_it() {
+    let home = scratch("partial-line");
+    // `echo a` is its own statement and runs; the second statement is never
+    // executed as a whole, so neither `echo b` nor the bogus `done` runs.
+    let out = sharky(&home, "eval 'echo a\necho b; done'; echo \"s=$?\"");
+    assert_eq!(stdout(&out), "a\ns=2\n", "{out:?}");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn statements_after_the_error_never_run() {
+    let home = scratch("partial-after");
+    let out = sharky(&home, "eval 'echo a\ndone\necho c'; echo \"s=$?\"");
+    assert_eq!(stdout(&out), "a\ns=2\n", "{out:?}");
+}
+
+#[test]
+fn an_unterminated_quote_still_runs_the_statements_above() {
+    let home = scratch("partial-quote");
+    // bash: `a`, then "unexpected EOF while looking for matching `\"`", status 2.
+    let out = sharky(&home, "eval 'echo a\necho \"unterminated'; echo \"s=$?\"");
+    assert_eq!(stdout(&out), "a\ns=2\n", "{out:?}");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn exit_in_an_earlier_statement_skips_the_later_error() {
+    let home = scratch("partial-exit");
+    let out = sharky(&home, "eval 'echo e; exit 4\nif'; echo unreached");
+    assert_eq!(stdout(&out), "e\n", "{out:?}");
+    assert_eq!(status(&out), 4);
+}
+
+#[test]
+fn well_formed_multiline_strings_still_run_completely() {
+    let home = scratch("multiline-ok");
+    let out = sharky(
+        &home,
+        "eval 'echo a\nif true; then\n echo b\nfi\necho c'; echo \"s=$?\"",
+    );
+    assert_eq!(stdout(&out), "a\nb\nc\ns=0\n", "{out:?}");
+    assert_eq!(status(&out), 0);
+}
+
 #[test]
 fn login_profile_shape_works() {
     let home = scratch("profile");

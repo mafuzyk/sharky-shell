@@ -1,5 +1,5 @@
 use std::ffi::CString;
-use std::os::unix::fs::PermissionsExt;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use nix::errno::Errno;
@@ -44,16 +44,27 @@ pub fn lookup_in(name: &str, path: &str) -> Option<PathBuf> {
 }
 
 fn search_path(name: &str, path: &str) -> Option<PathBuf> {
-    path.split(':')
-        .map(|dir| {
-            if dir.is_empty() {
-                Path::new(".")
-            } else {
-                Path::new(dir)
-            }
-        })
-        .map(|dir| dir.join(name))
-        .find(|candidate| is_executable(candidate))
+    let mut denied = None;
+
+    for dir in path.split(':') {
+        let dir = if dir.is_empty() {
+            Path::new(".")
+        } else {
+            Path::new(dir)
+        };
+        let candidate = dir.join(name);
+        if is_executable(&candidate) {
+            return Some(candidate);
+        }
+        // Bash remembers the first existing regular file it may not execute
+        // and reports 126 for it when no runnable candidate turns up; a
+        // directory or a dangling symlink is ignored entirely.
+        if denied.is_none() && candidate.is_file() {
+            denied = Some(candidate);
+        }
+    }
+
+    denied
 }
 
 fn path_of(shell: &Shell) -> &str {
@@ -85,7 +96,7 @@ fn exec_env(
     env: &[(String, String)],
     underscore: bool,
 ) -> Result<(), Errno> {
-    let argv: Vec<CString> = argv
+    let command_line: Vec<CString> = argv
         .iter()
         .map(|arg| CString::new(arg.as_bytes()).unwrap_or_default())
         .collect();
@@ -107,7 +118,57 @@ fn exec_env(
     let path_c = CString::new(path.as_os_str().as_encoded_bytes())
         .map_err(|_| Errno::EINVAL)?;
 
-    execve(&path_c, &argv, &envp).map(|_| ())
+    match execve(&path_c, &command_line, &envp) {
+        Ok(_) => Ok(()),
+        Err(Errno::ENOEXEC) => exec_as_script(path, argv, &envp),
+        Err(err) => Err(err),
+    }
+}
+
+/// Bash's ENOEXEC fallback: the kernel did not recognise the file, so the shell
+/// runs it as a script with its own interpreter, with `$0` set to the resolved
+/// path and the arguments forwarded. A binary file (see [`is_binary`]) is
+/// refused with 126 instead of being fed to a shell.
+fn exec_as_script(path: &Path, argv: &[String], envp: &[CString]) -> Result<(), Errno> {
+    if is_binary(path)? {
+        return Err(Errno::ENOEXEC);
+    }
+
+    let shell = std::env::current_exe().map_err(|_| Errno::ENOEXEC)?;
+    let shell_c = CString::new(shell.as_os_str().as_encoded_bytes()).map_err(|_| Errno::ENOEXEC)?;
+    let mut script_argv = Vec::with_capacity(argv.len() + 1);
+    script_argv.push(shell_c.clone());
+    script_argv.push(CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_| Errno::EINVAL)?);
+    for arg in argv.iter().skip(1) {
+        script_argv.push(CString::new(arg.as_bytes()).map_err(|_| Errno::EINVAL)?);
+    }
+
+    execve(&shell_c, &script_argv, envp).map(|_| ())
+}
+
+/// Bash's binary test for the ENOEXEC fallback: a NUL byte in the first block,
+/// or the ELF magic, marks a file the shell must not read as a script. Other
+/// control bytes are text to bash and reach the parser.
+fn is_binary(path: &Path) -> Result<bool, Errno> {
+    let mut file = std::fs::File::open(path).map_err(io_errno)?;
+    let mut sample = [0u8; 80];
+    let mut filled = 0;
+    while filled < sample.len() {
+        match file.read(&mut sample[filled..]) {
+            Ok(0) => break,
+            Ok(count) => filled += count,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(io_errno(err)),
+        }
+    }
+    let sample = &sample[..filled];
+    Ok(sample.contains(&0) || sample.starts_with(b"\x7fELF"))
+}
+
+fn io_errno(err: std::io::Error) -> Errno {
+    err.raw_os_error()
+        .map(Errno::from_raw)
+        .unwrap_or(Errno::EIO)
 }
 
 /// Bash reports a path that does not exist as 127 (command not found) and a
@@ -187,7 +248,24 @@ pub fn wait_scan(pid: Pid) -> Option<WaitStatus> {
 }
 
 fn is_executable(path: &Path) -> bool {
-    std::fs::metadata(path)
-        .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    // Bash asks the kernel with the effective IDs: a file with an execute bit
+    // only for another user class is not a candidate for this process.
+    let Ok(path) = CString::new(path.as_os_str().as_encoded_bytes()) else {
+        return false;
+    };
+    // SAFETY: `path` is a valid NUL-terminated path for the duration of the call.
+    unsafe {
+        nix::libc::faccessat(
+            nix::libc::AT_FDCWD,
+            path.as_ptr(),
+            nix::libc::X_OK,
+            nix::libc::AT_EACCESS,
+        ) == 0
+    }
 }

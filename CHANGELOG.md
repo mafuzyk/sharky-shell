@@ -113,6 +113,25 @@ rather than a separate preview track.
 
 ### Fixed
 
+- `eval` now executes each complete statement as it is parsed instead of
+  parsing the whole string first. A syntax error later in the string reports
+  status 2 without discarding what came before it: `eval $'echo one\nif'` prints
+  `one`, assignments and exports above the error persist, and a statement that
+  exits skips the rest. The parser reports a reserved word that cannot start a
+  command (`done`, `fi`, `then` and peers) as the syntax error bash raises
+  instead of running it as a command, and a lexical error still runs the
+  complete statements above the offending line.
+- A login startup file is read statement by statement too, so an unclosed
+  `if`/`while`/`{` no longer discards the valid commands above it; the parser
+  replays nothing and reports the file and line before the login continues.
+- Command lookup tests `PATH` candidates with `access(2)` and the effective
+  IDs, so a file whose execute bit belongs to another user class is skipped in
+  favour of a later runnable candidate, and a lone non-executable candidate now
+  reports 126 rather than 127, matching bash. A file the kernel rejects with
+  `ENOEXEC` runs as a shell script through the shell's own interpreter, with
+  `$0` set to the resolved path, the arguments forwarded and the script's exit
+  status preserved; a NUL byte or the `ELF` magic in the first block still
+  reports 126 and is never executed.
 - Only exported variables reach a child process, as in bash. `Shell::env` is
   still the single scalar store, so expansion, `declare -p` and `set` keep
   seeing every variable, but the environment handed to a spawn, `exec`, a

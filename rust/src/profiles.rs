@@ -71,21 +71,13 @@ fn source(shell: &mut Shell, path: &Path) {
         }
     };
 
-    match shell.eval(&source) {
-        Ok(_) => {}
+    match shell.eval_incremental(&source) {
+        Ok(()) => {}
         Err(err) => {
-            // bash parses a profile statement by statement, so everything
-            // above the offending line has already run. Replay that prefix so
-            // one unsupported construct does not discard the whole file; the
-            // replay repeats the same error, which is why it is ignored.
-            if err.line > 1 {
-                let lines: Vec<&str> = source.lines().collect();
-                if let Some(prefix) = lines.get(..err.line - 1) {
-                    let mut prefix = prefix.join("\n");
-                    prefix.push('\n');
-                    let _ = shell.eval(&prefix);
-                }
-            }
+            // bash reads a profile statement by statement, so the complete
+            // statements above the offending line have already run and are not
+            // replayed; the rest of the file is abandoned and the login
+            // sequence continues with the next file.
             let line = if err.line > 0 {
                 format!(":{}", err.line)
             } else {

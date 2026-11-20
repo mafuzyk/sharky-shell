@@ -508,6 +508,82 @@ impl Shell {
         self.eval_with(source, || {})
     }
 
+    /// Runs `source` one complete statement at a time, executing each as soon
+    /// as it is parsed.
+    ///
+    /// Bash drives `eval` and startup files this way, so a syntax error in a
+    /// later statement reports status 2 without discarding the statements above
+    /// it; they have already run. The returned flow is the last statement's, or
+    /// an early `return`, `break`, `continue`, `exit` or interrupt.
+    fn eval_units(&mut self, source: &str) -> Result<Flow, parser::ParseError> {
+        let mut units = match parser::Units::new(source) {
+            Ok(units) => units,
+            Err(err) => {
+                // A lexical error (an unterminated quote or here-document) ends
+                // tokenizing before any unit exists, but bash has already run
+                // the complete statements above the offending line.
+                self.replay_units_before_line(source, err.line);
+                return Err(err);
+            }
+        };
+
+        let mut ran = false;
+        while let Some(unit) = units.next_unit() {
+            let program = unit?;
+            ran = true;
+            match self.run_program(&program) {
+                Flow::Status(_) => {}
+                // An expansion error abandons the rest of the string, the way
+                // bash discards the rest of an input unit.
+                Flow::Discard(code) => return Ok(Flow::Status(code)),
+                other => return Ok(other),
+            }
+        }
+
+        if ran {
+            Ok(Flow::Status(self.last_status))
+        } else {
+            // An empty or comment-only string is a success, whatever `$?` was.
+            Ok(Flow::Status(0))
+        }
+    }
+
+    /// Executes the whole lines above `line`, used when a lexical error aborts
+    /// tokenizing before the parser can split the rest into units.
+    fn replay_units_before_line(&mut self, source: &str, line: usize) {
+        if line <= 1 {
+            return;
+        }
+        let mut seen = 1;
+        let mut end = None;
+        for (offset, char) in source.char_indices() {
+            if char == '\n' {
+                seen += 1;
+                if seen == line {
+                    end = Some(offset + 1);
+                    break;
+                }
+            }
+        }
+        let Some(end) = end else {
+            return;
+        };
+        let prefix = &source[..end];
+        if prefix.trim().is_empty() {
+            return;
+        }
+        // The prefix has its own statements and its own errors; only the
+        // original error is reported by the caller.
+        let _ = self.eval_units(prefix);
+    }
+
+    /// Executes a startup file statement by statement, the way bash reads a
+    /// profile: the complete statements above a syntax error have run by the
+    /// time it is reported.
+    pub fn eval_incremental(&mut self, source: &str) -> Result<(), parser::ParseError> {
+        self.eval_units(source).map(|_| ())
+    }
+
     pub fn eval_with(
         &mut self,
         source: &str,
@@ -3162,8 +3238,10 @@ impl Shell {
 
     /// `eval ARG ...`: join the arguments with spaces and run the result as
     /// shell code in the current shell, so assignments, functions and exports
-    /// persist. The status is the last command's; `return`, `break`, `continue`
-    /// and `exit` are handed back to the enclosing construct.
+    /// persist. Each complete statement runs as it is parsed, as in bash, so a
+    /// syntax error later in the string leaves what preceded it in effect and
+    /// reports status 2. The status is the last command's; `return`, `break`,
+    /// `continue` and `exit` are handed back to the enclosing construct.
     fn eval_builtin(&mut self, args: &[String]) -> Flow {
         let index = match skip_leading_options("eval", "eval: usage: eval [arg ...]", args) {
             Ok(index) => index,
@@ -3171,26 +3249,16 @@ impl Shell {
         };
 
         let source = args[index..].join(" ");
-        let program = match parser::parse(&source) {
-            Ok(program) => program,
+        match self.eval_units(&source) {
+            Ok(flow) => flow,
             Err(err) => {
                 if err.line > 0 {
                     eprintln!("sharky: eval: line {}: {}", err.line, err.message);
                 } else {
                     eprintln!("sharky: eval: {}", err.message);
                 }
-                return Flow::Status(2);
+                Flow::Status(2)
             }
-        };
-        // An empty or comment-only string is a success, whatever `$?` was.
-        if program.lines.is_empty() {
-            return Flow::Status(0);
-        }
-        match self.run_program(&program) {
-            // An expansion error abandons the evaluated string the way bash
-            // discards the rest of the input unit, leaving the caller running.
-            Flow::Discard(code) => Flow::Status(code),
-            other => other,
         }
     }
 

@@ -23,22 +23,48 @@ impl ParseError {
 }
 
 pub fn parse(source: &str) -> Result<Program, ParseError> {
-    let line_starts: Vec<usize> = source
-        .chars()
-        .enumerate()
-        .filter(|(_, char)| *char == '\n')
-        .map(|(index, _)| index + 1)
-        .collect();
-    let tokens = lexer::tokenize(source).map_err(|err| {
-        let line = line_starts.partition_point(|start| *start <= err.pos) + 1;
-        ParseError::new(format!("syntax error: {}", err.message), err.incomplete).with_line(line)
-    })?;
-    Parser {
-        tokens,
-        pos: 0,
-        line_starts,
+    Parser::from_source(source)?.parse()
+}
+
+/// Reads a source the way the interactive shell feeds its evaluator: one
+/// complete top-level command per call.
+///
+/// Bash parses and executes `eval` one input unit at a time, so a syntax error
+/// only prevents the unit that contains it from running: everything above has
+/// already happened. The unit boundary is a newline, matching bash, which
+/// discards a whole physical line (`echo a; done` runs neither `echo a` nor
+/// `done`) but keeps the lines before it.
+pub struct Units {
+    parser: Parser,
+    finished: bool,
+}
+
+impl Units {
+    pub fn new(source: &str) -> Result<Self, ParseError> {
+        Ok(Units {
+            parser: Parser::from_source(source)?,
+            finished: false,
+        })
     }
-    .parse()
+
+    /// The next complete statement, `None` at the end of the source, or the
+    /// syntax error that ends parsing.
+    pub fn next_unit(&mut self) -> Option<Result<Program, ParseError>> {
+        if self.finished {
+            return None;
+        }
+        match self.parser.parse_unit() {
+            Ok(None) => {
+                self.finished = true;
+                None
+            }
+            Ok(Some(list)) => Some(Ok(Program { lines: vec![list] })),
+            Err(err) => {
+                self.finished = true;
+                Some(Err(err))
+            }
+        }
+    }
 }
 
 struct Parser {
@@ -48,6 +74,24 @@ struct Parser {
 }
 
 impl Parser {
+    fn from_source(source: &str) -> Result<Self, ParseError> {
+        let line_starts: Vec<usize> = source
+            .chars()
+            .enumerate()
+            .filter(|(_, char)| *char == '\n')
+            .map(|(index, _)| index + 1)
+            .collect();
+        let tokens = lexer::tokenize(source).map_err(|err| {
+            let line = line_starts.partition_point(|start| *start <= err.pos) + 1;
+            ParseError::new(format!("syntax error: {}", err.message), err.incomplete).with_line(line)
+        })?;
+        Ok(Parser {
+            tokens,
+            pos: 0,
+            line_starts,
+        })
+    }
+
     fn kind(&self) -> TokenKind {
         self.tokens
             .get(self.pos)
@@ -121,6 +165,44 @@ impl Parser {
         }
 
         Ok(Program { lines })
+    }
+
+    /// Parses one complete top-level statement. Blank leading separators are
+    /// skipped, and the statement ends at the first top-level newline or at the
+    /// end of the source; a compound command consumes its own newlines first.
+    fn parse_unit(&mut self) -> Result<Option<List>, ParseError> {
+        self.skip_separators();
+        if matches!(self.kind(), TokenKind::Eof) {
+            return Ok(None);
+        }
+
+        let mut entries = Vec::new();
+        while !matches!(self.kind(), TokenKind::Eof) {
+            let and_or = self.parse_and_or()?;
+            let background = matches!(self.kind(), TokenKind::Amp);
+            if background {
+                self.advance();
+            }
+            entries.push(Entry { background, and_or });
+
+            if matches!(self.kind(), TokenKind::Newline) {
+                self.advance();
+                break;
+            }
+            if matches!(self.kind(), TokenKind::Semi) {
+                self.advance();
+                if matches!(self.kind(), TokenKind::Newline) {
+                    self.advance();
+                    break;
+                }
+                continue;
+            }
+            if !matches!(self.kind(), TokenKind::Eof) {
+                return Err(self.unexpected());
+            }
+        }
+
+        Ok(Some(List { entries }))
     }
 
     fn terminated(&self, keywords: &[&str], rbrace: bool) -> bool {
@@ -228,6 +310,19 @@ impl Parser {
     }
 
     fn parse_command(&mut self) -> Result<Command, ParseError> {
+        // A reserved word that cannot begin a command is bash's "syntax error
+        // near unexpected token": `done`/`fi`/`then` above their opening
+        // construct must not be run as commands.
+        if let TokenKind::Word(word) = self.kind()
+            && let Some(text) = literal(&word)
+            && matches!(
+                text.as_str(),
+                "then" | "elif" | "else" | "fi" | "do" | "done" | "esac" | "in"
+            )
+        {
+            return Err(self.error(format!("syntax error: unexpected '{text}'"), false));
+        }
+
         let command = if self.at_word("if") {
             self.parse_if()?
         } else if self.at_word("for") {
