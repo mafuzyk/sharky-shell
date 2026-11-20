@@ -285,9 +285,20 @@ fn builtin_text(id: &str) -> Option<&'static str> {
         }
         "readarray" => "readarray [-t] [ARRAY]  synonym for mapfile.\n",
         "history" => {
-            "history [ -c | merge ]  print the history entries.\n\
-             `-c` clears the history file; `merge` picks up entries other shells\n\
-             appended since this shell started.\n"
+            "history [search] [--max N] [--reverse] [--show-time] [--null]\n\
+             [--case-sensitive] [--contains|--prefix|--exact] [PATTERN]\n\
+             search the history entries.\n\
+             The default is a case-insensitive substring match, newest first;\n\
+             --prefix and --exact change the match mode and --case-sensitive makes\n\
+             case significant. --max N limits the result (`--max 0` prints\n\
+             nothing), --reverse prints oldest first, --null ends each entry with a\n\
+             NUL instead of a newline, and --show-time prints a UTC\n\
+             `# YYYY-MM-DD HH:MM:SS` line before every entry that has a timestamp\n\
+             (legacy entries have none and print none).\n\
+             `history delete --exact PATTERN` removes the exactly matching records\n\
+             (case-sensitively) and rewrites the file under the history lock; `-c`\n\
+             clears the file and `merge` picks up entries other shells appended\n\
+             since this shell started.\n"
         }
         "wake" => {
             "wake COMMAND  register a command to run at interactive startup.\n\

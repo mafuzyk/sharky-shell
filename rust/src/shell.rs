@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::io::Write;
 use std::os::fd::{AsFd, AsRawFd, IntoRawFd, RawFd};
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
@@ -19,6 +20,7 @@ use crate::ast::{
 use crate::arith;
 use crate::exec;
 use crate::history::History;
+use crate::history::Entry as HistoryEntry;
 use crate::test_expr;
 use crate::test_posix;
 use crate::z::Z;
@@ -3036,6 +3038,17 @@ impl Shell {
             .unwrap_or(&[])
     }
 
+    /// The full in-memory view: each command once, at its newest position, with
+    /// the newest timestamp known for it (absent for a legacy record) and where the
+    /// session picked it up. The `history` builtin searches this; the suggest path
+    /// reuses it. Order is oldest first, like [`Shell::history_entries`].
+    pub fn history_records(&self) -> Vec<HistoryEntry> {
+        self.history
+            .as_ref()
+            .map(History::records)
+            .unwrap_or_default()
+    }
+
     /// The entries `!!`, `!n` and `!prefix` may resolve: everything this session
     /// loaded at startup and ran itself, never a command a refresh picked up from
     /// another session. The editor and the `history` builtin use
@@ -3296,8 +3309,151 @@ impl Shell {
             };
         }
 
-        eprintln!("sharky: history: usage: history [-c | merge]");
-        1
+        match self.history_query(args) {
+            Ok(status) => status,
+            Err(message) => {
+                eprintln!("sharky: history: {message}");
+                2
+            }
+        }
+    }
+
+    /// `history [search] [--max N] [--reverse] [--show-time] [--null]
+    /// [--case-sensitive] [--contains|--prefix|--exact] [PATTERN]`, plus
+    /// `history delete --exact PATTERN`.
+    ///
+    /// The default is a case-insensitive substring match, newest first, because the
+    /// file's position order is the chronology this shell trusts; `when` is a hint
+    /// and never reorders a listing. `--max 0` prints nothing, matching fish.
+    fn history_query(&mut self, args: &[String]) -> Result<i32, String> {
+        let mut options = HistoryOptions::default();
+        let mut delete = false;
+        let mut subcommand_seen = false;
+        let mut pattern: Option<&str> = None;
+        let mut index = 0;
+        let mut options_done = false;
+        while index < args.len() {
+            let argument = args[index].as_str();
+            index += 1;
+            if !options_done && argument == "--" {
+                options_done = true;
+                continue;
+            }
+            if !options_done && argument.len() > 1 && argument.starts_with('-') {
+                match argument {
+                    "--max" => {
+                        let value = args.get(index).ok_or("--max needs a count")?;
+                        index += 1;
+                        options.max = Some(
+                            value
+                                .parse::<usize>()
+                                .map_err(|_| format!("--max: not a count: {value}"))?,
+                        );
+                    }
+                    "--reverse" => options.reverse = true,
+                    "--show-time" => options.show_time = true,
+                    "--null" => options.null = true,
+                    "--case-sensitive" => options.case_sensitive = true,
+                    "--contains" => options.mode = MatchMode::Contains,
+                    "--prefix" => options.mode = MatchMode::Prefix,
+                    "--exact" => options.mode = MatchMode::Exact,
+                    _ => return Err(format!("unknown option: {argument}")),
+                }
+                continue;
+            }
+            if !options_done && !subcommand_seen && pattern.is_none() {
+                match argument {
+                    "search" => {
+                        subcommand_seen = true;
+                        continue;
+                    }
+                    "delete" => {
+                        delete = true;
+                        subcommand_seen = true;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            if pattern.is_some() {
+                return Err("too many patterns; quote the one you mean".to_string());
+            }
+            pattern = Some(argument);
+        }
+        let pattern = pattern.unwrap_or("");
+
+        if delete {
+            // Only the exact form is supported, as fish's builtin does: a
+            // substring delete would need the interactive confirmation this
+            // surface does not have.
+            if options.mode != MatchMode::Exact {
+                return Err("delete needs --exact".to_string());
+            }
+            // Exact delete is always case-sensitive, as fish's builtin is; the flag
+            // is accepted so a script written for fish's requirement still works.
+            if options.max.is_some() || options.reverse || options.show_time || options.null {
+                return Err("delete accepts only --exact [--case-sensitive] PATTERN".to_string());
+            }
+            if pattern.is_empty() {
+                return Err("delete needs a pattern".to_string());
+            }
+            let Some(history) = self.history.as_mut() else {
+                return Ok(1);
+            };
+            return match history.try_delete_exact(pattern) {
+                Ok(_) => Ok(0),
+                Err(err) => Err(err),
+            };
+        }
+
+        // Case folds once per entry, not once per comparison.
+        let wanted = if options.case_sensitive {
+            pattern.to_string()
+        } else {
+            pattern.to_lowercase()
+        };
+        let mut matches: Vec<HistoryEntry> = self
+            .history_records()
+            .into_iter()
+            .rev()
+            .filter(|entry| {
+                let command = if options.case_sensitive {
+                    entry.command.clone()
+                } else {
+                    entry.command.to_lowercase()
+                };
+                match options.mode {
+                    MatchMode::Contains => command.contains(&wanted),
+                    MatchMode::Prefix => command.starts_with(&wanted),
+                    MatchMode::Exact => command == wanted,
+                }
+            })
+            .collect();
+        if let Some(max) = options.max {
+            matches.truncate(max);
+        }
+        if options.reverse {
+            matches.reverse();
+        }
+
+        let stdout = std::io::stdout();
+        let mut out = std::io::BufWriter::new(stdout.lock());
+        for entry in &matches {
+            if options.show_time {
+                // A legacy record never carried a timestamp, so it prints no line
+                // rather than a fabricated one.
+                if let Some(when) = entry.when {
+                    let _ = writeln!(out, "# {}", format_when(when));
+                }
+            }
+            if options.null {
+                let _ = write!(out, "{}\0", entry.command);
+            } else {
+                let _ = writeln!(out, "{}", entry.command);
+            }
+        }
+        let _ = out.flush();
+        Ok(0)
     }
 
     // Bash describes a name with the wording `command -V` uses, and the flags
@@ -8489,6 +8645,81 @@ fn gs_walk(
             out,
         );
     }
+}
+
+/// How `history` matches a pattern.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MatchMode {
+    Contains,
+    Prefix,
+    Exact,
+}
+
+/// Parsed `history` search options. Defaults are the documented surface: a
+/// case-insensitive substring match, newest first, newline separated.
+struct HistoryOptions {
+    max: Option<usize>,
+    reverse: bool,
+    show_time: bool,
+    null: bool,
+    case_sensitive: bool,
+    mode: MatchMode,
+}
+
+impl Default for HistoryOptions {
+    fn default() -> Self {
+        HistoryOptions {
+            max: None,
+            reverse: false,
+            show_time: false,
+            null: false,
+            case_sensitive: false,
+            mode: MatchMode::Contains,
+        }
+    }
+}
+
+/// The timestamp line `history --show-time` prints before one entry, in UTC.
+///
+/// The sandbox has no timezone database and a shell should not depend on one to
+/// print history, so the format is deliberately the unambiguous UTC form
+/// `# YYYY-MM-DD HH:MM:SS`. `when` is microseconds since the Unix epoch.
+fn format_when(micros: i64) -> String {
+    let seconds = micros.div_euclid(1_000_000);
+    let days = seconds.div_euclid(86_400);
+    let day_seconds = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}",
+        day_seconds / 3600,
+        (day_seconds % 3600) / 60,
+        day_seconds % 60
+    )
+}
+
+/// Howard Hinnant's `civil_from_days`: the proleptic Gregorian date for a day
+/// count since 1970-01-01. Pure arithmetic, so the conversion needs no crate.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let shifted = days + 719_468;
+    let era = if shifted >= 0 {
+        shifted
+    } else {
+        shifted - 146_096
+    } / 146_097;
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = if month_prime < 10 {
+        month_prime + 3
+    } else {
+        month_prime - 9
+    };
+    let year = if month <= 2 { year + 1 } else { year };
+    (year, month as u32, day as u32)
 }
 
 fn gs_entries(prefix: &str, trailing: bool, stats: &mut GlobStats, out: &mut BTreeSet<String>) {

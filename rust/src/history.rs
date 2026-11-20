@@ -203,6 +203,9 @@ pub struct History {
     /// Parallel to `entries`: where each one came from, which decides whether a
     /// history event may resolve it. Invariant: same length as `entries`.
     origins: Vec<Origin>,
+    /// Parallel to `entries`: the newest timestamp known for each command, absent
+    /// for a legacy record. Invariant: same length as `entries`.
+    whens: Vec<Option<i64>>,
     /// The newest hit count known for each entry, keyed by command. Kept beside the
     /// view so a repeat can carry the count forward without re-reading the file.
     hits: HashMap<String, u64>,
@@ -225,6 +228,21 @@ pub enum Origin {
     Loaded,
     Local,
     Refreshed,
+}
+
+/// One entry of the in-memory view: the command, the newest timestamp known for
+/// it and where the view picked it up. `when` is absent for a legacy record,
+/// which never carried a timestamp; a reader must not invent one.
+///
+/// The `history` builtin lists these and deletes by exact command, and the
+/// suggest path reuses the same list, so the shape stays command-centric rather
+/// than exposing the on-disk [`Record`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Entry {
+    pub command: String,
+    pub when: Option<i64>,
+    #[allow(dead_code)] // read by the suggest path, not by the `history` builtin
+    pub origin: Origin,
 }
 
 /// The state of the file the in-memory view was built from, as one `stat` reports
@@ -299,11 +317,12 @@ impl History {
         // shows up as a difference, and the next refresh reads again instead of
         // missing it. The other order could hide a record for good.
         let seen = Snapshot::current(&path);
-        let (entries, hits) = view(read_history(&path)?);
+        let (entries, hits, whens) = view(read_history(&path)?);
         let origins = vec![Origin::Loaded; entries.len()];
         let mut history = History {
             entries,
             origins,
+            whens,
             hits,
             path: Some(path),
             limit,
@@ -319,6 +338,7 @@ impl History {
         History {
             entries: Vec::new(),
             origins: Vec::new(),
+            whens: Vec::new(),
             hits: HashMap::new(),
             path: None,
             limit,
@@ -329,6 +349,22 @@ impl History {
 
     pub fn entries(&self) -> &[String] {
         &self.entries
+    }
+
+    /// The in-memory view with the metadata a search surface needs: each command
+    /// once, at its newest position, with that record's timestamp and origin.
+    /// Order is the same as [`History::entries`], oldest first.
+    pub fn records(&self) -> Vec<Entry> {
+        self.entries
+            .iter()
+            .zip(&self.whens)
+            .zip(&self.origins)
+            .map(|((command, when), origin)| Entry {
+                command: command.clone(),
+                when: *when,
+                origin: *origin,
+            })
+            .collect()
     }
 
     /// The commands a history event may resolve: what this session loaded at startup
@@ -414,19 +450,22 @@ impl History {
             Some(position) => {
                 self.entries.remove(position);
                 self.origins.remove(position);
+                self.whens.remove(position);
                 self.hits.get(command).copied().unwrap_or(1) + 1
             }
             None => 1,
         };
+        let when = now_micros();
         self.entries.push(command.to_string());
         self.origins.push(Origin::Local);
+        self.whens.push(Some(when));
         self.hits.insert(command.to_string(), hits);
         self.trim();
         if self.path.is_none() {
             return Ok(());
         }
         let mut record = Record::new(command);
-        record.when = Some(now_micros());
+        record.when = Some(when);
         record.cwd = cwd.map(str::to_string);
         record.paths = paths
             .iter()
@@ -491,14 +530,20 @@ impl History {
     /// have stays, at the end, where memory-only entries have always gone; an entry
     /// the disk dropped was never local to this session and goes away.
     fn reload(&mut self, path: &Path) -> Result<(), String> {
-        let (entries, mut hits) = view(read_history(path)?);
+        let (entries, mut hits, mut whens) = view(read_history(path)?);
         let old_entries = std::mem::take(&mut self.entries);
         let old_origins = std::mem::take(&mut self.origins);
+        let old_whens = std::mem::take(&mut self.whens);
         let old_hits = std::mem::take(&mut self.hits);
         let mut previous: HashMap<String, Origin> = old_entries
             .iter()
             .cloned()
             .zip(old_origins)
+            .collect();
+        let mut old_when: HashMap<String, Option<i64>> = old_entries
+            .iter()
+            .cloned()
+            .zip(old_whens)
             .collect();
         let mut merged = Vec::with_capacity(old_entries.len() + entries.len());
         let mut origins = Vec::with_capacity(merged.capacity());
@@ -518,10 +563,12 @@ impl History {
             let count = old_hits.get(&command).copied().unwrap_or(1);
             hits.insert(command.clone(), count);
             origins.push(Origin::Local);
+            whens.push(old_when.remove(&command).flatten());
             merged.push(command);
         }
         self.entries = merged;
         self.origins = origins;
+        self.whens = whens;
         self.hits = hits;
         self.trim();
         Ok(())
@@ -533,6 +580,7 @@ impl History {
         let Some(path) = self.path.clone() else {
             self.entries.clear();
             self.origins.clear();
+            self.whens.clear();
             return Ok(());
         };
         let dir = parent(&path);
@@ -558,8 +606,117 @@ impl History {
         drop(lock);
         self.entries.clear();
         self.origins.clear();
+        self.whens.clear();
         self.hits.clear();
         Ok(())
+    }
+
+    /// Removes every record whose command equals `pattern` exactly, then rewrites
+    /// the file under the same exclusive directory lock an append takes, so a
+    /// sibling appending meanwhile is either read or serialized after the rewrite,
+    /// never lost between them.
+    ///
+    /// Kept lines are copied byte for byte, so a legacy record stays byte identical,
+    /// a v2 record keeps its `hits` field and any field this reader ignores, and an
+    /// undecodable line is preserved rather than re-encoded. Only complete newline
+    /// records take part: the torn tail a crash left is not a record and the rewrite
+    /// ends with a newline, exactly the state the next append expects.
+    ///
+    /// Private mode deletes from memory only. The count is the number of removed
+    /// records on disk (several legacy duplicates can match); memory holds one entry
+    /// per command, so it drops at most one.
+    pub fn try_delete_exact(&mut self, pattern: &str) -> Result<usize, String> {
+        let Some(path) = self.path.clone() else {
+            self.purge_exact(pattern);
+            return Ok(0);
+        };
+        let dir = parent(&path);
+        prepare_dir(&dir)?;
+        let lock = lock_dir(&dir, FlockArg::LockExclusive)?;
+        reject_special(&path)?;
+        let bytes = read_bytes_unlocked(&path)?;
+        let Some(end) = bytes.iter().rposition(|byte| *byte == b'\n').map(|at| at + 1) else {
+            // No complete record on disk, so the file stays as it is; a matching
+            // memory entry (a failed append) is still what the user asked to delete.
+            drop(lock);
+            self.purge_exact(pattern);
+            return Ok(0);
+        };
+        let mut lines: Vec<&[u8]> = bytes[..end].split(|byte| *byte == b'\n').collect();
+        // The split ends with an empty slice after the final newline; that is a
+        // separator, not a blank record.
+        if lines.last().is_some_and(|line| line.is_empty()) {
+            lines.pop();
+        }
+        let mut kept: Vec<&[u8]> = Vec::with_capacity(lines.len());
+        let mut removed = 0usize;
+        for line in lines {
+            let matches = !line.is_empty()
+                && std::str::from_utf8(line)
+                    .ok()
+                    .is_some_and(|line| decode(line).command == pattern);
+            if matches {
+                removed += 1;
+            } else {
+                kept.push(line);
+            }
+        }
+        // No match leaves the file, its inode and its torn tail exactly as they were.
+        if removed == 0 {
+            drop(lock);
+            self.purge_exact(pattern);
+            return Ok(0);
+        }
+        let mut text = Vec::with_capacity(bytes.len());
+        for line in &kept {
+            text.extend_from_slice(line);
+            text.push(b'\n');
+        }
+
+        let mut name = path.file_name().unwrap_or_default().to_os_string();
+        name.push(".tmp");
+        let temp = path.with_file_name(name);
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        let mut file =
+            open_history(&temp, &mut options).map_err(|err| describe("create", &temp, err))?;
+        let written = file
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .and_then(|()| file.write_all(&text))
+            .and_then(|()| file.sync_data());
+        drop(file);
+        if let Err(err) = written {
+            let _ = std::fs::remove_file(&temp);
+            return Err(describe("write", &temp, err));
+        }
+        if let Err(err) = std::fs::rename(&temp, &path) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(describe("rename", &temp, err));
+        }
+        sync_dir(&dir);
+        drop(lock);
+        self.purge_exact(pattern);
+        self.seen = Snapshot::current(&path);
+        Ok(removed)
+    }
+
+    /// Drops exact matches from the in-memory view. The view holds one entry per
+    /// command, so this removes at most one and returns how many it removed.
+    fn purge_exact(&mut self, pattern: &str) -> usize {
+        let mut removed = 0;
+        let mut index = 0;
+        while index < self.entries.len() {
+            if self.entries[index] == pattern {
+                self.entries.remove(index);
+                self.origins.remove(index);
+                self.whens.remove(index);
+                self.hits.remove(pattern);
+                removed += 1;
+            } else {
+                index += 1;
+            }
+        }
+        removed
     }
 
     fn append(&mut self, record: &Record) -> Result<(), String> {
@@ -666,9 +823,11 @@ impl History {
 
     fn trim(&mut self) {
         debug_assert_eq!(self.entries.len(), self.origins.len());
+        debug_assert_eq!(self.entries.len(), self.whens.len());
         if self.entries.len() > self.limit {
             let excess = self.entries.len() - self.limit;
             self.origins.drain(..excess);
+            self.whens.drain(..excess);
             for command in self.entries.drain(..excess) {
                 self.hits.remove(&command);
             }
@@ -774,6 +933,12 @@ fn sync_dir(dir: &Path) {
 
 /// Caller already holds the directory lock.
 fn read_unlocked(path: &Path) -> Result<Vec<Record>, String> {
+    parse(path, &read_bytes_unlocked(path)?)
+}
+
+/// The raw file under the caller's lock; `NotFound` is an empty file. Bytes are
+/// kept as they are so a rewrite can copy undecodable lines verbatim.
+fn read_bytes_unlocked(path: &Path) -> Result<Vec<u8>, String> {
     let mut options = OpenOptions::new();
     options.read(true);
     let mut file = match open_history(path, &mut options) {
@@ -784,7 +949,7 @@ fn read_unlocked(path: &Path) -> Result<Vec<Record>, String> {
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)
         .map_err(|err| describe("read", path, err))?;
-    parse(path, &bytes)
+    Ok(bytes)
 }
 
 fn read_history(path: &Path) -> Result<Vec<Record>, String> {
@@ -803,18 +968,21 @@ fn read_history(path: &Path) -> Result<Vec<Record>, String> {
 /// of its newest record, carrying that record's hit count. Older duplicates on disk
 /// never reach the view, so a repeat has to be appended again to become the newest
 /// entry.
-fn view(records: Vec<Record>) -> (Vec<String>, HashMap<String, u64>) {
+fn view(records: Vec<Record>) -> (Vec<String>, HashMap<String, u64>, Vec<Option<i64>>) {
     let mut hits = HashMap::with_capacity(records.len());
     let mut entries = Vec::with_capacity(records.len());
+    let mut whens = Vec::with_capacity(records.len());
     for record in records.into_iter().rev() {
         if hits.contains_key(&record.command) {
             continue;
         }
         hits.insert(record.command.clone(), record.hits);
+        whens.push(record.when);
         entries.push(record.command);
     }
     entries.reverse();
-    (entries, hits)
+    whens.reverse();
+    (entries, hits, whens)
 }
 
 /// Only newline-terminated records count: a crash can leave a partial tail, which

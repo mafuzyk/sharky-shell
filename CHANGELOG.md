@@ -25,6 +25,13 @@ rather than a separate preview track.
 
 ### Added
 
+- The `history` builtin searches, filters and deletes: `history [search]
+  [--max N] [--reverse] [--show-time] [--null] [--case-sensitive]
+  [--contains|--prefix|--exact] [PATTERN]` lists matching entries newest first
+  with a case-insensitive substring match by default, `--max 0` prints nothing,
+  `--show-time` prefixes each timed entry with a UTC timestamp line and
+  `history delete --exact PATTERN` removes exact matches by rewriting the file
+  under the history lock, preserving legacy bytes and the v2 record fields.
 - The flake now exposes `devShells` with the Rust toolchain, `nixosModules` and
   `homeManagerModules` for declarative setup, and `passthru.shellPath` on the
   package so it can be used as `users.users.<name>.shell` on NixOS.
