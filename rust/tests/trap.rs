@@ -406,7 +406,12 @@ fn interactive_ctrl_c_runs_the_int_trap_and_keeps_the_shell_alive() {
     assert!(seen.contains('❯'), "no prompt in {seen:?}");
 
     let _ = writer.write_all(b"trap 'echo INT-$(printf TRAP)' INT\r");
-    let _ = read_until(fd, "printf TRAP", Duration::from_secs(5));
+    // Sync on the post-execution prompt: the trap builtin has run (and the INT
+    // action is installed) by the time the shell prints a fresh prompt. The
+    // echo of "printf TRAP" only proves the line was typed, not executed, and
+    // a Ctrl-C sent at that point can beat trap installation under load.
+    let seen = read_until(fd, "❯", Duration::from_secs(5));
+    assert!(seen.contains('❯'), "no prompt after the trap command: {seen:?}");
     let _ = writer.write_all(b"\x03");
     let seen = read_until(fd, "INT-TRAP", Duration::from_secs(5));
     assert!(seen.contains("INT-TRAP"), "INT trap did not run: {seen:?}");
