@@ -1958,6 +1958,9 @@ impl Shell {
         }
 
         let mut kind = None;
+        let mut print = false;
+        let mut only_indexed = false;
+        let mut only_assoc = false;
         let mut index = 0;
         while index < args.len() {
             let argument = args[index].as_str();
@@ -1971,18 +1974,51 @@ impl Shell {
             if option.is_empty() {
                 break;
             }
-            match option {
-                "a" => kind = Some(false),
-                "A" => kind = Some(true),
-                other => {
-                    eprintln!("sharky: {command}: -{other}: unsupported option");
-                    return 2;
+            for flag in option.chars() {
+                match flag {
+                    'a' => {
+                        kind = Some(false);
+                        only_indexed = true;
+                    }
+                    'A' => {
+                        kind = Some(true);
+                        only_assoc = true;
+                    }
+                    'p' => print = true,
+                    other => {
+                        eprintln!("sharky: {command}: -{other}: unsupported option");
+                        return 2;
+                    }
                 }
             }
             index += 1;
         }
 
-        if index >= args.len() {
+        let names = &args[index..];
+        if print {
+            if local {
+                return self.print_locals(names);
+            }
+            // The shell tracks no readonly attribute, so `readonly -p` prints
+            // nothing while `declare -p` still prints every name it is given.
+            if command == "readonly" {
+                return 0;
+            }
+            if names.is_empty() {
+                self.print_all_variables(only_indexed, only_assoc);
+                return 0;
+            }
+            let mut status = 0;
+            for name in names {
+                if !self.print_variable(name) {
+                    eprintln!("sharky: {command}: {name}: not found");
+                    status = 1;
+                }
+            }
+            return status;
+        }
+
+        if names.is_empty() {
             eprintln!("sharky: {command}: usage: {command} [-a|-A] name[=value] ...");
             return 2;
         }
@@ -2104,6 +2140,131 @@ impl Shell {
             }
         }
         status
+    }
+
+    // Prints `declare -p` output for one name. Bash prints a named variable
+    // whatever attribute flags were given, so filters only apply to the
+    // no-name form below.
+    fn print_variable(&self, name: &str) -> bool {
+        match self.declaration_line(name) {
+            Some(line) => {
+                println!("{line}");
+                true
+            }
+            None => false,
+        }
+    }
+
+    // The no-name form lists every variable the shell holds, sorted by name.
+    // -a and -A filter by array kind; bash prints nothing when both are given.
+    fn print_all_variables(&self, only_indexed: bool, only_assoc: bool) {
+        if only_indexed && only_assoc {
+            return;
+        }
+        let mut names: Vec<&String> = self.env.iter().map(|(name, _)| name).collect();
+        names.extend(self.arrays.keys());
+        names.extend(self.assoc.keys());
+        names.sort();
+        names.dedup();
+        for name in names {
+            let indexed = self.arrays.contains_key(name);
+            let assoc = self.assoc.contains_key(name);
+            if only_indexed && !indexed {
+                continue;
+            }
+            if only_assoc && !assoc {
+                continue;
+            }
+            if let Some(line) = self.declaration_line(name) {
+                println!("{line}");
+            }
+        }
+    }
+
+    // `local -p` prints only the variables declared in the current function
+    // frame. A name declared without a value still has a declaration to show.
+    fn print_locals(&self, names: &[String]) -> i32 {
+        let Some(frame) = self.local_scopes.last() else {
+            return 1;
+        };
+        if names.is_empty() {
+            let mut locals: Vec<&str> = frame.iter().map(|saved| saved.name.as_str()).collect();
+            locals.sort();
+            for name in locals {
+                self.print_local(name);
+            }
+            return 0;
+        }
+        let mut status = 0;
+        for name in names {
+            if frame.iter().any(|saved| saved.name == *name) {
+                self.print_local(name);
+            } else {
+                eprintln!("sharky: local: {name}: not found");
+                status = 1;
+            }
+        }
+        status
+    }
+
+    fn print_local(&self, name: &str) {
+        match self.declaration_line(name) {
+            Some(line) => println!("{line}"),
+            None => println!("declare -- {name}"),
+        }
+    }
+
+    fn declaration_line(&self, name: &str) -> Option<String> {
+        // Only the array kind is tracked, so `-a`/`-A` are the only flags that
+        // can appear; export and readonly have no stored attribute.
+        if let Some(map) = self.assoc.get(name) {
+            let mut line = format!("declare -A {name}");
+            if map.is_empty() {
+                line.push_str("=()");
+            } else {
+                let mut keys: Vec<&String> = map.keys().collect();
+                // Bash walks the 1024 bucket table in order, so equal buckets
+                // fall back to the key order this shell already keeps.
+                keys.sort_by_key(|key| bash_assoc_bucket(key));
+                line.push_str("=(");
+                for key in keys {
+                    line.push('[');
+                    line.push_str(&quote_assoc_key(key));
+                    line.push_str("]=");
+                    line.push_str(&quote_value(map.get(key).unwrap()));
+                    line.push(' ');
+                }
+                line.push(')');
+            }
+            return Some(line);
+        }
+        if let Some(values) = self.arrays.get(name) {
+            let mut line = format!("declare -a {name}");
+            // No "declared but unassigned" bit is kept, so a bare declaration
+            // prints =() where bash prints only the name.
+            if values.iter().all(Option::is_none) {
+                line.push_str("=()");
+            } else {
+                line.push_str("=(");
+                let mut first = true;
+                for (index, value) in values.iter().enumerate() {
+                    let Some(value) = value else {
+                        continue;
+                    };
+                    if !first {
+                        line.push(' ');
+                    }
+                    first = false;
+                    line.push_str(&format!("[{index}]="));
+                    line.push_str(&quote_value(value));
+                }
+                line.push(')');
+            }
+            return Some(line);
+        }
+        self.env.iter().find(|(key, _)| key == name).map(|(_, value)| {
+            format!("declare -- {name}={}", quote_value(value))
+        })
     }
 
     fn save_local(&mut self, name: &str) -> bool {
@@ -2663,39 +2824,138 @@ impl Shell {
         1
     }
 
-    // Bash describes a name with the wording `command -V` uses, whether or not
-    // a flag was given: plain `type` never prints the short form. A function is
-    // followed by its definition, in the layout `declare -f` uses.
+    // Bash describes a name with the wording `command -V` uses, and the flags
+    // pick a narrower view of the same precedence list. A function is followed
+    // by its definition, in the layout `declare -f` uses.
     fn type_builtin(&mut self, args: &[String]) -> i32 {
-        // A leading `--` ends option parsing; it is not itself a name. With no
-        // names left afterwards bash reports nothing and succeeds silently.
-        let args = match args.split_first() {
-            Some((first, rest)) if first == "--" => rest,
-            _ => args,
-        };
-        if args.is_empty() {
+        // Mirrors bash's describe_command flags: `short` starts set and each of
+        // -p/-t/-P clears it, so the last of them decides the output mode.
+        let mut all = false;
+        let mut type_word = false;
+        let mut path_only = false;
+        let mut force = false;
+        let mut short = true;
+        let mut index = 0;
+        while index < args.len() {
+            let argument = args[index].as_str();
+            if argument == "--" {
+                index += 1;
+                break;
+            }
+            let Some(option) = argument.strip_prefix('-') else {
+                break;
+            };
+            if option.is_empty() {
+                break;
+            }
+            for flag in option.chars() {
+                match flag {
+                    'a' => all = true,
+                    'p' => {
+                        path_only = true;
+                        type_word = false;
+                        short = false;
+                    }
+                    't' => {
+                        type_word = true;
+                        path_only = false;
+                        short = false;
+                    }
+                    'P' => {
+                        path_only = true;
+                        force = true;
+                        type_word = false;
+                        short = false;
+                    }
+                    other => {
+                        eprintln!("sharky: type: -{other}: invalid option");
+                        eprintln!("sharky: type: usage: type [-afptP] name [name ...]");
+                        return 2;
+                    }
+                }
+            }
+            index += 1;
+        }
+
+        let names = &args[index..];
+        if names.is_empty() {
             return 0;
         }
 
         let mut status = 0;
-        for name in args {
-            match self.resolve_name(name, None) {
-                Some(Resolution::Alias(value)) => println!("{name} is aliased to `{value}'"),
-                Some(Resolution::Function) => {
-                    println!("{name} is a function");
-                    if let Some(body) = self.funcs.get(name) {
-                        print!("{}", format_function_definition(name, body));
-                    }
-                }
-                Some(Resolution::Builtin) => println!("{name} is a shell builtin"),
-                Some(Resolution::External(path)) => println!("{name} is {}", path.display()),
-                None => {
+        for name in names {
+            let found = self.describe_name(name, all, type_word, path_only, force, short);
+            if !found {
+                if !path_only && !type_word {
                     eprintln!("sharky: type: {name}: not found");
-                    status = 1;
                 }
+                status = 1;
             }
         }
         status
+    }
+
+    // The same alias > function > builtin > file precedence as `command -v`,
+    // visited in order so `-a` can print every match. `force` skips the shell
+    // definitions entirely, as `-P` requires.
+    fn describe_name(
+        &mut self,
+        name: &str,
+        all: bool,
+        type_word: bool,
+        path_only: bool,
+        force: bool,
+        short: bool,
+    ) -> bool {
+        let mut found = false;
+        if !force {
+            if let Some(value) = self.aliases.get(name) {
+                let value = value.clone();
+                if type_word {
+                    println!("alias");
+                } else if short {
+                    println!("{name} is aliased to `{value}'");
+                }
+                found = true;
+                if !all {
+                    return true;
+                }
+            }
+            if let Some(body) = self.funcs.get(name) {
+                if type_word {
+                    println!("function");
+                } else if short {
+                    println!("{name} is a function");
+                    print!("{}", format_function_definition(name, body));
+                }
+                found = true;
+                if !all {
+                    return true;
+                }
+            }
+            if is_builtin_name(name) {
+                if type_word {
+                    println!("builtin");
+                } else if short {
+                    println!("{name} is a shell builtin");
+                }
+                found = true;
+                if !all {
+                    return true;
+                }
+            }
+        }
+        if let Some(path) = exec::lookup(name, self) {
+            if type_word {
+                println!("file");
+            } else if short {
+                println!("{name} is {}", path.display());
+            } else if path_only {
+                println!("{}", path.display());
+            }
+            found = true;
+        }
+        found
     }
 
     // The one precedence rule: an alias shadows a function, which shadows a
@@ -6413,6 +6673,115 @@ fn is_valid_array_name(name: &str) -> bool {
     };
     (first.is_ascii_alphabetic() || first == '_')
         && chars.all(|char| char.is_ascii_alphanumeric() || char == '_')
+}
+
+// Bash's hash_string (FNV-1, multiply then xor) masked to the 1024 buckets an
+// associative array is created with. Iterating buckets reproduces the key
+// order of bash 5.3's `declare -p`; keys that land in the same bucket keep
+// this shell's own order because insertion order is not stored.
+fn bash_assoc_bucket(key: &str) -> u32 {
+    let mut hash: u32 = 2_166_136_261;
+    for byte in key.bytes() {
+        hash = hash.wrapping_mul(16_777_619) ^ u32::from(byte);
+    }
+    hash & 1023
+}
+
+fn quote_value(value: &str) -> String {
+    if value.chars().any(char::is_control) {
+        ansi_quote(value)
+    } else {
+        double_quote(value)
+    }
+}
+
+fn ansi_quote(value: &str) -> String {
+    let mut quoted = String::from("$'");
+    for char in value.chars() {
+        match char {
+            '\x1b' => quoted.push_str("\\E"),
+            '\x07' => quoted.push_str("\\a"),
+            '\x0b' => quoted.push_str("\\v"),
+            '\x08' => quoted.push_str("\\b"),
+            '\x0c' => quoted.push_str("\\f"),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            '\t' => quoted.push_str("\\t"),
+            '\\' => quoted.push_str("\\\\"),
+            '\'' => quoted.push_str("\\'"),
+            char if char.is_control() => {
+                for byte in char.to_string().bytes() {
+                    quoted.push_str(&format!("\\{byte:03o}"));
+                }
+            }
+            char => quoted.push(char),
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
+fn double_quote(value: &str) -> String {
+    let mut quoted = String::from("\"");
+    for char in value.chars() {
+        if matches!(char, '\\' | '`' | '$' | '"') {
+            quoted.push('\\');
+        }
+        quoted.push(char);
+    }
+    quoted.push('"');
+    quoted
+}
+
+fn quote_assoc_key(key: &str) -> String {
+    if key.chars().any(char::is_control) {
+        ansi_quote(key)
+    } else if key == "@" || key == "*" || contains_shell_metas(key) {
+        double_quote(key)
+    } else {
+        key.to_string()
+    }
+}
+
+fn contains_shell_metas(value: &str) -> bool {
+    let mut previous = None;
+    for char in value.chars() {
+        if matches!(
+            char,
+            ' ' | '\t'
+                | '\n'
+                | '\''
+                | '"'
+                | '\\'
+                | '|'
+                | '&'
+                | ';'
+                | '('
+                | ')'
+                | '<'
+                | '>'
+                | '!'
+                | '{'
+                | '}'
+                | '*'
+                | '['
+                | '?'
+                | ']'
+                | '^'
+                | '$'
+                | '`'
+        ) {
+            return true;
+        }
+        if char == '~' && (previous.is_none() || matches!(previous, Some('=') | Some(':'))) {
+            return true;
+        }
+        if char == '#' && previous.is_none() {
+            return true;
+        }
+        previous = Some(char);
+    }
+    false
 }
 
 fn normalize_signal(name: &str) -> Option<&'static str> {

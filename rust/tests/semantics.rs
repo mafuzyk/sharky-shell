@@ -2819,3 +2819,266 @@ fn printf_writes_to_a_variable_with_dash_v() {
     assert_eq!(stdout(&out), "");
     assert_eq!(status(&out), 2);
 }
+
+
+// `type` flags mirror bash's describe_command: alias, function, builtin, file
+// in that order, with -t printing one word, -p the file path only, and -P
+// forcing the PATH search. A missing name is silent for -p/-P/-t and changes
+// the status only.
+
+fn sharky_with_env(script: &str, env: &[(&str, &str)]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_sharky"));
+    command.args(["--no-config", "-c", script]).env_clear();
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command.output().expect("failed to run sharky")
+}
+
+#[test]
+fn type_dash_t_prints_one_word_for_every_kind() {
+    let out = sharky(
+        "probe() { :; }; alias hi='echo hello'; type -t cd; type -t probe; type -t hi; type -t ls; type -t nope; echo \"st=$?\"",
+    );
+    assert_eq!(stdout(&out), "builtin\nfunction\nalias\nfile\nst=1\n");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn type_dash_p_prints_only_external_paths() {
+    let out = sharky(
+        "probe() { :; }; alias hi='echo hello'; type -p cd; echo \"cd=$?\"; type -p probe; echo \"probe=$?\"; type -p hi; echo \"hi=$?\"; type -p nope; echo \"nope=$?\"; type -p ls; echo \"ls=$?\"",
+    );
+    let text = stdout(&out);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(&lines[..4], &["cd=0", "probe=0", "hi=0", "nope=1"]);
+    assert!(lines[4].starts_with('/') && lines[4].ends_with("/ls"), "{text:?}");
+    assert_eq!(lines[5], "ls=0");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn type_dash_upper_p_searches_path_even_for_builtins_and_functions() {
+    let out = sharky(
+        "probe() { :; }; type -P cd; echo \"cd=$?\"; type -P probe; echo \"probe=$?\"; type -P true; echo \"true=$?\"",
+    );
+    let text = stdout(&out);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], "cd=1");
+    assert_eq!(lines[1], "probe=1");
+    assert!(lines[2].starts_with('/') && lines[2].ends_with("/true"), "{text:?}");
+    assert_eq!(lines[3], "true=0");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn type_dash_a_lists_every_match_in_precedence_order() {
+    let out = sharky("cd() { :; }; type -a cd; echo \"st=$?\"");
+    assert_eq!(
+        stdout(&out),
+        "cd is a function\ncd () \n{ \n    :\n}\ncd is a shell builtin\nst=0\n"
+    );
+
+    let out = sharky("type -a true; echo \"st=$?\"");
+    let text = stdout(&out);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], "true is a shell builtin", "{text:?}");
+    assert!(lines[1].starts_with("true is /") && lines[1].ends_with("/true"), "{text:?}");
+    assert_eq!(lines[2], "st=0");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn type_dash_a_reports_missing_names() {
+    let out = sharky("type -a nope; echo \"st=$?\"");
+    assert_eq!(stdout(&out), "st=1\n");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("type: nope: not found"),
+        "{:?}",
+        out.stderr
+    );
+}
+
+#[test]
+fn type_flag_combinations_follow_bash_precedence() {
+    let out = sharky(
+        "type -tp true; echo \"a=$?\"; type -pt true; echo \"b=$?\"; type -aP true; echo \"c=$?\"; type -Pt true; echo \"d=$?\"; type -at true; echo \"e=$?\"",
+    );
+    let text = stdout(&out);
+    let lines: Vec<&str> = text.lines().collect();
+    // -tp ends in path-only mode, so a builtin prints nothing but succeeds.
+    assert_eq!(lines[0], "a=0", "{text:?}");
+    // -pt ends in type mode.
+    assert_eq!(lines[1], "builtin", "{text:?}");
+    assert_eq!(lines[2], "b=0", "{text:?}");
+    // -aP forces the PATH search and prints only the file.
+    assert!(lines[3].starts_with('/') && lines[3].ends_with("/true"), "{text:?}");
+    assert_eq!(lines[4], "c=0", "{text:?}");
+    // -Pt keeps the type word while forcing the PATH search.
+    assert_eq!(lines[5], "file", "{text:?}");
+    assert_eq!(lines[6], "d=0", "{text:?}");
+    // -at keeps the type word and lists every match.
+    assert_eq!(lines[7], "builtin", "{text:?}");
+    assert_eq!(lines[8], "file", "{text:?}");
+    assert_eq!(lines[9], "e=0", "{text:?}");
+}
+
+#[test]
+fn type_rejects_an_invalid_option() {
+    let out = sharky("type -z cd; echo \"st=$?\"");
+    assert_eq!(stdout(&out), "st=2\n");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("type: -z: invalid option"), "{stderr:?}");
+    assert!(stderr.contains("usage: type"), "{stderr:?}");
+}
+
+// `declare -p` prints reusable declarations. Values use double quotes with
+// \\, `, $ and " escaped, switching to $'...' when a character is not
+// printable. Array elements print as [index]=value and associative keys in
+// bash 5.3's bucket order.
+
+#[test]
+fn declare_dash_p_prints_scalars_with_bash_quoting() {
+    let out = sharky(
+        r#"x=hi; v='a"b'; w='a\b'; n=$'a\nb'; t=$'a\tb'; e=''; declare -p x v w n t e"#,
+    );
+    assert_eq!(
+        stdout(&out),
+        "declare -- x=\"hi\"\n\
+         declare -- v=\"a\\\"b\"\n\
+         declare -- w=\"a\\\\b\"\n\
+         declare -- n=$'a\\nb'\n\
+         declare -- t=$'a\\tb'\n\
+         declare -- e=\"\"\n"
+    );
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn declare_dash_p_prints_sparse_indexed_arrays() {
+    let out = sharky(r#"a=(a "b c" ""); a[5]=f; a[2]="d e"; e=(); declare -p a e"#);
+    assert_eq!(
+        stdout(&out),
+        "declare -a a=([0]=\"a\" [1]=\"b c\" [2]=\"d e\" [5]=\"f\")\ndeclare -a e=()\n"
+    );
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn declare_dash_p_orders_associative_keys_like_bash() {
+    let out = sharky("declare -A z=([b]=2 [a]=1 [C]=3 [10]=ten [2]=two); declare -p z");
+    assert_eq!(
+        stdout(&out),
+        "declare -A z=([2]=\"two\" [C]=\"3\" [b]=\"2\" [a]=\"1\" [10]=\"ten\" )\n"
+    );
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn declare_dash_p_prints_empty_associative_arrays() {
+    let out = sharky("declare -A e=(); declare -p e");
+    assert_eq!(stdout(&out), "declare -A e=()\n");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn declare_dash_p_quotes_associative_keys_that_need_it() {
+    let out = sharky(r#"declare -A m; m['a b']=1; m[plain]=two; m['$k']='x y'; declare -p m"#);
+    assert_eq!(
+        stdout(&out),
+        "declare -A m=([\"a b\"]=\"1\" [\"\\$k\"]=\"x y\" [plain]=\"two\" )\n"
+    );
+}
+
+#[test]
+fn declare_dash_p_reports_a_missing_name_and_keeps_going() {
+    let out = sharky("x=1; declare -p x nope");
+    assert_eq!(stdout(&out), "declare -- x=\"1\"\n");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("declare: nope: not found"),
+        "{:?}",
+        out.stderr
+    );
+    assert_eq!(status(&out), 1);
+}
+
+#[test]
+fn declare_dash_p_without_names_prints_every_variable_sorted() {
+    let out = sharky_with_env(
+        "zz=1; AA=2; m=3; declare -a arr=(x); declare -A map=([k]=v); declare -p",
+        &[("PATH", "/usr/bin:/bin")],
+    );
+    let text = stdout(&out);
+    let names: Vec<&str> = text
+        .lines()
+        .map(|line| {
+            let rest = line.strip_prefix("declare ").expect("declare prefix");
+            let (_, name) = rest.split_once(' ').expect("flags and name");
+            name.split('=').next().unwrap()
+        })
+        .collect();
+    assert_eq!(names, ["AA", "PATH", "PWD", "arr", "m", "map", "zz"]);
+    assert!(text.lines().any(|line| line.starts_with("declare -a arr=")), "{text:?}");
+    assert!(text.lines().any(|line| line.starts_with("declare -A map=")), "{text:?}");
+    assert!(text.lines().any(|line| line.starts_with("declare -- zz=")), "{text:?}");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn declare_dash_p_filters_by_array_kind_only_when_no_names_are_given() {
+    let out = sharky_with_env(
+        "i=(x); declare -A a=([k]=v); s=1; declare -p -a",
+        &[("PATH", "/usr/bin:/bin")],
+    );
+    assert_eq!(stdout(&out), "declare -a i=([0]=\"x\")\n");
+
+    let out = sharky_with_env(
+        "i=(x); declare -A a=([k]=v); s=1; declare -p -A",
+        &[("PATH", "/usr/bin:/bin")],
+    );
+    assert_eq!(stdout(&out), "declare -A a=([k]=\"v\" )\n");
+
+    let out = sharky_with_env(
+        "i=(x); declare -A a=([k]=v); declare -p -aA",
+        &[("PATH", "/usr/bin:/bin")],
+    );
+    assert_eq!(stdout(&out), "");
+}
+
+#[test]
+fn declare_dash_p_ignores_attribute_filters_for_named_output() {
+    let out = sharky("x=1; declare -p -a x");
+    assert_eq!(stdout(&out), "declare -- x=\"1\"\n");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn local_dash_p_prints_only_the_current_frame_sorted() {
+    let out = sharky("f() { local l1=loc; local -a la=(p q); local -p; }; f");
+    assert_eq!(
+        stdout(&out),
+        "declare -- l1=\"loc\"\ndeclare -a la=([0]=\"p\" [1]=\"q\")\n"
+    );
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn local_dash_p_with_a_name_requires_a_local() {
+    let out = sharky("f() { local l1=loc; local -p l1; echo \"st=$?\"; local -p other; echo \"st=$?\"; }; f");
+    assert_eq!(stdout(&out), "declare -- l1=\"loc\"\nst=0\nst=1\n");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("local: other: not found"),
+        "{:?}",
+        out.stderr
+    );
+}
+
+#[test]
+fn typeset_dash_p_matches_declare_and_readonly_dash_p_tracks_nothing() {
+    let out = sharky("x=1; typeset -p x; readonly -p; readonly -p x");
+    assert_eq!(stdout(&out), "declare -- x=\"1\"\n");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    assert_eq!(status(&out), 0);
+}
