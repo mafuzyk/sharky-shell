@@ -4,8 +4,10 @@
 //! under an exclusive `flock` on its parent directory, so two shells never clobber
 //! each other. The `limit` the caller passes bounds memory only; the file is shared
 //! between sessions that may pass different limits, so nothing on disk is pruned to
-//! it. Compaction every `VACUUM_EVERY` appends only collapses duplicate records,
-//! keeping the newest occurrence of each command with its own bytes.
+//! it. Compaction every `VACUUM_EVERY` appends collapses duplicate records, keeping
+//! the newest occurrence of each command with its own bytes, and bounds the file at
+//! [`HISTORY_CAP`] records by file position. The trigger counter starts at a random
+//! offset so even a short-lived session eventually compacts.
 //!
 //! The in-memory view holds one copy of each command at the position of its newest
 //! record, so a repeat of an older command has to be appended again to become the
@@ -34,7 +36,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use nix::fcntl::{Flock, FlockArg};
 
 /// Appends between compactions; without one the file grows by one line per command.
-const VACUUM_EVERY: usize = 25;
+pub const VACUUM_EVERY: usize = 25;
+
+/// Hard bound on records in the shared history file, independent of any session's
+/// in-memory `tide history` limit. A session with a small limit must not truncate a
+/// file other sessions share; this cap is the only disk bound and applies by file
+/// position, never by a record's declared timestamp.
+pub const HISTORY_CAP: usize = 262_144;
 
 const PRIVATE_MERGE: &str = "can't merge history in private mode";
 
@@ -222,7 +230,7 @@ impl History {
             hits,
             path: Some(path),
             limit,
-            appends: 0,
+            appends: initial_vacuum_offset(),
         };
         history.trim();
         Ok(history)
@@ -235,12 +243,40 @@ impl History {
             hits: HashMap::new(),
             path: None,
             limit,
-            appends: 0,
+            appends: initial_vacuum_offset(),
         }
     }
 
     pub fn entries(&self) -> &[String] {
         &self.entries
+    }
+
+    /// Overrides the vacuum trigger counter. Production starts it at a random
+    /// offset in `0..VACUUM_EVERY`; tests pin it so the first compaction is
+    /// predictable.
+    #[allow(dead_code)] // test hook for deterministic compaction timing
+    pub fn set_vacuum_offset(&mut self, offset: usize) {
+        self.appends = offset % VACUUM_EVERY;
+    }
+
+    /// Compacts the file now with an explicit cap. Production uses [`HISTORY_CAP`];
+    /// tests pass a small cap to exercise trimming without writing a huge file.
+    /// Acquires the same exclusive directory lock an append would, so callers must
+    /// not already hold it.
+    #[allow(dead_code)] // test hook for exercising the cap without a huge file
+    pub fn vacuum_with_cap(&self, cap: usize) {
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        let dir = parent(&path);
+        if !dir.exists() {
+            return;
+        }
+        let Ok(lock) = lock_dir(&dir, FlockArg::LockExclusive) else {
+            return;
+        };
+        self.vacuum(&dir, &path, cap);
+        drop(lock);
     }
 
     /// Appends to memory, then to the file unless private. The memory entry stays
@@ -378,7 +414,7 @@ impl History {
         }
         self.appends += 1;
         if self.appends % VACUUM_EVERY == 0 {
-            self.vacuum(&dir, &path);
+            self.vacuum(&dir, &path, HISTORY_CAP);
         }
         drop(lock);
         Ok(())
@@ -387,8 +423,10 @@ impl History {
     /// Compacts under the caller's exclusive lock. Duplicate commands collapse to
     /// their newest record, which keeps that record's hit count; distinct records
     /// are kept as they stand, because the session limit must not shrink a file
-    /// other sessions share. Legacy records are rewritten with their own bytes.
-    fn vacuum(&self, dir: &Path, path: &Path) {
+    /// other sessions share. When the file holds more than `cap` records, only the
+    /// newest `cap` by file position survive the dedup. Legacy records are rewritten
+    /// with their own bytes, v2 ones with their hits field.
+    fn vacuum(&self, dir: &Path, path: &Path, cap: usize) {
         let Ok(records) = read_unlocked(path) else {
             return;
         };
@@ -396,13 +434,17 @@ impl History {
             return;
         }
         let total = records.len();
+        // File position under the lock is the truth: a record's `when` is hint data
+        // and must never decide which end of the file gets discarded.
+        let start = total.saturating_sub(cap);
         let mut seen = HashSet::new();
-        let mut kept: Vec<Record> = Vec::with_capacity(total);
-        for record in records.into_iter().rev() {
+        let mut kept: Vec<Record> = Vec::with_capacity(total - start);
+        for record in records.into_iter().skip(start).rev() {
             if seen.insert(record.command.clone()) {
                 kept.push(record);
             }
         }
+        // Rewriting is needed only when dedup or the cap actually dropped records.
         if kept.len() == total {
             return;
         }
@@ -616,6 +658,18 @@ fn now_micros() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_micros() as i64)
         .unwrap_or(0)
+}
+
+/// A per-session starting point in `0..VACUUM_EVERY`, so a session that appends
+/// fewer than `VACUUM_EVERY` records still reaches a compaction. Time and process
+/// id decorrelate concurrent sessions without a dependency or a shared seed.
+fn initial_vacuum_offset() -> usize {
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos() as u64)
+        .unwrap_or(0)
+        ^ (std::process::id() as u64);
+    (seed % VACUUM_EVERY as u64) as usize
 }
 
 /// Escapes one v2 text field: backslash doubled, newline as `\n`, TAB as `\t` and

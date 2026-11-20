@@ -791,3 +791,63 @@ fn vacuum_preserves_hits_and_legacy_bytes() {
     assert_eq!(dups.len(), 1);
     assert_eq!(dups[0].hits, 2, "the newest record keeps its hit count");
 }
+
+#[test]
+fn vacuum_keeps_only_the_newest_records_when_over_the_cap() {
+    let path = scratch("cap-newest").join("history");
+    let original: Vec<String> = (0..12).map(|index| format!("command {index}")).collect();
+    std::fs::write(&path, format!("{}\n", original.join("\n"))).unwrap();
+
+    let history = History::try_load(path.clone(), 100).unwrap();
+    history.vacuum_with_cap(5);
+
+    assert_eq!(
+        commands(&path),
+        [
+            "command 7",
+            "command 8",
+            "command 9",
+            "command 10",
+            "command 11"
+        ],
+        "the cut follows file position, not any timestamp"
+    );
+    assert_eq!(records(&path).len(), 5);
+    assert_eq!(History::try_load(path, 100).unwrap().entries().len(), 5);
+}
+
+#[test]
+fn vacuum_preserves_legacy_record_bytes() {
+    let path = scratch("cap-legacy").join("history");
+    // Distinct lines so trimming, not dedup, is what drops the old ones. The kept
+    // legacy line carries escapes that a re-encode would silently change.
+    let v2 = v2_line("v2 kept", 1, Some("/w"), &["/w/a"]);
+    std::fs::write(
+        &path,
+        format!("echo a\\nb\ncafé\nh2 not a header\ntab\\there\n{v2}\nlast legacy\n"),
+    )
+    .unwrap();
+
+    let history = History::try_load(path.clone(), 100).unwrap();
+    history.vacuum_with_cap(3);
+
+    assert_eq!(
+        records(&path),
+        ["tab\\there", v2.as_str(), "last legacy"],
+        "kept records keep their original bytes"
+    );
+}
+
+#[test]
+fn short_session_still_vacuums_eventually() {
+    let path = scratch("short-session").join("history");
+    std::fs::write(&path, "dup\ndup\nkeep\n").unwrap();
+
+    let mut history = History::try_load(path.clone(), 100).unwrap();
+    history.set_vacuum_offset(history::VACUUM_EVERY - 1);
+
+    history.try_add("new").unwrap();
+
+    assert_eq!(commands(&path), ["dup", "keep", "new"]);
+    assert_eq!(records(&path).len(), 3, "one append triggered a compaction");
+}
