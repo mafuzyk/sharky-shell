@@ -841,6 +841,11 @@ fn history_session_with_env(
     };
 
     let pty = openpty(None, None).expect("pty");
+    // A fixed width keeps every ghost assertion independent of the checkout path.
+    // The prompt carries the working directory, so a longer path leaves less room on
+    // the row, and an unset size leaves the editor on its 80-column fallback, where a
+    // suggestion that no longer fits is dropped on purpose.
+    set_terminal_width(pty.master.as_raw_fd(), 120);
     let stdin = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
     let stdout = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
     let stderr = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
