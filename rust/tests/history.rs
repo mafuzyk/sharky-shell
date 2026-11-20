@@ -105,6 +105,10 @@ fn independent_instances_both_append_and_survive() {
     let path = scratch("two-writers").join("history");
     let mut a = History::try_load(path.clone(), 100).unwrap();
     let mut b = History::try_load(path.clone(), 100).unwrap();
+    // Production starts each session at a random vacuum offset; pin it so no
+    // compaction rewrites the file mid-test and reorders these records.
+    a.set_vacuum_offset(0);
+    b.set_vacuum_offset(0);
 
     a.try_add("from a").unwrap();
     b.try_add("from b").unwrap();
@@ -412,6 +416,8 @@ fn a_local_repeat_of_a_refreshed_command_becomes_expandable() {
 fn refresh_needs_the_shared_view_to_survive_a_vacuum() {
     let path = scratch("refresh-vacuum").join("history");
     let mut history = History::try_load(path.clone(), 100).unwrap();
+    // Pin the trigger so the compaction lands on the 25th append.
+    history.set_vacuum_offset(0);
     for index in 0..25 {
         history.try_add(&format!("command {index}")).unwrap();
     }
@@ -653,6 +659,7 @@ fn append_failure_is_reported_and_keeps_the_memory_entry() {
     let dir = scratch("append-failure");
     let path = dir.join("history");
     let mut history = History::try_load(path.clone(), 100).unwrap();
+    history.set_vacuum_offset(0);
     history.try_add("before").unwrap();
 
     chmod(&path, 0o400);
@@ -706,6 +713,8 @@ fn clear_truncates_the_file() {
 fn vacuum_never_prunes_distinct_entries_to_the_memory_limit() {
     let path = scratch("vacuum-keep").join("history");
     let mut history = History::try_load(path.clone(), 3).unwrap();
+    // Pin the trigger so the compaction lands on the 25th append.
+    history.set_vacuum_offset(0);
 
     for index in 0..25 {
         history.try_add(&format!("command {index}")).unwrap();
@@ -919,6 +928,9 @@ fn legacy_line_that_starts_with_h2_is_not_v2() {
 fn repeat_of_an_old_command_moves_to_the_newest_position() {
     let path = scratch("recency").join("history");
     let mut history = History::try_load(path.clone(), 100).unwrap();
+    // A random offset of 22..24 would vacuum on one of these three appends and
+    // collapse the repeated `ls`, so stored.len() would be 2 instead of 3.
+    history.set_vacuum_offset(0);
 
     history.try_add("ls").unwrap();
     history.try_add("pwd").unwrap();
@@ -937,6 +949,7 @@ fn repeat_of_an_old_command_moves_to_the_newest_position() {
 fn identical_consecutive_command_is_stored_once() {
     let path = scratch("consecutive").join("history");
     let mut history = History::try_load(path.clone(), 100).unwrap();
+    history.set_vacuum_offset(0);
 
     history.try_add("ls").unwrap();
     history.try_add("ls").unwrap();
@@ -1047,6 +1060,8 @@ fn vacuum_preserves_hits_and_legacy_bytes() {
 
     let mut history = History::try_load(path.clone(), 100).unwrap();
     assert_eq!(history.entries(), ["legacy cmd", "dup"]);
+    // Pin the trigger so the compaction lands on the 25th append.
+    history.set_vacuum_offset(0);
 
     for index in 0..25 {
         history.try_add(&format!("other {index}")).unwrap();
