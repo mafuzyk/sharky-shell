@@ -5,7 +5,7 @@
 pkgname=sharky-shell-git
 pkgver=3.7.0.r0.g0000000
 pkgrel=1
-pkgdesc="Unix-first interactive shell written in Rust"
+pkgdesc="Unix-first interactive shell written in Rust (alpha)"
 arch=('x86_64' 'aarch64')
 url="https://github.com/mafuzyk/sharky-shell"
 license=('GPL-3.0-only')
@@ -18,7 +18,7 @@ sha256sums=('SKIP')
 
 pkgver() {
   cd sharky-shell
-  printf '3.6.0.r%s.g%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+  printf '3.7.0.r%s.g%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
 }
 
 build() {
