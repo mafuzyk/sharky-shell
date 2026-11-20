@@ -52,6 +52,42 @@ SHA256. It also installs the man page and the example `config.sharky` and
 artifact is verified, the version and hash in the root `flake.nix` are updated
 in place, so both names pick up the new version.
 
+### NixOS / Home Manager
+
+Add the flake as an input, following the same nixpkgs to avoid two copies:
+
+```nix
+inputs.sharky = {
+  url = "github:mafuzyk/sharky-shell";
+  inputs.nixpkgs.follows = "nixpkgs";
+};
+```
+
+In your NixOS configuration:
+
+```nix
+{
+  imports = [ inputs.sharky.nixosModules.default ];
+
+  programs.sharky.enable = true;
+  users.users.<name>.shell =
+    inputs.sharky.packages.${pkgs.stdenv.hostPlatform.system}.default;
+}
+```
+
+`programs.sharky.enable` installs the binary and registers it in `/etc/shells`;
+it does **not** choose anyone's login shell. The explicit `users.users.<name>.shell`
+line above is what does that (the package exposes `passthru.shellPath` so NixOS
+accepts it). Choosing sharky as a login shell is still not recommended in alpha,
+as noted under [Login shell](#login-shell).
+
+For Home Manager, import `inputs.sharky.homeManagerModules.default` and set
+`programs.sharky.enable = true;` instead. Its `configFile` and `themeFile`
+options are opt-in: leave them at their `null` default and an existing
+`~/.config/sharky/` is left untouched.
+
+Only `x86_64-linux` is supported.
+
 ### Prebuilt binary (GitHub)
 
 ```sh

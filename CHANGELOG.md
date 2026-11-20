@@ -8,6 +8,12 @@ rather than a separate preview track.
 
 ## [Unreleased]
 
+### Added
+
+- The flake now exposes `devShells` with the Rust toolchain, `nixosModules` and
+  `homeManagerModules` for declarative setup, and `passthru.shellPath` on the
+  package so it can be used as `users.users.<name>.shell` on NixOS.
+
 ## [3.6.0] - 2026-11-19
 
 ### Added
