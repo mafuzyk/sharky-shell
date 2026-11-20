@@ -247,11 +247,36 @@ fn underscore_keeps_the_command_word_after_a_failed_lookup() {
 
 #[test]
 fn underscore_in_a_child_environment_is_the_resolved_command_path() {
-    let out = sharky("env; echo");
+    let ambient_path = std::env::var("PATH").unwrap_or_default();
+    let path = if ambient_path.is_empty() {
+        PATH.to_string()
+    } else {
+        ambient_path
+    };
+
+    // Resolve `env` the same way the shell does: the first PATH entry that
+    // holds a regular, executable file named `env` wins.
+    let expected = path
+        .split(':')
+        .filter(|entry| !entry.is_empty())
+        .map(std::path::PathBuf::from)
+        .map(|dir| dir.join("env"))
+        .find(|candidate| {
+            std::fs::metadata(candidate)
+                .map(|meta| {
+                    let mode = std::os::unix::fs::PermissionsExt::mode(&meta.permissions());
+                    meta.is_file() && mode & 0o111 != 0
+                })
+                .unwrap_or(false)
+        })
+        .expect("no executable `env` found in PATH");
+    let expected = expected.to_str().expect("PATH entry is not valid UTF-8");
+
+    let out = sharky_with(&[("PATH", &path)], "env; echo");
     assert_eq!(
         env_value(&out, "_").as_deref(),
-        Some("/run/current-system/sw/bin/env"),
-        "{out:?}"
+        Some(expected),
+        "expected _ to be the PATH-resolved env ({expected}); {out:?}"
     );
 }
 
