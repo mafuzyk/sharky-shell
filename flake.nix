@@ -7,7 +7,7 @@
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
-      version = "3.5.4";
+      version = "3.6.0";
       sharky = pkgs.stdenv.mkDerivation {
         pname = "sharky";
         inherit version;
@@ -15,7 +15,7 @@
         src = pkgs.fetchurl {
           url =
             "https://github.com/mafuzyk/sharky-shell/releases/download/v${version}/sharky-x86_64-unknown-linux-musl.tar.gz";
-          hash = "sha256-xUERuX/kK0fF7fQyGbbeVssEZWD1GRUr/PC43/aMC9U=";
+          hash = "sha256-xxUIj/4OM/ZoG4CJ8rCY+e/S58ICB+LRBYDtV0BnNiU=";
         };
 
         # The tarball has no top-level directory and carries a prebuilt binary.
