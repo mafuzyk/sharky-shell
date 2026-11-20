@@ -423,6 +423,224 @@ fn ctrl_r_cycles_to_older_matches_and_cancels_with_ctrl_g() {
     assert_eq!(two, "");
 }
 
+const DAY_MICROS: i64 = 86_400_000_000;
+
+fn now_micros() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_micros() as i64)
+        .unwrap_or(0)
+}
+
+/// One v2 history record, or the bare command for a legacy record.
+fn v2_history(command: &str, when: Option<i64>, hits: u64) -> String {
+    match when {
+        Some(when) => format!("h2\t{when}\t\t0\t{command}\t{hits}"),
+        None => command.to_string(),
+    }
+}
+
+struct CtrlRSession {
+    child: std::process::Child,
+    master: std::os::fd::OwnedFd,
+    writer: std::fs::File,
+    dir: std::path::PathBuf,
+}
+
+fn ctrl_r_session(lines: &[String]) -> CtrlRSession {
+    let dir = std::env::temp_dir().join(format!(
+        "sharky-ctrlr-rank-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = dir.join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("config.sharky"),
+        "wave prompt \"P> \"\ntide greeting off\n",
+    )
+    .unwrap();
+    let mut history = String::new();
+    for line in lines {
+        history.push_str(line);
+        history.push('\n');
+    }
+    std::fs::write(dir.join("history"), history).unwrap();
+
+    let pty = openpty(None, None).expect("pty");
+    let stdin = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stdout = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stderr = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+
+    let child = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .stdin(stdin)
+        .stdout(stdout)
+        .stderr(stderr)
+        .env("SHARKY_CONFIG", &config)
+        .env("SHARKY_HISTORY", dir.join("history"))
+        .env("XDG_DATA_HOME", dir.join("xdg"))
+        .env("TERM", "xterm-256color")
+        .env("HOME", &dir)
+        .spawn()
+        .expect("spawn sharky");
+
+    let writer =
+        unsafe { std::fs::File::from_raw_fd(pty.master.try_clone().unwrap().into_raw_fd()) };
+    read_until(pty.master.as_raw_fd(), "P> ", Duration::from_secs(5));
+    CtrlRSession {
+        child,
+        master: pty.master,
+        writer,
+        dir,
+    }
+}
+
+impl CtrlRSession {
+    fn send(&mut self, bytes: &str) {
+        let _ = self.writer.write_all(bytes.as_bytes());
+    }
+
+    fn read(&self, needle: &str) -> String {
+        read_until(self.master.as_raw_fd(), needle, Duration::from_secs(5))
+    }
+
+    fn finish(mut self) {
+        let _ = self.writer.write_all(b"exit\r");
+        let _ = self.child.wait();
+        std::fs::remove_dir_all(&self.dir).ok();
+    }
+}
+
+#[test]
+fn ranks_frecency_but_pins_the_newest_prefix_match() {
+    let now = now_micros();
+    // File order puts the newest prefix match first and the highest score last,
+    // so a plain newest-first scan would show the opposite of the ranking.
+    let mut session = ctrl_r_session(&[
+        v2_history("deploy nightly", Some(now), 1),
+        v2_history("deploy release --slow", Some(now - 60 * DAY_MICROS), 40),
+        v2_history("run deploy now", Some(now - 60 * DAY_MICROS), 99),
+    ]);
+
+    session.send("\x12deploy");
+    let seen = session.read("'deploy': deploy nightly");
+    assert!(
+        seen.contains("'deploy': deploy nightly"),
+        "the newest prefix match was not pinned first: {seen:?}"
+    );
+
+    session.send("\x12");
+    let seen = session.read("'deploy': run deploy now");
+    assert!(
+        seen.contains("'deploy': run deploy now"),
+        "the highest score did not follow the pin: {seen:?}"
+    );
+
+    session.send("\x12");
+    let seen = session.read("'deploy': deploy release --slow");
+    assert!(
+        seen.contains("'deploy': deploy release --slow"),
+        "the lowest score was not last: {seen:?}"
+    );
+
+    // One more Ctrl-R at the end stays on the last match, so Down walks back one.
+    session.send("\x12");
+    std::thread::sleep(Duration::from_millis(100));
+    session.send("\x1b[B");
+    let seen = session.read("'deploy': run deploy now");
+    assert!(
+        seen.contains("'deploy': run deploy now"),
+        "paging did not clamp at the last ranked match: {seen:?}"
+    );
+
+    session.send("\x07");
+    session.finish();
+}
+
+#[test]
+fn ctrl_r_prefers_frequency_over_recency_on_a_non_prefix_query() {
+    let now = now_micros();
+    let mut session = ctrl_r_session(&[
+        v2_history("git log --all", Some(now - 60 * DAY_MICROS), 10),
+        v2_history("other log", Some(now), 1),
+    ]);
+
+    session.send("\x12log");
+    let seen = session.read("'log': git log --all");
+    assert!(
+        seen.contains("'log': git log --all"),
+        "the frequent older command did not outrank the newer one: {seen:?}"
+    );
+
+    session.send("\x12");
+    let seen = session.read("'log': other log");
+    assert!(
+        seen.contains("'log': other log"),
+        "the newer, less frequent match is missing from the ranking: {seen:?}"
+    );
+
+    session.send("\x07");
+    session.finish();
+}
+
+#[test]
+fn ctrl_r_keeps_chronology_for_an_empty_query() {
+    let now = now_micros();
+    let mut session = ctrl_r_session(&[
+        v2_history("printf second > $HOME/two", Some(now - 60 * DAY_MICROS), 99),
+        v2_history("printf first > $HOME/one", Some(now), 1),
+    ]);
+
+    session.send("\x12");
+    let seen = session.read("(reverse-i-search)");
+    assert!(
+        seen.contains("(reverse-i-search)"),
+        "no search line: {seen:?}"
+    );
+
+    session.send("\r");
+    assert!(
+        wait_for(&session.dir.join("one"), Duration::from_secs(5)),
+        "an empty query did not pick the newest command"
+    );
+    let one = std::fs::read_to_string(session.dir.join("one")).unwrap_or_default();
+    let two = std::fs::read_to_string(session.dir.join("two")).unwrap_or_default();
+    session.finish();
+
+    assert_eq!(one, "first");
+    assert_eq!(
+        two, "",
+        "an empty query ranked by frecency instead of chronology"
+    );
+}
+
+#[test]
+fn ctrl_r_ranks_a_legacy_record_as_old() {
+    let now = now_micros();
+    let mut session = ctrl_r_session(&[
+        v2_history("recent log", Some(now), 1),
+        v2_history("run legacy log", None, 1),
+    ]);
+
+    session.send("\x12log");
+    let seen = session.read("'log': recent log");
+    assert!(
+        seen.contains("'log': recent log"),
+        "the timestamped record did not outrank the legacy one: {seen:?}"
+    );
+
+    session.send("\x12");
+    let seen = session.read("'log': run legacy log");
+    assert!(
+        seen.contains("'log': run legacy log"),
+        "the legacy record is missing from the ranking: {seen:?}"
+    );
+
+    session.send("\x07");
+    session.finish();
+}
+
 fn wait_for(path: &std::path::Path, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {

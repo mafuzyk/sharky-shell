@@ -774,10 +774,11 @@ fn history_search(
     buffer: &mut Vec<char>,
     cursor: &mut usize,
 ) -> std::io::Result<bool> {
-    let entries = shell.history_entries();
+    let entries = shell.history_records();
     if entries.is_empty() {
         return Ok(false);
     }
+    let now = unix_micros();
 
     let columns = term::width().max(1);
     let mut query = String::new();
@@ -788,7 +789,7 @@ fn history_search(
 
     term::write_stdout("\r\n")?;
     loop {
-        if let Some(found) = find_history(entries, &query, offset) {
+        if let Some(found) = find_history(&entries, &query, offset, now) {
             shown = Some(found);
         }
         let display = shown.as_deref().unwrap_or("");
@@ -807,7 +808,7 @@ fn history_search(
             Key::Ctrl('g') | Key::Ctrl('c') | Key::Escape => break,
             Key::Ctrl('r') | Key::Up => {
                 offset += 1;
-                if find_history(entries, &query, offset).is_none() {
+                if find_history(&entries, &query, offset, now).is_none() {
                     offset -= 1;
                 }
             }
@@ -1425,13 +1426,85 @@ fn move_line(buffer: &[char], cursor: usize, up: bool) -> usize {
         index_at_column(buffer, next_start, next_end, column)
     }
 }
-fn find_history(entries: &[String], query: &str, offset: usize) -> Option<String> {
-    entries
+const DAY_MICROS: i64 = 86_400_000_000;
+const FRECENCY_MONTH_MICROS: i64 = 30 * DAY_MICROS;
+
+fn unix_micros() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_micros() as i64)
+        .unwrap_or(0)
+}
+
+/// Conservative frecency: frequency dominates and age only separates comparable
+/// counts, so a command used once yesterday does not bury one used ten times last
+/// month. Weight is 4 within a day, 2 within a month and 1 beyond; a legacy record
+/// carries no timestamp and always takes the old weight. Integer arithmetic only,
+/// with a timestamp ahead of the clock treated as fresh.
+fn frecency_score(hits: u64, when: Option<i64>, now: i64) -> u64 {
+    let weight = match when {
+        Some(when) => {
+            let age = now.saturating_sub(when).max(0);
+            if age <= DAY_MICROS {
+                4
+            } else if age <= FRECENCY_MONTH_MICROS {
+                2
+            } else {
+                1
+            }
+        }
+        None => 1,
+    };
+    hits.max(1).saturating_mul(weight)
+}
+
+/// The recency key the ranking compares: the timestamp, oldest when absent, then
+/// the file position in the view, which is already chronological.
+fn recency_key(entry: &HistoryEntry, index: usize) -> (i64, usize) {
+    (entry.when.unwrap_or(i64::MIN), index)
+}
+
+/// The Ctrl-R candidate list in display order. An empty query keeps the view order,
+/// newest first, so plain Ctrl-R still walks history chronologically. A non-empty
+/// query matches by substring; the newest entry that starts with it is pinned first
+/// so hammering Ctrl-R still finds what was just typed, and every other match
+/// follows by frecency, then recency, then file position.
+fn search_order<'a>(records: &'a [HistoryEntry], query: &str, now: i64) -> Vec<&'a HistoryEntry> {
+    if query.is_empty() {
+        return records.iter().rev().collect();
+    }
+
+    let mut matched: Vec<(usize, &HistoryEntry)> = records
         .iter()
-        .rev()
-        .filter(|entry| entry.contains(query))
-        .nth(offset)
-        .cloned()
+        .enumerate()
+        .filter(|(_, entry)| entry.command.contains(query))
+        .collect();
+
+    let pinned = matched
+        .iter()
+        .filter(|(_, entry)| entry.command.starts_with(query))
+        .max_by_key(|(index, entry)| recency_key(entry, *index))
+        .map(|(index, _)| *index);
+
+    let mut ordered = Vec::with_capacity(matched.len());
+    if let Some(pinned) = pinned
+        && let Some(position) = matched.iter().position(|(index, _)| *index == pinned)
+    {
+        ordered.push(matched.remove(position).1);
+    }
+    matched.sort_by(|(left_index, left), (right_index, right)| {
+        frecency_score(right.hits, right.when, now)
+            .cmp(&frecency_score(left.hits, left.when, now))
+            .then_with(|| recency_key(right, *right_index).cmp(&recency_key(left, *left_index)))
+    });
+    ordered.extend(matched.into_iter().map(|(_, entry)| entry));
+    ordered
+}
+
+fn find_history(records: &[HistoryEntry], query: &str, offset: usize, now: i64) -> Option<String> {
+    search_order(records, query, now)
+        .get(offset)
+        .map(|entry| entry.command.clone())
 }
 
 fn expand_abbreviation(
@@ -2067,10 +2140,120 @@ fn common_prefix(left: &str, right: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{BoundKey, line_end, line_start, move_line, parse_bound, position};
+    use super::{
+        BoundKey, DAY_MICROS, line_end, line_start, move_line, parse_bound, position, search_order,
+    };
+    use crate::history::{Entry, Origin};
 
     fn buffer(text: &str) -> Vec<char> {
         text.chars().collect()
+    }
+
+    fn record(command: &str, when: Option<i64>, hits: u64) -> Entry {
+        Entry {
+            command: command.to_string(),
+            when,
+            origin: Origin::Loaded,
+            cwd: None,
+            paths: Vec::new(),
+            hits,
+        }
+    }
+
+    fn order(entries: &[Entry], query: &str, now: i64) -> Vec<String> {
+        search_order(entries, query, now)
+            .iter()
+            .map(|entry| entry.command.clone())
+            .collect()
+    }
+
+    #[test]
+    fn frecency_score_weights_frequency_and_age() {
+        let now = 100 * DAY_MICROS;
+
+        assert_eq!(super::frecency_score(3, Some(now), now), 12);
+        assert_eq!(super::frecency_score(3, Some(now - DAY_MICROS), now), 12);
+        assert_eq!(super::frecency_score(3, Some(now - DAY_MICROS - 1), now), 6);
+        assert_eq!(
+            super::frecency_score(3, Some(now - 30 * DAY_MICROS), now),
+            6
+        );
+        assert_eq!(
+            super::frecency_score(3, Some(now - 30 * DAY_MICROS - 1), now),
+            3
+        );
+        assert_eq!(super::frecency_score(3, None, now), 3);
+        // A timestamp ahead of the clock is at least as fresh as now, never negative.
+        assert_eq!(super::frecency_score(3, Some(now + DAY_MICROS), now), 12);
+    }
+
+    #[test]
+    fn search_order_pins_the_newest_prefix_match() {
+        let now = 100 * DAY_MICROS;
+        let entries = [
+            record("deploy new", Some(now), 1),
+            record("deploy old", Some(now - 60 * DAY_MICROS), 20),
+            record("run deploy now", Some(now - 60 * DAY_MICROS), 50),
+        ];
+
+        assert_eq!(
+            order(&entries, "deploy", now),
+            ["deploy new", "run deploy now", "deploy old"]
+        );
+    }
+
+    #[test]
+    fn search_order_ranks_frequency_before_recency() {
+        let now = 100 * DAY_MICROS;
+        let entries = [
+            record("git log --all", Some(now - 60 * DAY_MICROS), 10),
+            record("other log", Some(now), 1),
+        ];
+
+        assert_eq!(order(&entries, "log", now), ["git log --all", "other log"]);
+    }
+
+    #[test]
+    fn search_order_keeps_chronology_for_an_empty_query() {
+        let now = 100 * DAY_MICROS;
+        let entries = [
+            record("printf second", Some(now - 60 * DAY_MICROS), 99),
+            record("printf first", Some(now), 1),
+        ];
+
+        assert_eq!(order(&entries, "", now), ["printf first", "printf second"]);
+    }
+
+    #[test]
+    fn search_order_treats_a_missing_when_as_old() {
+        let now = 100 * DAY_MICROS;
+        let entries = [
+            record("recent log", Some(now), 1),
+            record("legacy log", None, 1),
+        ];
+
+        assert_eq!(order(&entries, "log", now), ["recent log", "legacy log"]);
+    }
+
+    #[test]
+    fn search_order_tie_breaks_by_newer_when_then_position() {
+        let now = 100 * DAY_MICROS;
+        let entries = [
+            record("same stamp first", Some(now), 2),
+            record("same age older", Some(now - 10 * DAY_MICROS), 4),
+            record("same age newer", Some(now - 2 * DAY_MICROS), 4),
+            record("same stamp last", Some(now), 2),
+        ];
+
+        assert_eq!(
+            order(&entries, "same", now),
+            [
+                "same stamp last",
+                "same stamp first",
+                "same age newer",
+                "same age older",
+            ]
+        );
     }
 
     #[test]
@@ -2141,6 +2324,7 @@ mod suggestion_tests {
             origin: Origin::Loaded,
             cwd: None,
             paths: Vec::new(),
+            hits: 1,
         }
     }
 
@@ -2151,6 +2335,7 @@ mod suggestion_tests {
             origin: Origin::Loaded,
             cwd: Some(cwd.to_string_lossy().into_owned()),
             paths: paths.iter().map(|path| path.to_string()).collect(),
+            hits: 1,
         }
     }
 

@@ -250,6 +250,8 @@ pub struct Entry {
     pub cwd: Option<String>,
     #[allow(dead_code)] // read by the suggest path to validate the paths it names
     pub paths: Vec<String>,
+    /// How many times the command was recorded when its newest line was written.
+    pub hits: u64,
 }
 
 /// Where a command ran and the paths it named, kept beside the view so the suggest
@@ -385,6 +387,7 @@ impl History {
                     origin: *origin,
                     cwd: meta.and_then(|meta| meta.cwd.clone()),
                     paths: meta.map(|meta| meta.paths.clone()).unwrap_or_default(),
+                    hits: self.hits.get(command).copied().unwrap_or(1),
                 }
             })
             .collect()
