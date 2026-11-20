@@ -460,7 +460,7 @@ impl Shell {
             "break", "continue", "return", "jobs", "fg", "bg", "declare", "local", "pwd", "type",
             "alias", "abbr", "unabbr", "unalias", "history", "wait", "kill", "z", "zi",
             "reload", "trap", "read", "shift", "wake", "exec", "time", "shopt",
-            "mapfile", "readarray", "command", "help",
+            "mapfile", "readarray", "command", "help", "echo", "printf",
         ]
         .iter()
         .map(|word| word.to_string())
@@ -1698,6 +1698,8 @@ impl Shell {
                 println!("{}", self.cwd.display());
                 Some(Flow::Status(0))
             }
+            "echo" => Some(Flow::Status(echo_builtin(&words[1..]))),
+            "printf" => Some(Flow::Status(self.printf_builtin(&words[1..]))),
             "type" => Some(Flow::Status(self.type_builtin(&words[1..]))),
             "command" => Some(self.command_builtin(&words[1..], env)),
             "help" => Some(Flow::Status(crate::help::builtin(&words[1..]))),
@@ -5212,6 +5214,1139 @@ fn alias_has_control_operator(value: &str) -> bool {
     value.contains('\n') || value.chars().any(|char| matches!(char, '|' | '&' | ';' | '<' | '>'))
 }
 
+// ---------------------------------------------------------------------------
+// echo and printf
+//
+// Both are builtins: a host whose `echo` or `printf` differs from bash's
+// would otherwise change what a script prints, and every call would cost a
+// fork. The behaviour below matches bash 5.3; escapes and numbers follow the
+// same rules bash implements, written out here so the output never depends on
+// the C library on the machine.
+// ---------------------------------------------------------------------------
+
+/// The backslash dialects bash uses.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Escapes {
+    /// `echo -e`: octal needs a leading zero and `\c` stops everything.
+    Echo,
+    /// `printf %b`: like `echo -e`, except that `\123` is octal too.
+    PercentB,
+    /// A `printf` format: octal needs no leading zero, `\'`, `\"` and `\?`
+    /// lose the backslash, `\c` is ordinary text and `\%` leaves the `%` to
+    /// the conversion parser.
+    Format,
+}
+
+/// One decoded backslash escape.
+enum Escape {
+    Bytes(Vec<u8>),
+    /// A format `\%`: emit the backslash and let the caller reread the `%`.
+    Rescan,
+    /// `\c`: nothing after it is printed.
+    Stop,
+}
+
+fn write_output(bytes: &[u8]) {
+    use std::io::Write;
+    let mut stdout = std::io::stdout().lock();
+    let _ = stdout.write_all(bytes);
+    let _ = stdout.flush();
+}
+
+fn echo_builtin(args: &[String]) -> i32 {
+    let mut newline = true;
+    let mut escapes = false;
+    let mut index = 0;
+    // Flags are a run of leading words made only of n, e and E. The first word
+    // that is not such a word is data, and `-` alone is data too.
+    while let Some(word) = args.get(index) {
+        let Some(flags) = word.strip_prefix('-') else {
+            break;
+        };
+        if flags.is_empty() || !flags.chars().all(|flag| matches!(flag, 'n' | 'e' | 'E')) {
+            break;
+        }
+        for flag in flags.chars() {
+            match flag {
+                'n' => newline = false,
+                'e' => escapes = true,
+                _ => escapes = false,
+            }
+        }
+        index += 1;
+    }
+
+    let mut out = Vec::new();
+    let mut stopped = false;
+    for (position, word) in args[index..].iter().enumerate() {
+        if position > 0 {
+            out.push(b' ');
+        }
+        if escapes {
+            let (bytes, stop) = decode_escapes(word.as_bytes(), Escapes::Echo, false);
+            out.extend_from_slice(&bytes);
+            if stop {
+                stopped = true;
+                break;
+            }
+        } else {
+            out.extend_from_slice(word.as_bytes());
+        }
+    }
+    if newline && !stopped {
+        out.push(b'\n');
+    }
+    write_output(&out);
+    0
+}
+
+/// Decode every escape in `input`. The second value is true when `\c` ended
+/// the output early.
+fn decode_escapes(input: &[u8], dialect: Escapes, warn: bool) -> (Vec<u8>, bool) {
+    let mut out = Vec::with_capacity(input.len());
+    let mut index = 0;
+    while index < input.len() {
+        if input[index] != b'\\' {
+            out.push(input[index]);
+            index += 1;
+            continue;
+        }
+        match decode_escape(input, index + 1, dialect, warn) {
+            (Escape::Bytes(bytes), next) => {
+                out.extend_from_slice(&bytes);
+                index = next;
+            }
+            (Escape::Rescan, next) => {
+                out.push(b'\\');
+                index = next;
+            }
+            (Escape::Stop, _) => return (out, true),
+        }
+    }
+    (out, false)
+}
+
+/// Decode one escape; `index` points at the character after the backslash and
+/// the second value is where decoding resumes.
+fn decode_escape(input: &[u8], index: usize, dialect: Escapes, warn: bool) -> (Escape, usize) {
+    let Some(&escape) = input.get(index) else {
+        return (Escape::Bytes(vec![b'\\']), index);
+    };
+    let mut next = index + 1;
+    let bytes = match escape {
+        b'\\' => vec![b'\\'],
+        b'a' => vec![0x07],
+        b'b' => vec![0x08],
+        b'e' | b'E' => vec![0x1b],
+        b'f' => vec![0x0c],
+        b'n' => vec![b'\n'],
+        b'r' => vec![b'\r'],
+        b't' => vec![b'\t'],
+        b'v' => vec![0x0b],
+        b'\'' | b'"' | b'?' if dialect == Escapes::Format => vec![escape],
+        b'%' if dialect == Escapes::Format => return (Escape::Rescan, index),
+        b'c' if dialect != Escapes::Format => return (Escape::Stop, next),
+        b'0' if dialect != Escapes::Format => {
+            let (value, after) = octal_digits(input, next, 3);
+            next = after;
+            vec![(value & 0xff) as u8]
+        }
+        b'0'..=b'7' if dialect == Escapes::PercentB => {
+            let mut value = u32::from(escape - b'0');
+            let mut taken = 1;
+            while taken < 3 {
+                let Some(&digit @ b'0'..=b'7') = input.get(next) else {
+                    break;
+                };
+                value = value * 8 + u32::from(digit - b'0');
+                next += 1;
+                taken += 1;
+            }
+            vec![(value & 0xff) as u8]
+        }
+        b'0'..=b'7' if dialect == Escapes::Format => {
+            let mut value = u32::from(escape - b'0');
+            let mut taken = 1;
+            while taken < 3 {
+                let Some(&digit @ b'0'..=b'7') = input.get(next) else {
+                    break;
+                };
+                value = value * 8 + u32::from(digit - b'0');
+                next += 1;
+                taken += 1;
+            }
+            vec![(value & 0xff) as u8]
+        }
+        b'x' => {
+            let (value, after, taken) = hex_digits(input, next, 2);
+            next = after;
+            if taken == 0 {
+                missing_escape_digit(warn, "hex", 'x');
+                vec![b'\\', b'x']
+            } else {
+                vec![(value & 0xff) as u8]
+            }
+        }
+        b'u' | b'U' => {
+            let limit = if escape == b'u' { 4 } else { 8 };
+            let (value, after, taken) = hex_digits(input, next, limit);
+            next = after;
+            if taken == 0 {
+                missing_escape_digit(warn, "unicode", escape as char);
+                vec![b'\\', escape]
+            } else {
+                let mut encoded = Vec::new();
+                push_utf8(value, &mut encoded);
+                encoded
+            }
+        }
+        _ => vec![b'\\', escape],
+    };
+    (Escape::Bytes(bytes), next)
+}
+
+fn missing_escape_digit(warn: bool, kind: &str, letter: char) {
+    if warn {
+        eprintln!("sharky: printf: missing {kind} digit for \\{letter}");
+    }
+}
+
+fn octal_digits(input: &[u8], mut index: usize, limit: usize) -> (u32, usize) {
+    let mut value = 0;
+    let mut taken = 0;
+    while taken < limit {
+        let Some(&digit @ b'0'..=b'7') = input.get(index) else {
+            break;
+        };
+        value = value * 8 + u32::from(digit - b'0');
+        index += 1;
+        taken += 1;
+    }
+    (value, index)
+}
+
+fn hex_digits(input: &[u8], mut index: usize, limit: usize) -> (u32, usize, usize) {
+    let mut value = 0;
+    let mut taken = 0;
+    while taken < limit {
+        let Some(digit) = input.get(index).and_then(|byte| (*byte as char).to_digit(16)) else {
+            break;
+        };
+        value = value * 16 + digit;
+        index += 1;
+        taken += 1;
+    }
+    (value, index, taken)
+}
+
+/// Encode a code point the way bash's `\u`/`\U` escapes do: the obsolete five-
+/// and six-byte forms are produced for values that need them, and a code point
+/// above `0x7fffffff` produces nothing.
+fn push_utf8(value: u32, out: &mut Vec<u8>) {
+    let byte = |shift: u32, mask: u8| ((value >> shift) as u8 & mask) | 0x80;
+    match value {
+        0..=0x7f => out.push(value as u8),
+        0x80..=0x7ff => {
+            out.push(0xc0 | (value >> 6) as u8);
+            out.push(byte(0, 0x3f));
+        }
+        0x800..=0xffff => {
+            out.push(0xe0 | (value >> 12) as u8);
+            out.push(byte(6, 0x3f));
+            out.push(byte(0, 0x3f));
+        }
+        0x1_0000..=0x1f_ffff => {
+            out.push(0xf0 | (value >> 18) as u8);
+            out.push(byte(12, 0x3f));
+            out.push(byte(6, 0x3f));
+            out.push(byte(0, 0x3f));
+        }
+        0x20_0000..=0x3ff_ffff => {
+            out.push(0xf8 | (value >> 24) as u8);
+            out.push(byte(18, 0x3f));
+            out.push(byte(12, 0x3f));
+            out.push(byte(6, 0x3f));
+            out.push(byte(0, 0x3f));
+        }
+        0x400_0000..=0x7fff_ffff => {
+            out.push(0xfc | (value >> 30) as u8);
+            out.push(byte(24, 0x3f));
+            out.push(byte(18, 0x3f));
+            out.push(byte(12, 0x3f));
+            out.push(byte(6, 0x3f));
+            out.push(byte(0, 0x3f));
+        }
+        _ => {}
+    }
+}
+
+/// How a format pass ended.
+enum FormatFlow {
+    /// The format was printed; another pass may follow.
+    Done,
+    /// `%b` found `\c`: print nothing more.
+    Stop,
+    /// The format is invalid: stop, and the status becomes 1.
+    Failed,
+}
+
+enum Conversion {
+    Done,
+    Stop,
+    Failed,
+}
+
+/// The printf conversion flags.
+#[derive(Default, Clone, Copy)]
+struct Flags {
+    left: bool,
+    plus: bool,
+    space: bool,
+    alternate: bool,
+    zero: bool,
+}
+
+impl Shell {
+    // printf writes to stdout, or to one variable with -v. Integers, floats and
+    // escapes are all formatted here, so the output does not depend on the host
+    // C library or on coreutils being the same version as bash.
+    fn printf_builtin(&mut self, words: &[String]) -> i32 {
+        let mut index = 0;
+        let mut target: Option<&str> = None;
+        while let Some(word) = words.get(index) {
+            if word == "--" {
+                index += 1;
+                break;
+            }
+            if !word.starts_with('-') || word == "-" {
+                break;
+            }
+            if word == "-v" {
+                match words.get(index + 1) {
+                    Some(name) => target = Some(name),
+                    None => {
+                        printf_usage();
+                        return 2;
+                    }
+                }
+                index += 2;
+                continue;
+            }
+            eprintln!("sharky: printf: {word}: invalid option");
+            printf_usage();
+            return 2;
+        }
+        let Some(format) = words.get(index) else {
+            printf_usage();
+            return 2;
+        };
+        if let Some(name) = target
+            && !is_valid_array_name(name)
+        {
+            eprintln!("sharky: printf: {name}: not a valid identifier");
+            return 2;
+        }
+
+        let args = words.get(index + 1..).unwrap_or_default();
+        let mut out = Vec::new();
+        let mut failed = false;
+        let mut cursor = 0;
+        loop {
+            let before = cursor;
+            match format_pass(format.as_bytes(), args, &mut cursor, &mut out, &mut failed) {
+                FormatFlow::Done => {}
+                FormatFlow::Stop | FormatFlow::Failed => break,
+            }
+            // The format repeats only while it still consumes arguments, so a
+            // format with no conversion prints surplus arguments once.
+            if cursor >= args.len() || cursor == before {
+                break;
+            }
+        }
+
+        match target {
+            Some(name) => {
+                let value = String::from_utf8_lossy(&out).into_owned();
+                self.set_var(name, value);
+            }
+            None => write_output(&out),
+        }
+        if failed { 1 } else { 0 }
+    }
+}
+
+fn printf_usage() {
+    eprintln!("sharky: printf: usage: printf [-v var] format [arguments]");
+}
+
+fn format_pass(
+    format: &[u8],
+    args: &[String],
+    cursor: &mut usize,
+    out: &mut Vec<u8>,
+    failed: &mut bool,
+) -> FormatFlow {
+    let mut index = 0;
+    while index < format.len() {
+        match format[index] {
+            b'\\' => match decode_escape(format, index + 1, Escapes::Format, true) {
+                (Escape::Bytes(bytes), next) => {
+                    out.extend_from_slice(&bytes);
+                    index = next;
+                }
+                (Escape::Rescan, next) => {
+                    out.push(b'\\');
+                    index = next;
+                }
+                (Escape::Stop, next) => index = next,
+            },
+            b'%' => {
+                let start = index;
+                index += 1;
+                match conversion(format, start, &mut index, args, cursor, out, failed) {
+                    Conversion::Done => {}
+                    Conversion::Stop => return FormatFlow::Stop,
+                    Conversion::Failed => return FormatFlow::Failed,
+                }
+            }
+            byte => {
+                out.push(byte);
+                index += 1;
+            }
+        }
+    }
+    FormatFlow::Done
+}
+
+/// One `%` conversion. `start` is the index of the `%`; `index` moves past the
+/// conversion or stops where the format became invalid.
+fn conversion(
+    format: &[u8],
+    start: usize,
+    index: &mut usize,
+    args: &[String],
+    cursor: &mut usize,
+    out: &mut Vec<u8>,
+    failed: &mut bool,
+) -> Conversion {
+    // `%` is only a literal when nothing sits between it and a second `%`:
+    // bash rejects `%5%` as an invalid format character.
+    if format.get(*index) == Some(&b'%') {
+        *index += 1;
+        out.push(b'%');
+        return Conversion::Done;
+    }
+
+    let mut flags = Flags::default();
+    while let Some(&byte) = format.get(*index) {
+        match byte {
+            b'-' => flags.left = true,
+            b'+' => flags.plus = true,
+            b' ' => flags.space = true,
+            b'#' => flags.alternate = true,
+            b'0' => flags.zero = true,
+            // The grouping flag is accepted and has no effect in a C locale.
+            b'\'' => {}
+            _ => break,
+        }
+        *index += 1;
+    }
+
+    let mut width: Option<usize> = None;
+    if format.get(*index) == Some(&b'*') {
+        *index += 1;
+        let value = star_argument(args, cursor, failed);
+        if value < 0 {
+            flags.left = true;
+            width = Some(value.unsigned_abs() as usize);
+        } else {
+            width = Some(value as usize);
+        }
+    } else {
+        let (value, after, taken) = decimal_digits(format, *index);
+        if taken > 0 {
+            width = Some(value as usize);
+            *index = after;
+        }
+    }
+
+    let mut precision: Option<usize> = None;
+    if format.get(*index) == Some(&b'.') {
+        *index += 1;
+        if format.get(*index) == Some(&b'*') {
+            *index += 1;
+            let value = star_argument(args, cursor, failed);
+            if value >= 0 {
+                precision = Some(value as usize);
+            }
+        } else {
+            let (value, after, _) = decimal_digits(format, *index);
+            precision = Some(value as usize);
+            *index = after;
+        }
+    }
+
+    // Length modifiers are accepted and ignored, as bash does.
+    while matches!(
+        format.get(*index),
+        Some(b'h' | b'l' | b'L' | b'j' | b'z' | b't')
+    ) {
+        *index += 1;
+    }
+
+    let Some(&letter) = format.get(*index) else {
+        *failed = true;
+        eprintln!(
+            "sharky: printf: `{}': missing format character",
+            String::from_utf8_lossy(&format[start..])
+        );
+        return Conversion::Failed;
+    };
+    *index += 1;
+
+    match letter {
+        b's' => {
+            let value = argument(args, cursor).unwrap_or("");
+            emit_text(out, value.as_bytes(), precision, &flags, width);
+        }
+        b'c' => {
+            let value = argument(args, cursor).unwrap_or("");
+            let first = value.as_bytes().first().copied().unwrap_or(0);
+            emit_text(out, &[first], None, &flags, width);
+        }
+        b'b' => {
+            let value = argument(args, cursor).unwrap_or("");
+            let (bytes, stopped) = decode_escapes(value.as_bytes(), Escapes::PercentB, true);
+            emit_text(out, &bytes, precision, &flags, width);
+            if stopped {
+                return Conversion::Stop;
+            }
+        }
+        b'q' => {
+            let value = argument(args, cursor).unwrap_or("");
+            let quoted = quote_for_reuse(value.as_bytes());
+            emit_text(out, &quoted, precision, &flags, width);
+        }
+        b'n' => {
+            let _ = argument(args, cursor);
+        }
+        b'd' | b'i' => {
+            let value = signed_argument(args, cursor, failed);
+            let digits = value.unsigned_abs().to_string();
+            let prefix = if value < 0 {
+                "-"
+            } else if flags.plus {
+                "+"
+            } else if flags.space {
+                " "
+            } else {
+                ""
+            };
+            emit_number(out, prefix, &digits, precision, false, &flags, width);
+        }
+        b'u' | b'o' | b'x' | b'X' => {
+            let value = unsigned_argument(args, cursor, failed);
+            let mut digits = match letter {
+                b'u' => value.to_string(),
+                b'o' => format!("{value:o}"),
+                b'x' => format!("{value:x}"),
+                _ => format!("{value:X}"),
+            };
+            let octal_alternate = letter == b'o' && flags.alternate;
+            if octal_alternate && !digits.starts_with('0') {
+                digits.insert(0, '0');
+            }
+            let prefix = match letter {
+                b'x' if flags.alternate && value != 0 => "0x",
+                b'X' if flags.alternate && value != 0 => "0X",
+                _ => "",
+            };
+            emit_number(out, prefix, &digits, precision, octal_alternate, &flags, width);
+        }
+        b'f' | b'F' | b'e' | b'E' | b'g' | b'G' => {
+            let value = float_argument(args, cursor, failed);
+            let upper = matches!(letter, b'F' | b'E' | b'G');
+            let prefix = if value.is_sign_negative() {
+                "-"
+            } else if flags.plus {
+                "+"
+            } else if flags.space {
+                " "
+            } else {
+                ""
+            };
+            let mut body = match letter {
+                b'f' | b'F' => format_fixed(value.abs(), precision.unwrap_or(6), upper),
+                b'e' | b'E' => {
+                    format_exponential(value.abs(), precision.unwrap_or(6), upper)
+                }
+                _ => format_general(value.abs(), precision, flags.alternate, upper),
+            };
+            // `#` keeps a decimal point even when no fraction digit is printed.
+            if flags.alternate && value.is_finite() && !body.contains('.') {
+                let at = body.find(['e', 'E']).unwrap_or(body.len());
+                body.insert(at, '.');
+            }
+            emit_float(out, prefix, &body, &flags, width, value.is_finite());
+        }
+        _ => {
+            *failed = true;
+            eprintln!(
+                "sharky: printf: `{}': invalid format character",
+                String::from_utf8_lossy(&format[*index - 1..*index])
+            );
+            return Conversion::Failed;
+        }
+    }
+    Conversion::Done
+}
+
+fn argument<'a>(args: &'a [String], cursor: &mut usize) -> Option<&'a str> {
+    let value = args.get(*cursor).map(String::as_str);
+    if value.is_some() {
+        *cursor += 1;
+    }
+    value
+}
+
+fn emit_text(
+    out: &mut Vec<u8>,
+    body: &[u8],
+    precision: Option<usize>,
+    flags: &Flags,
+    width: Option<usize>,
+) {
+    let body = match precision {
+        Some(limit) if body.len() > limit => &body[..limit],
+        _ => body,
+    };
+    let padding = width.unwrap_or(0).saturating_sub(body.len());
+    if flags.left {
+        out.extend_from_slice(body);
+        out.extend(std::iter::repeat_n(b' ', padding));
+    } else {
+        out.extend(std::iter::repeat_n(b' ', padding));
+        out.extend_from_slice(body);
+    }
+}
+
+fn emit_number(
+    out: &mut Vec<u8>,
+    prefix: &str,
+    digits: &str,
+    precision: Option<usize>,
+    keep_zero: bool,
+    flags: &Flags,
+    width: Option<usize>,
+) {
+    let mut digits = digits.to_owned();
+    if let Some(limit) = precision {
+        if digits.len() < limit {
+            digits.insert_str(0, &"0".repeat(limit - digits.len()));
+        } else if limit == 0 && digits == "0" && !keep_zero {
+            digits.clear();
+        }
+    }
+    let padding = width
+        .unwrap_or(0)
+        .saturating_sub(prefix.len() + digits.len());
+    if flags.left {
+        out.extend_from_slice(prefix.as_bytes());
+        out.extend_from_slice(digits.as_bytes());
+        out.extend(std::iter::repeat_n(b' ', padding));
+    } else if flags.zero && precision.is_none() {
+        out.extend_from_slice(prefix.as_bytes());
+        out.extend(std::iter::repeat_n(b'0', padding));
+        out.extend_from_slice(digits.as_bytes());
+    } else {
+        out.extend(std::iter::repeat_n(b' ', padding));
+        out.extend_from_slice(prefix.as_bytes());
+        out.extend_from_slice(digits.as_bytes());
+    }
+}
+
+fn emit_float(
+    out: &mut Vec<u8>,
+    prefix: &str,
+    body: &str,
+    flags: &Flags,
+    width: Option<usize>,
+    zero_pads: bool,
+) {
+    let padding = width
+        .unwrap_or(0)
+        .saturating_sub(prefix.len() + body.len());
+    if flags.left {
+        out.extend_from_slice(prefix.as_bytes());
+        out.extend_from_slice(body.as_bytes());
+        out.extend(std::iter::repeat_n(b' ', padding));
+    } else if flags.zero && zero_pads {
+        out.extend_from_slice(prefix.as_bytes());
+        out.extend(std::iter::repeat_n(b'0', padding));
+        out.extend_from_slice(body.as_bytes());
+    } else {
+        out.extend(std::iter::repeat_n(b' ', padding));
+        out.extend_from_slice(prefix.as_bytes());
+        out.extend_from_slice(body.as_bytes());
+    }
+}
+
+fn non_finite(value: f64, upper: bool) -> String {
+    let text = if value.is_nan() { "nan" } else { "inf" };
+    if upper {
+        text.to_ascii_uppercase()
+    } else {
+        text.to_owned()
+    }
+}
+
+fn format_fixed(value: f64, precision: usize, upper: bool) -> String {
+    if !value.is_finite() {
+        return non_finite(value, upper);
+    }
+    format!("{value:.precision$}")
+}
+
+fn format_exponential(value: f64, precision: usize, upper: bool) -> String {
+    if !value.is_finite() {
+        return non_finite(value, upper);
+    }
+    let text = format!("{value:.precision$e}");
+    let (mantissa, exponent) = text.split_once('e').unwrap_or((text.as_str(), "0"));
+    let exponent: i32 = exponent.parse().unwrap_or(0);
+    let marker = if upper { 'E' } else { 'e' };
+    let sign = if exponent < 0 { '-' } else { '+' };
+    format!("{mantissa}{marker}{sign}{:02}", exponent.abs())
+}
+
+/// `%g`: the shorter of `%e` and `%f` for the requested number of significant
+/// digits, with trailing fractional zeros removed unless `#` was given.
+fn format_general(value: f64, precision: Option<usize>, alternate: bool, upper: bool) -> String {
+    if !value.is_finite() {
+        return non_finite(value, upper);
+    }
+    let significant = precision.unwrap_or(6).max(1);
+    let scientific = format!("{value:.*e}", significant - 1);
+    let (mantissa, exponent) = scientific
+        .split_once('e')
+        .unwrap_or((scientific.as_str(), "0"));
+    let exponent: i32 = exponent.parse().unwrap_or(0);
+    let marker = if upper { 'E' } else { 'e' };
+    let exponent_text = format!(
+        "{}{:02}",
+        if exponent < 0 { '-' } else { '+' },
+        exponent.abs()
+    );
+
+    if exponent < -4 || exponent >= significant as i32 {
+        if alternate {
+            return format!("{mantissa}{marker}{exponent_text}");
+        }
+        let trimmed = trim_fraction(mantissa);
+        return format!("{trimmed}{marker}{exponent_text}");
+    }
+
+    let decimals = (significant as i32 - 1 - exponent).max(0) as usize;
+    let fixed = format!("{value:.decimals$}");
+    if alternate {
+        return if fixed.contains('.') {
+            fixed
+        } else {
+            format!("{fixed}.")
+        };
+    }
+    trim_fraction(&fixed)
+}
+
+/// Drop trailing zeros after a decimal point, and the point itself when
+/// nothing is left after it. Digits before the point are never touched.
+fn trim_fraction(text: &str) -> String {
+    if !text.contains('.') {
+        return text.to_owned();
+    }
+    let trimmed = text.trim_end_matches('0');
+    trimmed.strip_suffix('.').unwrap_or(trimmed).to_owned()
+}
+
+/// Quote a value so it reads back unchanged, the way bash's `%q` does.
+fn quote_for_reuse(value: &[u8]) -> Vec<u8> {
+    if value.is_empty() {
+        return b"''".to_vec();
+    }
+    if value.iter().any(|byte| is_control_byte(*byte)) {
+        let mut out = b"$'".to_vec();
+        for &byte in value {
+            match byte {
+                0x07 => out.extend_from_slice(b"\\a"),
+                0x08 => out.extend_from_slice(b"\\b"),
+                0x09 => out.extend_from_slice(b"\\t"),
+                0x0a => out.extend_from_slice(b"\\n"),
+                0x0b => out.extend_from_slice(b"\\v"),
+                0x0c => out.extend_from_slice(b"\\f"),
+                0x0d => out.extend_from_slice(b"\\r"),
+                0x1b => out.extend_from_slice(b"\\E"),
+                b'\\' => out.extend_from_slice(b"\\\\"),
+                b'\'' => out.extend_from_slice(b"\\'"),
+                byte if is_control_byte(byte) => {
+                    out.extend_from_slice(format!("\\{byte:03o}").as_bytes());
+                }
+                byte => out.push(byte),
+            }
+        }
+        out.push(b'\'');
+        return out;
+    }
+
+    let mut out = Vec::with_capacity(value.len());
+    for (position, &byte) in value.iter().enumerate() {
+        // `~` and `#` only mean something at the start of a word.
+        let safe = is_reusable_byte(byte) || (position > 0 && matches!(byte, b'~' | b'#'));
+        if !safe {
+            out.push(b'\\');
+        }
+        out.push(byte);
+    }
+    out
+}
+
+fn is_control_byte(byte: u8) -> bool {
+    byte < 0x20 || byte == 0x7f
+}
+
+/// Bytes bash's `%q` leaves bare: the ASCII set it measured plus every
+/// non-ASCII byte, which the C.UTF-8 locale treats as printable.
+fn is_reusable_byte(byte: u8) -> bool {
+    byte >= 0x80
+        || byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'%' | b'+' | b'-' | b'.' | b'/' | b':' | b'=' | b'@' | b'_'
+        )
+}
+
+/// What `strtoimax` would not tell us: whether anything at all was a number.
+struct IntegerScan {
+    negative: bool,
+    digits: bool,
+    value: u128,
+    junk: bool,
+    /// The text began with `0x` but held no hex digit.
+    bad_hex: bool,
+}
+
+/// bash's integer argument rules: optional blanks and sign, a `'` or `"` that
+/// takes the next character's code point (and ignores the rest), then a base-0
+/// number, which also accepts a `0b` binary prefix.
+fn scan_integer(text: &str) -> IntegerScan {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    let mut negative = false;
+    if let Some(&byte) = bytes.get(index) {
+        if byte == b'+' || byte == b'-' {
+            negative = byte == b'-';
+            index += 1;
+        }
+    }
+
+    if let Some(&quote) = bytes.get(index)
+        && (quote == b'\'' || quote == b'"')
+    {
+        let rest = text.get(index + 1..).unwrap_or_default();
+        let value = rest.chars().next().map_or(0, |character| u32::from(character) as u128);
+        return IntegerScan {
+            negative,
+            digits: true,
+            value,
+            junk: false,
+            bad_hex: false,
+        };
+    }
+
+    let digit_at = |position: usize, radix: u32| {
+        bytes
+            .get(position)
+            .and_then(|byte| (*byte as char).to_digit(radix))
+    };
+    let (radix, start, bad_hex) = if bytes.get(index) == Some(&b'0')
+        && matches!(bytes.get(index + 1), Some(b'x' | b'X'))
+    {
+        if digit_at(index + 2, 16).is_some() {
+            (16, index + 2, false)
+        } else {
+            (8, index, true)
+        }
+    } else if bytes.get(index) == Some(&b'0')
+        && matches!(bytes.get(index + 1), Some(b'b' | b'B'))
+        && digit_at(index + 2, 2).is_some()
+    {
+        (2, index + 2, false)
+    } else if bytes.get(index) == Some(&b'0') {
+        (8, index, false)
+    } else {
+        (10, index, false)
+    };
+    let mut value: u128 = 0;
+    let mut digits = false;
+    let mut position = start;
+    while let Some(digit) = digit_at(position, radix) {
+        value = value
+            .saturating_mul(u128::from(radix))
+            .saturating_add(u128::from(digit));
+        digits = true;
+        position += 1;
+    }
+    // bash rejects even trailing blanks here: `5 ` is an invalid number while
+    // ` 5` is fine.
+    let junk = position != text.len();
+    IntegerScan {
+        negative,
+        digits,
+        value,
+        junk,
+        bad_hex,
+    }
+}
+
+fn signed_argument(args: &[String], cursor: &mut usize, failed: &mut bool) -> i64 {
+    let Some(text) = argument(args, cursor) else {
+        return 0;
+    };
+    let scan = scan_integer(text);
+    if let Some(problem) = integer_problem(&scan) {
+        *failed = true;
+        number_error(text, problem);
+        if !scan.digits {
+            return 0;
+        }
+    }
+    let limit = if scan.negative {
+        1u128 << 63
+    } else {
+        (1u128 << 63) - 1
+    };
+    if scan.value > limit {
+        *failed = true;
+        number_error(text, "Numerical result out of range");
+        return if scan.negative { i64::MIN } else { i64::MAX };
+    }
+    let value = scan.value as i128;
+    (if scan.negative { -value } else { value }) as i64
+}
+
+fn unsigned_argument(args: &[String], cursor: &mut usize, failed: &mut bool) -> u64 {
+    let Some(text) = argument(args, cursor) else {
+        return 0;
+    };
+    let scan = scan_integer(text);
+    if let Some(problem) = integer_problem(&scan) {
+        *failed = true;
+        number_error(text, problem);
+        if !scan.digits {
+            return 0;
+        }
+    }
+    if scan.value > u128::from(u64::MAX) {
+        *failed = true;
+        number_error(text, "Numerical result out of range");
+        return u64::MAX;
+    }
+    let value = scan.value as u64;
+    if scan.negative { value.wrapping_neg() } else { value }
+}
+
+fn star_argument(args: &[String], cursor: &mut usize, failed: &mut bool) -> i64 {
+    let Some(text) = argument(args, cursor) else {
+        return 0;
+    };
+    let scan = scan_integer(text);
+    if let Some(problem) = integer_problem(&scan) {
+        *failed = true;
+        number_error(text, problem);
+    }
+    let value = scan.value.min(i64::MAX as u128) as i64;
+    if scan.negative { -value } else { value }
+}
+
+fn integer_problem(scan: &IntegerScan) -> Option<&'static str> {
+    if scan.bad_hex {
+        return Some("invalid hex number");
+    }
+    if !scan.digits || scan.junk {
+        return Some("invalid number");
+    }
+    None
+}
+
+fn float_argument(args: &[String], cursor: &mut usize, failed: &mut bool) -> f64 {
+    let Some(text) = argument(args, cursor) else {
+        return 0.0;
+    };
+    let (value, problem) = parse_float(text);
+    if let Some(message) = problem {
+        *failed = true;
+        number_error(text, message);
+    }
+    value
+}
+
+fn number_error(text: &str, message: &str) {
+    eprintln!("sharky: printf: {text}: {message}");
+}
+
+/// bash's float arguments: `strtod` spellings, including `inf`, `nan` and
+/// hexadecimal floats, with any trailing byte making the whole argument
+/// invalid.
+fn parse_float(text: &str) -> (f64, Option<&'static str>) {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    let mut negative = false;
+    if let Some(&byte) = bytes.get(index) {
+        if byte == b'+' || byte == b'-' {
+            negative = byte == b'-';
+            index += 1;
+        }
+    }
+    let rest = text.get(index..).unwrap_or_default();
+    let lower = rest.to_ascii_lowercase();
+
+    if lower.starts_with("inf") || lower.starts_with("nan") {
+        let (consumed, value) = if lower.starts_with("infinity") {
+            (8, f64::INFINITY)
+        } else if lower.starts_with("inf") {
+            (3, f64::INFINITY)
+        } else {
+            (3, f64::NAN)
+        };
+        let value = if negative { -value } else { value };
+        let junk = rest.len() != consumed;
+        return (value, if junk { Some("invalid number") } else { None });
+    }
+
+    if lower.starts_with("0x") {
+        let (value, problem) = parse_hex_float(rest);
+        return (if negative { -value } else { value }, problem);
+    }
+
+    let plain = rest.as_bytes();
+    let mut position = 0;
+    let mut digits = false;
+    while plain.get(position).is_some_and(u8::is_ascii_digit) {
+        position += 1;
+        digits = true;
+    }
+    if plain.get(position) == Some(&b'.') {
+        let mut after = position + 1;
+        let mut fraction = false;
+        while plain.get(after).is_some_and(u8::is_ascii_digit) {
+            after += 1;
+            fraction = true;
+        }
+        if digits || fraction {
+            position = after;
+            digits = true;
+        }
+    }
+    if !digits {
+        return (0.0, Some("invalid number"));
+    }
+    if matches!(plain.get(position), Some(b'e' | b'E')) {
+        let mut after = position + 1;
+        if matches!(plain.get(after), Some(b'+' | b'-')) {
+            after += 1;
+        }
+        let start = after;
+        while plain.get(after).is_some_and(u8::is_ascii_digit) {
+            after += 1;
+        }
+        if after > start {
+            position = after;
+        }
+    }
+    let head = rest.get(..position).unwrap_or_default();
+    let value: f64 = head.parse().unwrap_or(0.0);
+    let value = if negative { -value } else { value };
+    (value, if position == rest.len() { None } else { Some("invalid number") })
+}
+
+fn parse_hex_float(rest: &str) -> (f64, Option<&'static str>) {
+    let bytes = rest.as_bytes();
+    let mut position = 2;
+    let mut mantissa = 0.0;
+    let mut exponent = 0i32;
+    let mut digits = false;
+    while let Some(digit) = bytes
+        .get(position)
+        .and_then(|byte| (*byte as char).to_digit(16))
+    {
+        mantissa = mantissa * 16.0 + f64::from(digit);
+        position += 1;
+        digits = true;
+    }
+    if bytes.get(position) == Some(&b'.') {
+        let mut after = position + 1;
+        while let Some(digit) = bytes
+            .get(after)
+            .and_then(|byte| (*byte as char).to_digit(16))
+        {
+            mantissa = mantissa * 16.0 + f64::from(digit);
+            exponent -= 4;
+            after += 1;
+            digits = true;
+        }
+        position = after;
+    }
+    if !digits {
+        return (0.0, Some("invalid hex number"));
+    }
+    if matches!(bytes.get(position), Some(b'p' | b'P')) {
+        let mut after = position + 1;
+        let mut negative = false;
+        if matches!(bytes.get(after), Some(b'+' | b'-')) {
+            negative = bytes[after] == b'-';
+            after += 1;
+        }
+        let start = after;
+        let mut power = 0i32;
+        while let Some(digit) = bytes
+            .get(after)
+            .and_then(|byte| (*byte as char).to_digit(10))
+        {
+            power = power.saturating_mul(10).saturating_add(digit as i32);
+            after += 1;
+        }
+        if after > start {
+            exponent = exponent.saturating_add(if negative { -power } else { power });
+            position = after;
+        }
+    }
+    let value = mantissa * 2f64.powi(exponent);
+    (
+        value,
+        if position == bytes.len() {
+            None
+        } else {
+            Some("invalid number")
+        },
+    )
+}
+
+fn decimal_digits(input: &[u8], mut index: usize) -> (u64, usize, usize) {
+    let mut value: u64 = 0;
+    let mut taken = 0;
+    while let Some(&digit @ b'0'..=b'9') = input.get(index) {
+        value = value.saturating_mul(10).saturating_add(u64::from(digit - b'0'));
+        index += 1;
+        taken += 1;
+    }
+    (value, index, taken)
+}
+
 fn is_builtin_name(name: &str) -> bool {
     matches!(
         name,
@@ -5257,6 +6392,8 @@ fn is_builtin_name(name: &str) -> bool {
             | "exec"
             | "time"
             | "help"
+            | "echo"
+            | "printf"
     )
 }
 
@@ -6433,5 +7570,100 @@ mod tests {
             assert_eq!(out, sorted, "{suffix}");
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // The three backslash dialects differ only where bash's do.
+
+    #[test]
+    fn escape_dialects_split_where_bash_splits_them() {
+        let cases: &[(&[u8], Escapes, &[u8], bool)] = &[
+            (br"a\123b", Escapes::Echo, br"a\123b", false),
+            (br"a\123b", Escapes::PercentB, b"aSb", false),
+            (br"a\123b", Escapes::Format, b"aSb", false),
+            (br"a\0101b", Escapes::Echo, b"aAb", false),
+            (br"a\0101b", Escapes::PercentB, b"aAb", false),
+            (br"a\0101b", Escapes::Format, b"a\x081b", false),
+            (br"a\08b", Escapes::Echo, b"a\x008b", false),
+            (br"a\cb", Escapes::Echo, b"a", true),
+            (br"a\cb", Escapes::PercentB, b"a", true),
+            (br"a\cb", Escapes::Format, br"a\cb", false),
+            (br"a\'b", Escapes::Format, b"a'b", false),
+            (br"a\'b", Escapes::Echo, br"a\'b", false),
+            (br"a\x41b", Escapes::Format, b"aAb", false),
+            (br"a\x", Escapes::Format, br"a\x", false),
+            (br"a\xZZb", Escapes::Echo, br"a\xZZb", false),
+            (br"a\u41b", Escapes::Format, b"a\xd0\x9b", false),
+            (br"a\U0001F600b", Escapes::PercentB, b"a\xf0\x9f\x98\x80b", false),
+            (br"a\uZZZZb", Escapes::Echo, br"a\uZZZZb", false),
+            (br"a\101b", Escapes::Echo, br"a\101b", false),
+            (br"a\7b", Escapes::Echo, br"a\7b", false),
+            (br"trailing\\", Escapes::Format, br"trailing\", false),
+        ];
+        for (input, dialect, expected, stopped) in cases {
+            let (bytes, stop) = decode_escapes(input, *dialect, false);
+            assert_eq!(bytes, *expected, "{input:?} {dialect:?}");
+            assert_eq!(stop, *stopped, "{input:?} {dialect:?}");
+        }
+    }
+
+    #[test]
+    fn form_percent_leaves_the_conversion_to_the_parser() {
+        // bash prints the backslash and rereads the `%`, so `\%b` is a `%b`.
+        let (outcome, next) = decode_escape(b"\\%b", 1, Escapes::Format, false);
+        assert!(matches!(outcome, Escape::Rescan), "the % must be reread");
+        assert_eq!(next, 1);
+    }
+
+    // `%q`'s control-byte form is unreachable through the shell today: the
+    // expansion path drops control bytes before printf sees them, so the branch
+    // is covered here instead.
+
+    #[test]
+    fn quote_for_reuse_matches_the_forms_bash_prints() {
+        let cases: &[(&[u8], &[u8])] = &[
+            (b"", b"''"),
+            (b"a b", br"a\ b"),
+            (b"it's", br"it\'s"),
+            (b"a*b", br"a\*b"),
+            (b"~x", br"\~x"),
+            (b"a~b", b"a~b"),
+            (b"#x", br"\#x"),
+            (b"a#b", b"a#b"),
+            (b"a.b-c_d/e:f@g+h=i%j", b"a.b-c_d/e:f@g+h=i%j"),
+            (b"a,b", br"a\,b"),
+            (b"a\\b", br"a\\b"),
+            (b"\xc3\xa7", b"\xc3\xa7"),
+            (b"a\nb", b"$'a\\nb'"),
+            (b"a\tb", b"$'a\\tb'"),
+            (b"a\rb", b"$'a\\rb'"),
+            (b"a\x1bb", b"$'a\\Eb'"),
+            (b"a\x01b", b"$'a\\001b'"),
+            (b"a\x7fb", b"$'a\\177b'"),
+            (b"a b\nc", b"$'a b\\nc'"),
+            (b"a\\b\tc", b"$'a\\\\b\\tc'"),
+            (b"a'b\tc", b"$'a\\'b\\tc'"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(quote_for_reuse(input), *expected, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn unicode_escapes_encode_like_bash() {
+        let cases: &[(u32, &[u8])] = &[
+            (0x41, b"A"),
+            (0x00e9, b"\xc3\xa9"),
+            (0x041b, b"\xd0\x9b"),
+            (0x20ac, b"\xe2\x82\xac"),
+            (0x1_f600, b"\xf0\x9f\x98\x80"),
+            (0x11_0000, b"\xf4\x90\x80\x80"),
+            (0x7fff_ffff, b"\xfd\xbf\xbf\xbf\xbf\xbf"),
+            (0xffff_ffff, b""),
+        ];
+        for (value, expected) in cases {
+            let mut out = Vec::new();
+            push_utf8(*value, &mut out);
+            assert_eq!(out, *expected, "{value:#x}");
+        }
     }
 }

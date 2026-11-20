@@ -1060,14 +1060,14 @@ tide greeting off
 #[test]
 fn highlight_paints_command_strings_and_variables() {
     let mut session = history_session_with(Some(HIGHLIGHT_CONFIG));
-    let _ = session.writer.write_all(b"echo \"$HOME\"");
+    let _ = session.writer.write_all(b"ls \"$HOME\"");
     let seen = read_until(
         session.master.as_raw_fd(),
         "$HOME\u{1b}[0m\u{1b}[38;2;140;207;168m\"",
         Duration::from_secs(5),
     );
     assert!(
-        seen.contains("\u{1b}[38;2;53;184;197mecho\u{1b}[0m"),
+        seen.contains("\u{1b}[38;2;53;184;197mls\u{1b}[0m"),
         "command role missing: {seen:?}"
     );
     assert!(

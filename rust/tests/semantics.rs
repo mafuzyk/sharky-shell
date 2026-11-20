@@ -2015,11 +2015,11 @@ fn command_v_prints_the_bare_name_of_a_function() {
 
 #[test]
 fn command_v_prints_the_path_of_an_external() {
-    let out = sharky("command -v printf");
+    let out = sharky("command -v ls");
     let text = stdout(&out);
     assert_eq!(status(&out), 0);
     assert!(text.starts_with('/'), "{text:?}");
-    assert!(text.trim_end().ends_with("printf"), "{text:?}");
+    assert!(text.trim_end().ends_with("ls"), "{text:?}");
 }
 
 #[test]
@@ -2060,7 +2060,7 @@ fn command_v_fails_when_every_name_is_missing() {
 
 #[test]
 fn command_v_succeeds_when_every_name_resolves() {
-    let out = sharky("probe() { :; }; command -v cd probe printf");
+    let out = sharky("probe() { :; }; command -v cd probe ls");
     let text = stdout(&out);
     assert_eq!(status(&out), 0);
     assert!(text.starts_with("cd\nprobe\n/"), "{text:?}");
@@ -2164,15 +2164,15 @@ fn command_big_v_prints_every_statement_of_a_function() {
 
 #[test]
 fn command_big_v_describes_an_external_with_its_path() {
-    let out = sharky("command -V printf");
+    let out = sharky("command -V ls");
     let text = stdout(&out);
     assert_eq!(status(&out), 0);
     let described = text.trim_end();
     let path = described
-        .strip_prefix("printf is ")
+        .strip_prefix("ls is ")
         .unwrap_or_else(|| panic!("unexpected description: {described:?}"));
     assert!(path.starts_with('/'), "{described:?}");
-    assert!(path.ends_with("printf"), "{described:?}");
+    assert!(path.ends_with("ls"), "{described:?}");
 }
 
 #[test]
@@ -2393,7 +2393,7 @@ fn command_dash_p_still_runs_builtins_under_a_hostile_path() {
 #[test]
 fn type_keeps_its_formatting_for_every_kind_of_name() {
     let out = sharky(
-        r#"probe() { printf '%s' one; printf '%s' two; }; alias hi='echo hello'; type cd; type probe; type hi; type printf; type definitely-not-a-command; echo "st=$?""#,
+        r#"probe() { printf '%s' one; printf '%s' two; }; alias hi='echo hello'; type cd; type probe; type hi; type ls; type definitely-not-a-command; echo "st=$?""#,
     );
     let text = stdout(&out);
     let lines: Vec<&str> = text.lines().collect();
@@ -2405,7 +2405,7 @@ fn type_keeps_its_formatting_for_every_kind_of_name() {
     assert_eq!(lines[5], "    printf '%s' two");
     assert_eq!(lines[6], "}");
     assert_eq!(lines[7], "hi is aliased to `echo hello'");
-    assert!(lines[8].starts_with("printf is /"), "{text:?}");
+    assert!(lines[8].starts_with("ls is /"), "{text:?}");
     assert_eq!(lines[9], "st=1");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -2457,4 +2457,365 @@ fn type_empty_string_argument_is_reported_as_not_found() {
         out.stderr
     );
     assert_eq!(status(&out), 0);
+}
+
+// ---------------------------------------------------------------------------
+// echo and printf
+//
+// Both are builtins, so these cases compare the shell's own output with bytes
+// measured from bash 5.3.20: the same stdout and the same exit status for each
+// snippet, down to NUL bytes and raw UTF-8. The tuple is (script, stdout,
+// status).
+// ---------------------------------------------------------------------------
+
+const ECHO_CASES: &[(&str, &[u8], i32)] = &[
+    ("echo", b"\n", 0),
+    ("echo hello", b"hello\n", 0),
+    ("echo -n hello", b"hello", 0),
+    ("echo -n", b"", 0),
+    ("echo -e", b"\n", 0),
+    ("echo a b c", b"a b c\n", 0),
+    ("echo one two three", b"one two three\n", 0),
+    ("echo -n -n hi", b"hi", 0),
+    ("echo -- hello", b"-- hello\n", 0),
+    ("echo - hello", b"- hello\n", 0),
+    ("echo ---", b"---\n", 0),
+    ("echo -x hi", b"-x hi\n", 0),
+    ("echo -nex hi", b"-nex hi\n", 0),
+    ("echo -e 'a\\tb'", b"a\tb\n", 0),
+    ("echo 'a\\tb'", b"a\\tb\n", 0),
+    ("echo -E 'a\\tb'", b"a\\tb\n", 0),
+    ("echo -ne 'a\\tb'", b"a\tb", 0),
+    ("echo -en 'a\\tb'", b"a\tb", 0),
+    ("echo -e -n 'a\\tb'", b"a\tb", 0),
+    ("echo -nEe 'a\\tb'", b"a\tb", 0),
+    ("echo -eE 'a\\tb'", b"a\\tb\n", 0),
+    ("echo -Ee 'a\\tb'", b"a\tb\n", 0),
+    ("echo -e 'a\\eb\\Ec'", b"a\x1bb\x1bc\n", 0),
+    ("echo -e 'a\\ab\\bb\\fb\\nb\\rb\\tb\\vb'", b"a\x07b\x08b\x0cb\nb\x0db\tb\x0bb\n", 0),
+    ("echo -e 'a\\\\b'", b"a\\b\n", 0),
+    ("echo -e 'a\\cb'; echo after", b"aafter\n", 0),
+    ("echo -e one two '\\c' three", b"one two ", 0),
+    ("echo -e 'a\\0a'", b"a\x00a\n", 0),
+    ("echo -e 'a\\0101b'", b"aAb\n", 0),
+    ("echo -e 'a\\0400b'", b"a\x00b\n", 0),
+    ("echo -e 'a\\08b'", b"a\x008b\n", 0),
+    ("echo -e 'a\\x41b'", b"aAb\n", 0),
+    ("echo -e 'a\\x4b'", b"aK\n", 0),
+    ("echo -e 'a\\x411b'", b"aA1b\n", 0),
+    ("echo -e 'a\\x'", b"a\\x\n", 0),
+    ("echo -e 'a\\xZZb'", b"a\\xZZb\n", 0),
+    ("echo -e 'a\\101b'", b"a\\101b\n", 0),
+    ("echo -e 'a\\7b'", b"a\\7b\n", 0),
+    ("echo -e 'a\\q'", b"a\\q\n", 0),
+    ("echo -e 'a\\u0041b'", b"aAb\n", 0),
+    ("echo -e 'a\\u41b'", b"a\xd0\x9b\n", 0),
+    ("echo -e 'a\\U0001F600b'", b"a\xf0\x9f\x98\x80b\n", 0),
+    ("echo -e 'a\\uZZZZb'", b"a\\uZZZZb\n", 0),
+    ("echo -e 'a\\U00110000b'", b"a\xf4\x90\x80\x80b\n", 0),
+    ("echo -e 'trailing\\'", b"trailing\\\n", 0),
+    ("echo -e '' x", b" x\n", 0),
+    ("echo \"\"", b"\n", 0),
+    ("echo -e 'a\\tb' -n", b"a\tb -n\n", 0),
+];
+
+#[test]
+fn echo_matches_bash_for_flags_and_escapes() {
+    for (script, expected, code) in ECHO_CASES {
+        let out = sharky(script);
+        assert_eq!(out.stdout, *expected, "{script}");
+        assert_eq!(status(&out), *code, "{script}");
+    }
+}
+
+const PRINTF_FORMAT_CASES: &[(&str, &[u8], i32)] = &[
+    ("printf hello", b"hello", 0),
+    ("printf \"\"", b"", 0),
+    ("printf 'abc\\n'", b"abc\n", 0),
+    ("printf '%s' abc", b"abc", 0),
+    ("printf '%s\\n' a b c", b"a\nb\nc\n", 0),
+    ("printf '%s-%s\\n' a b c", b"a-b\nc-\n", 0),
+    ("printf '%s %s\\n' a b c d e", b"a b\nc d\ne \n", 0),
+    ("printf '%d\\n'", b"0\n", 0),
+    ("printf '%d %d\\n' 1", b"1 0\n", 0),
+    ("printf '%s|%s\\n' a", b"a|\n", 0),
+    ("printf '%s' a b", b"ab", 0),
+    ("printf 'abc\\n' x y", b"abc\n", 0),
+    ("printf '%%' a b", b"%", 0),
+    ("printf 'x%%y\\n'", b"x%y\n", 0),
+    ("printf '%s' ", b"", 0),
+    ("printf '[%c]' abc", b"[a]", 0),
+    ("printf '[%c]' ''", b"[\x00]", 0),
+    ("printf '[%c]' 65", b"[6]", 0),
+    ("printf '[%5c]' a", b"[    a]", 0),
+    ("printf '[%-5c]' a", b"[a    ]", 0),
+    ("printf '[%08c]' a", b"[       a]", 0),
+    ("printf '[%5s]' ab", b"[   ab]", 0),
+    ("printf '[%-5s]' ab", b"[ab   ]", 0),
+    ("printf '[%05d]' 42", b"[00042]", 0),
+    ("printf '[%+d]' 42", b"[+42]", 0),
+    ("printf '[%+d]' -42", b"[-42]", 0),
+    ("printf '[% d]' 42", b"[ 42]", 0),
+    ("printf '[% d]' -42", b"[-42]", 0),
+    ("printf '[%#x]' 255", b"[0xff]", 0),
+    ("printf '[%#o]' 8", b"[010]", 0),
+    ("printf '[%#o]' 0", b"[0]", 0),
+    ("printf '[%#x]' 0", b"[0]", 0),
+    ("printf '[%x]' 255", b"[ff]", 0),
+    ("printf '[%X]' 255", b"[FF]", 0),
+    ("printf '[%u]' -1", b"[18446744073709551615]", 0),
+    ("printf '[%u]' 42", b"[42]", 0),
+    ("printf '[%o]' 8", b"[10]", 0),
+    ("printf '[%i]' -7", b"[-7]", 0),
+    ("printf '[%#8x]' 255", b"[    0xff]", 0),
+    ("printf '[%#08x]' 255", b"[0x0000ff]", 0),
+    ("printf '[%.4d]' 42", b"[0042]", 0),
+    ("printf '[%8.4d]' 42", b"[    0042]", 0),
+    ("printf '[%-8.4d]' 42", b"[0042    ]", 0),
+    ("printf '[%08.4d]' 42", b"[    0042]", 0),
+    ("printf '[%#8.4x]' 255", b"[  0x00ff]", 0),
+    ("printf '[%.3d]' 5", b"[005]", 0),
+    ("printf '[%5.3d]' 5", b"[  005]", 0),
+    ("printf '[%.0d]' 0", b"[]", 0),
+    ("printf '[%#.3o]' 8", b"[010]", 0),
+    ("printf '[%+x]' 255", b"[ff]", 0),
+    ("printf '[%.2s]' abcdef", b"[ab]", 0),
+    ("printf '[%10.3s]' abcdef", b"[       abc]", 0),
+    ("printf '[%-10.3s]' abcdef", b"[abc       ]", 0),
+    ("printf '[%.2s]' 'ação'", b"[a\xc3]", 0),
+    ("printf '[%.0s]' ab", b"[]", 0),
+    ("printf '[%*d]' 5 42", b"[   42]", 0),
+    ("printf '[%*d]' -5 42", b"[42   ]", 0),
+    ("printf '[%-*d]' 6 42", b"[42    ]", 0),
+    ("printf '[%.*f]' 2 1.234", b"[1.23]", 0),
+    ("printf '[%*.*f]' 10 2 1.23456", b"[      1.23]", 0),
+    ("printf '[%.*d]' 3 5", b"[005]", 0),
+    ("printf '[%*.*s]' 8 2 abcdef", b"[      ab]", 0),
+    ("printf '[%.*s]' -1 abcdef", b"[abcdef]", 0),
+    ("printf '[%*s]' -3 ab", b"[ab ]", 0),
+    ("printf '[%*d]' ; echo \"st=$?\"", b"[0]st=0\n", 0),
+    ("printf '[%f]' 1.5", b"[1.500000]", 0),
+    ("printf '[%.2f]' 1.567", b"[1.57]", 0),
+    ("printf '[%f]' 1.5 2.5", b"[1.500000][2.500000]", 0),
+    ("printf '[%e]' 1500", b"[1.500000e+03]", 0),
+    ("printf '[%.2e]' 1500", b"[1.50e+03]", 0),
+    ("printf '[%E]' 1500", b"[1.500000E+03]", 0),
+    ("printf '[%g]' 1500", b"[1500]", 0),
+    ("printf '[%g]' 0", b"[0]", 0),
+    ("printf '[%g]' 0.0001", b"[0.0001]", 0),
+    ("printf '[%g]' 0.00001", b"[1e-05]", 0),
+    ("printf '[%g]' 1234567", b"[1.23457e+06]", 0),
+    ("printf '[%g]' 100000", b"[100000]", 0),
+    ("printf '[%g]' 1000000", b"[1e+06]", 0),
+    ("printf '[%g]' 1.23456789", b"[1.23457]", 0),
+    ("printf '[%G]' 0.00015", b"[0.00015]", 0),
+    ("printf '[%#g]' 1.5", b"[1.50000]", 0),
+    ("printf '[%#g]' 100000", b"[100000.]", 0),
+    ("printf '[%#g]' 0", b"[0.00000]", 0),
+    ("printf '[%.3g]' 1234.5", b"[1.23e+03]", 0),
+    ("printf '[%.3g]' 12345", b"[1.23e+04]", 0),
+    ("printf '[%.1g]' 9.99", b"[1e+01]", 0),
+    ("printf '[%.2g]' 0.0001234", b"[0.00012]", 0),
+    ("printf '[%f]' inf", b"[inf]", 0),
+    ("printf '[%F]' inf", b"[INF]", 0),
+    ("printf '[%f]' nan", b"[nan]", 0),
+    ("printf '[%G]' nan", b"[NAN]", 0),
+    ("printf '[%f]' -0", b"[-0.000000]", 0),
+    ("printf '[%g]' -0", b"[-0]", 0),
+    ("printf '[%e]' 0", b"[0.000000e+00]", 0),
+    ("printf '[%e]' -0.0", b"[-0.000000e+00]", 0),
+    ("printf '[%f]' 0x10", b"[16.000000]", 0),
+    ("printf '[%f]' 0x1.8p1", b"[3.000000]", 0),
+    ("printf '[%.0f]' 2.5", b"[2]", 0),
+    ("printf '[%.0f]' 3.5", b"[4]", 0),
+    ("printf '[%8.2f]' 1.5", b"[    1.50]", 0),
+    ("printf '[%08.2f]' -1.5", b"[-0001.50]", 0),
+    ("printf '[%-8.2f]' 1.5", b"[1.50    ]", 0),
+    ("printf '[%+8.2f]' 1.5", b"[   +1.50]", 0),
+    ("printf '[% 8.2e]' 1.5", b"[ 1.50e+00]", 0),
+    ("printf '[%08.2e]' 1.5", b"[1.50e+00]", 0),
+    ("printf '[%8.3g]' 1.5", b"[     1.5]", 0),
+    ("printf '[%#.0e]' 1.5", b"[2.e+00]", 0),
+    ("printf '[%#.0f]' 1.5", b"[2.]", 0),
+    ("printf '[%q]' 'a b'", b"[a\\ b]", 0),
+    ("printf '[%q]' ''", b"['']", 0),
+    ("printf \"[%q]\" \"it's\"", b"[it\\'s]", 0),
+    ("printf '[%q]' 'a*b~#!?[]{};&|<>()`$,'", b"[a\\*b~#\\!\\?\\[\\]\\{\\}\\;\\&\\|\\<\\>\\(\\)\\`\\$\\,]", 0),
+    ("printf '[%q]' 'a.b-c_d/e:f@g+h=i%j~k#l'", b"[a.b-c_d/e:f@g+h=i%j~k#l]", 0),
+    ("printf '[%q]' $'a\\nb'", b"[$'a\\nb']", 0),
+    ("printf '[%q]' $'a\\tb'", b"[$'a\\tb']", 0),
+    ("printf '[%q]' $'a\\rb'", b"[$'a\\rb']", 0),
+    ("printf '[%q]' 'ação'", b"[a\xc3\xa7\xc3\xa3o]", 0),
+    ("printf '[%q]' '\\'", b"[\\\\]", 0),
+    ("printf '[%8q]' 'ab'", b"[      ab]", 0),
+    ("printf '[%.2q]' 'abc'", b"[ab]", 0),
+    ("printf '[%5.1q]' 'abc def'", b"[    a]", 0),
+    ("printf '[%8b]' 'a b'", b"[     a b]", 0),
+    ("printf '[%-8b]' 'a b'", b"[a b     ]", 0),
+    ("printf '[%08b]' 'a b'", b"[     a b]", 0),
+    ("printf '[%.2b]' 'a b'", b"[a ]", 0),
+    ("printf '[%b]' 'a\\tb'", b"[a\tb]", 0),
+    ("printf '[%b]' 'a\\\\b'", b"[a\\b]", 0),
+    ("printf '[%b]' 'a\\123b'", b"[aSb]", 0),
+    ("printf '[%b]' 'a\\1b'", b"[a\x01b]", 0),
+    ("printf '[%b]' 'a\\0777b'", b"[a\xffb]", 0),
+    ("printf '[%b]' 'a\\777b'", b"[a\xffb]", 0),
+    ("printf '[%b]' 'a\\0b'", b"[a\x00b]", 0),
+    ("printf '[%b]' 'a\\08b'", b"[a\x008b]", 0),
+    ("printf '[%b]' 'a\\0101b'", b"[aAb]", 0),
+    ("printf '[%b]' 'a\\x41b'", b"[aAb]", 0),
+    ("printf '[%b]' 'a\\xb'", b"[a\x0b]", 0),
+    ("printf '[%b]' 'a\\u0041b'", b"[aAb]", 0),
+    ("printf '[%b]' 'a\\zb'", b"[a\\zb]", 0),
+    ("printf '%b' 'a\\cb'; echo next", b"anext\n", 0),
+    ("printf 'x%by' 'a\\c' 'b'; echo next", b"xanext\n", 0),
+    ("printf '%b' 'trailing\\'", b"trailing\\", 0),
+    ("printf '%s\\n' 'a\\cb'", b"a\\cb\n", 0),
+    ("printf '[%n]' x; echo \"st=$?\"", b"[]st=0\n", 0),
+    ("printf '%n%s' a b", b"b", 0),
+    ("printf '[%ld]' 5", b"[5]", 0),
+    ("printf '[%lld]' 5", b"[5]", 0),
+    ("printf '[%hd]' 5", b"[5]", 0),
+    ("printf '[%Lf]' 1.5", b"[1.500000]", 0),
+    ("printf '[%zu]' 5", b"[5]", 0),
+    ("printf '[%jd]' 5", b"[5]", 0),
+    ("printf '[%'\"'\"'d]' 1234", b"[1234]", 0),
+    ("printf 'a\\141b\\n'", b"aab\n", 0),
+    ("printf 'a\\0b\\n'", b"a\x00b\n", 0),
+    ("printf 'a\\0101b\\n'", b"a\x081b\n", 0),
+    ("printf 'a\\1b\\n'", b"a\x01b\n", 0),
+    ("printf 'a\\12b\\n'", b"a\nb\n", 0),
+    ("printf 'a\\777b\\n'", b"a\xffb\n", 0),
+    ("printf 'a\\400b\\n'", b"a\x00b\n", 0),
+    ("printf '\\x41\\x4a\\n'", b"AJ\n", 0),
+    ("printf 'a\\xZZ\\n'", b"a\\xZZ\n", 0),
+    ("printf 'a\\tb\\vc\\ed\\n'", b"a\tb\x0bc\x1bd\n", 0),
+    ("printf 'a\\db\\n'", b"a\\db\n", 0),
+    ("printf 'a\\%zb'; echo \"st=$?\"", b"a\\st=0\n", 0),
+    ("printf 'a\\%sb' x", b"a\\xb", 0),
+    ("printf '\\045s' x; echo", b"%s\n", 0),
+    ("printf \"a\\\\'b\\n\"", b"a'b\n", 0),
+    ("printf 'a\\\"b\\n'", b"a\"b\n", 0),
+    ("printf 'a\\?b\\n'", b"a?b\n", 0),
+    ("printf 'a\\ b\\n'", b"a\\ b\n", 0),
+    ("printf 'trailing\\'", b"trailing\\", 0),
+    ("printf -v x hi; echo \"x=$x\"", b"x=hi\n", 0),
+    ("printf -v x '%s-%s' a b; echo \"x=$x\"", b"x=a-b\n", 0),
+    ("printf -v x '%d' 5; echo \"x=$x\"", b"x=5\n", 0),
+    ("printf -- '%s\\n' x", b"x\n", 0),
+    ("printf -- ; echo \"st=$?\"", b"st=2\n", 0),
+    ("printf '-x'; echo \"st=$?\"", b"st=2\n", 0),
+    ("printf -x; echo \"st=$?\"", b"st=2\n", 0),
+    ("printf -v 'bad-name' hi; echo \"st=$?\"", b"st=2\n", 0),
+    ("printf -v 2x hi; echo \"st=$?\"", b"st=2\n", 0),
+    ("printf '[%.0c]' X", b"[X]", 0),
+    ("printf '[%.2c]' X", b"[X]", 0),
+    ("printf '[%.1c]' X", b"[X]", 0),
+    ("printf '%c' 'ação'", b"a", 0),
+    ("printf '%.0b]' 'a'", b"]", 0),
+    ("printf '[%-8.2b]' 'abcd'", b"[ab      ]", 0),
+    ("printf '[%8.2q]' 'a b c'", b"[      a\\]", 0),
+    ("printf '[%c]' 0x41", b"[0]", 0),
+    ("printf '[%5.2c]' 'ab'", b"[    a]", 0),
+];
+
+#[test]
+fn printf_matches_bash_for_formats_and_conversions() {
+    for (script, expected, code) in PRINTF_FORMAT_CASES {
+        let out = sharky(script);
+        assert_eq!(out.stdout, *expected, "{script}");
+        assert_eq!(status(&out), *code, "{script}");
+    }
+}
+
+const PRINTF_NUMBER_CASES: &[(&str, &[u8], i32)] = &[
+    ("printf '[%d]' 0x10", b"[16]", 0),
+    ("printf '[%d]' 010", b"[8]", 0),
+    ("printf '[%d]' abc; echo \"st=$?\"", b"[0]st=1\n", 0),
+    ("printf '[%d]' 12abc; echo \"st=$?\"", b"[12]st=1\n", 0),
+    ("printf '[%d]' ' 5'; echo \"st=$?\"", b"[5]st=0\n", 0),
+    ("printf '[%d]' '5 '; echo \"st=$?\"", b"[5]st=1\n", 0),
+    ("printf '[%d]' +5", b"[5]", 0),
+    ("printf '[%d]' -0x10", b"[-16]", 0),
+    ("printf '[%i]' 1e3; echo \"st=$?\"", b"[1]st=1\n", 0),
+    ("printf '[%d]' 99999999999999999999; echo \"st=$?\"", b"[9223372036854775807]st=1\n", 0),
+    ("printf '[%d]' 0x7fffffffffffffff", b"[9223372036854775807]", 0),
+    ("printf '[%d]' 0x8000000000000000; echo \"st=$?\"", b"[9223372036854775807]st=1\n", 0),
+    ("printf '[%d]' -9223372036854775808", b"[-9223372036854775808]", 0),
+    ("printf '[%u]' 18446744073709551615", b"[18446744073709551615]", 0),
+    ("printf '[%u]' 18446744073709551616; echo \"st=$?\"", b"[18446744073709551615]st=1\n", 0),
+    ("printf '[%x]' 9223372036854775807", b"[7fffffffffffffff]", 0),
+    ("printf '[%d]' 0b101", b"[5]", 0),
+    ("printf '[%d]' 0B11", b"[3]", 0),
+    ("printf '[%d]' 0b2; echo \"st=$?\"", b"[0]st=1\n", 0),
+    ("printf '[%d]' 08; echo \"st=$?\"", b"[0]st=1\n", 0),
+    ("printf '[%d]' \"'x'\"", b"[120]", 0),
+    ("printf '[%d]' \"'é'\"", b"[233]", 0),
+    ("printf '[%d]' '\"ab\"'", b"[97]", 0),
+    ("printf '[%d]' \"'\"", b"[0]", 0),
+    ("printf '[%d]' ''; echo \"st=$?\"", b"[0]st=1\n", 0),
+    ("printf '[%d]' 4 2; echo \"st=$?\"", b"[4][2]st=0\n", 0),
+    ("printf '[%f]' 5x; echo \"st=$?\"", b"[5.000000]st=1\n", 0),
+    ("printf '[%f]' ''; echo \"st=$?\"", b"[0.000000]st=1\n", 0),
+    ("printf '[%f]' .5", b"[0.500000]", 0),
+    ("printf '[%f]' '5.'", b"[5.000000]", 0),
+    ("printf '[%f]' '1.5x'; echo \"st=$?\"", b"[1.500000]st=1\n", 0),
+    ("printf '[%f]' ' 1.5 '; echo \"st=$?\"", b"[1.500000]st=1\n", 0),
+    ("printf '[%f]' Infinity", b"[inf]", 0),
+    ("printf '[%f]' nAn", b"[nan]", 0),
+    ("printf 'a%y' x; echo \"st=$?\"", b"ast=1\n", 0),
+    ("printf '%' x; echo \"st=$?\"", b"st=1\n", 0),
+    ("printf '%5' x; echo \"st=$?\"", b"st=1\n", 0),
+    ("printf 'a%'; echo \"st=$?\"", b"ast=1\n", 0),
+    ("printf '%'; echo \"st=$?\"", b"st=1\n", 0),
+    ("printf '[%5%]' x; echo \"st=$?\"", b"[st=1\n", 0),
+    ("printf 'X%-%' x; echo \"st=$?\"", b"Xst=1\n", 0),
+    ("printf '[%I'\"'\"'d]' 1234; echo \"st=$?\"", b"[st=1\n", 0),
+    ("printf; echo \"st=$?\"", b"st=2\n", 0),
+];
+
+#[test]
+fn printf_matches_bash_for_numbers_and_failures() {
+    for (script, expected, code) in PRINTF_NUMBER_CASES {
+        let out = sharky(script);
+        assert_eq!(out.stdout, *expected, "{script}");
+        assert_eq!(status(&out), *code, "{script}");
+    }
+}
+
+#[test]
+fn echo_and_printf_resolve_as_builtins() {
+    let out = sharky("type echo; type printf");
+    assert_eq!(
+        stdout(&out),
+        "echo is a shell builtin\nprintf is a shell builtin\n"
+    );
+    assert_eq!(status(&out), 0);
+
+    let out = sharky("command -v echo printf");
+    assert_eq!(stdout(&out), "echo\nprintf\n");
+    assert_eq!(status(&out), 0);
+}
+
+#[test]
+fn builtins_print_in_order_inside_pipelines_and_substitutions() {
+    let out = sharky("printf '%s\\n' one two | cat");
+    assert_eq!(stdout(&out), "one\ntwo\n");
+
+    let out = sharky("x=$(printf '%s-%s' a b); printf '[%s]' \"$x\"");
+    assert_eq!(stdout(&out), "[a-b]");
+
+    let out = sharky("echo -n prefix; printf '%s' suffix; echo end");
+    assert_eq!(stdout(&out), "prefixsuffixend\n");
+}
+
+#[test]
+fn printf_writes_to_a_variable_with_dash_v() {
+    let out = sharky("printf -v value '%s/%s' a b; printf '%s' \"$value\"");
+    assert_eq!(stdout(&out), "a/b");
+    assert_eq!(status(&out), 0);
+
+    let out = sharky("printf -v 9bad hi");
+    assert_eq!(stdout(&out), "");
+    assert_eq!(status(&out), 2);
 }

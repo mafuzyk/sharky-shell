@@ -37,6 +37,8 @@ pub const BUILTINS: &[&str] = &[
     "bg",
     "pwd",
     "type",
+    "echo",
+    "printf",
     "alias",
     "abbr",
     "unabbr",
@@ -230,6 +232,23 @@ fn builtin_text(id: &str) -> Option<&'static str> {
         "fg" => "fg [JOB]  bring a job to the foreground.\n",
         "bg" => "bg [JOB]  continue a stopped job in the background.\n",
         "pwd" => "pwd  print the current directory.\n",
+        "echo" => {
+            "echo [-neE] [ARG ...]  print ARG, separated by spaces, and a newline.\n\
+             -n omits the newline, -e interprets escapes (\\\\, \\a, \\b, \\c, \\e,\n\
+             \\f, \\n, \\r, \\t, \\v, \\0nnn, \\xHH, \\uHHHH, \\UHHHHHHHH) and -E\n\
+             turns them off again. Flags stop at the first word that is not one;\n\
+             \\c ends the output. Without -e, escapes are printed literally.\n"
+        }
+        "printf" => {
+            "printf FORMAT [ARG ...]  print ARG converted as FORMAT says.\n\
+             FORMAT is reused while arguments remain. Conversions: %s %b %q %c\n\
+             %d %i %u %o %x %X %f %F %e %E %g %G and %%; flags - + <space> # 0;\n\
+             width and precision, with `*` taking the value from ARG. Escapes in\n\
+             FORMAT and in %b are interpreted, `%b` also honours \\c. A missing\n\
+             argument counts as zero or the empty string; a bad conversion exits\n\
+             1 and an unknown option or no FORMAT exits 2. `-v NAME` stores the\n\
+             output in NAME instead of printing it.\n"
+        }
         "type" => {
             "type NAME ...  describe how each name resolves.\n\
              Prints alias, function, shell builtin or the resolved path; exits 1\n\
