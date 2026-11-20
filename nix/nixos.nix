@@ -26,6 +26,13 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = pkgs.stdenv.hostPlatform.system == "x86_64-linux";
+        message = "programs.sharky is only supported on x86_64-linux.";
+      }
+    ];
+
     environment.systemPackages = [ cfg.package ];
 
     environment.shells = [

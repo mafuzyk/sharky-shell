@@ -61,6 +61,15 @@ in
 
   config = lib.mkIf cfg.enable (
     lib.mkMerge [
+      {
+        assertions = [
+          {
+            assertion = pkgs.stdenv.hostPlatform.system == "x86_64-linux";
+            message = "programs.sharky is only supported on x86_64-linux.";
+          }
+        ];
+      }
+
       { home.packages = [ cfg.package ]; }
 
       (lib.mkIf (cfg.configFile != null) {
