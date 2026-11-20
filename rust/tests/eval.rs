@@ -9,10 +9,8 @@ use std::process::{Command, Output};
 const NO_CONFIG: &str = "/nonexistent/sharky-eval-test";
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "sharky-eval-builtin-{}-{name}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("sharky-eval-builtin-{}-{name}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -115,14 +113,20 @@ fn syntax_error_reports_status_two_and_a_diagnostic() {
 #[test]
 fn return_leaves_the_enclosing_function() {
     let home = scratch("return");
-    let out = sharky(&home, r#"f() { eval 'return 42'; echo unreached; }; f; echo "s=$?""#);
+    let out = sharky(
+        &home,
+        r#"f() { eval 'return 42'; echo unreached; }; f; echo "s=$?""#,
+    );
     assert_eq!(stdout(&out), "s=42\n", "{out:?}");
 }
 
 #[test]
 fn break_leaves_the_enclosing_loop() {
     let home = scratch("break");
-    let out = sharky(&home, r#"for i in 1 2 3; do eval 'break'; echo loop; done; echo done"#);
+    let out = sharky(
+        &home,
+        r#"for i in 1 2 3; do eval 'break'; echo loop; done; echo done"#,
+    );
     assert_eq!(stdout(&out), "done\n", "{out:?}");
 }
 

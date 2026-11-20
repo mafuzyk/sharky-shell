@@ -124,7 +124,10 @@ fn out_of_range_octal_is_rejected() {
     let home = scratch("bad-octal-range");
     let out = sharky(&home, "umask 0022; umask 10000; echo \"s=$?\"; umask");
     assert_eq!(stdout(&out), "s=1\n0022\n", "{out:?}");
-    assert!(stderr(&out).contains("octal number out of range"), "{out:?}");
+    assert!(
+        stderr(&out).contains("octal number out of range"),
+        "{out:?}"
+    );
 }
 
 #[test]
@@ -183,7 +186,10 @@ fn mask_is_inherited_by_child_processes() {
 #[test]
 fn mask_applies_to_files_the_shell_creates() {
     let home = scratch("files");
-    let out = sharky(&home, "cd \"$HOME\"; umask 077; touch made; stat -c %a made");
+    let out = sharky(
+        &home,
+        "cd \"$HOME\"; umask 077; touch made; stat -c %a made",
+    );
     assert_eq!(stdout(&out), "600\n", "{out:?}");
     let mode = std::fs::metadata(home.join("made"))
         .expect("touch must create the file")

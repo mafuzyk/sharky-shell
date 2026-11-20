@@ -2890,8 +2890,8 @@ impl Shell {
                     }
 
                     let position = options.as_bytes().iter().position(|&known| known == c);
-                    let wants_argument = position
-                        .is_some_and(|pos| options.as_bytes().get(pos + 1) == Some(&b':'));
+                    let wants_argument =
+                        position.is_some_and(|pos| options.as_bytes().get(pos + 1) == Some(&b':'));
                     if position.is_none() || c == b':' {
                         if opterr {
                             eprintln!("sharky: illegal option -- {}", c as char);

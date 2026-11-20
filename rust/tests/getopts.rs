@@ -47,7 +47,10 @@ fn iterates_over_explicit_arguments() {
 #[test]
 fn required_argument_lands_in_optarg() {
     let home = scratch("optarg");
-    let out = sharky(&home, r#"getopts "b:" o -b val; echo "$o [$OPTARG] $OPTIND""#);
+    let out = sharky(
+        &home,
+        r#"getopts "b:" o -b val; echo "$o [$OPTARG] $OPTIND""#,
+    );
     assert_eq!(stdout(&out), "b [val] 3\n", "{out:?}");
 }
 
@@ -120,7 +123,10 @@ fn missing_argument_reports_question_mark_and_diagnostic() {
 #[test]
 fn end_of_options_fails_and_sets_question_mark() {
     let home = scratch("eof");
-    let out = sharky(&home, r#"getopts "a" o -a; getopts "a" o -a; echo "s=$? o=$o""#);
+    let out = sharky(
+        &home,
+        r#"getopts "a" o -a; getopts "a" o -a; echo "s=$? o=$o""#,
+    );
     assert_eq!(stdout(&out), "s=1 o=?\n", "{out:?}");
 }
 
@@ -166,7 +172,10 @@ fn a_lone_dash_is_not_an_option() {
 #[test]
 fn assigning_optind_one_resets_the_scan() {
     let home = scratch("reset");
-    let out = sharky(&home, r#"set -- -a x; getopts "a" o; OPTIND=1; getopts "a" o; echo "o=$o s=$?""#);
+    let out = sharky(
+        &home,
+        r#"set -- -a x; getopts "a" o; OPTIND=1; getopts "a" o; echo "o=$o s=$?""#,
+    );
     assert_eq!(stdout(&out), "o=a s=0\n", "{out:?}");
 }
 
@@ -244,7 +253,10 @@ fn a_non_option_word_ends_the_scan_without_being_skipped() {
 #[test]
 fn a_colon_only_optstring_defines_no_options() {
     let home = scratch("colon-only");
-    let out = sharky(&home, r#"getopts ":" o -x; echo "s=$? o=$o [${OPTARG-UNSET}]""#);
+    let out = sharky(
+        &home,
+        r#"getopts ":" o -x; echo "s=$? o=$o [${OPTARG-UNSET}]""#,
+    );
     assert_eq!(stdout(&out), "s=0 o=? [x]\n", "{out:?}");
     assert_eq!(stderr(&out), "", "{out:?}");
 }
