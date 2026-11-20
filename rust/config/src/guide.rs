@@ -147,13 +147,22 @@ pub fn topic(id: &str) -> Option<String> {
                 .to_string(),
         ),
         "tide history" => Some(format!(
-            "`tide {key} N` sets how many command lines Sharky keeps. N must be a non-negative \
-             integer; an unset key or 0 falls back to 1000.\n\
+            "`tide {key} N` sets how many command lines a session keeps in memory (default 1000). \
+             N must be a non-negative integer; an unset key or 0 falls back to 1000.\n\
              A non-numeric value is rejected when config.sharky is parsed: `tide {key} many` \
              reports `tide {key} expects a number, found 'many'` and the shell keeps its \
              defaults.\n\
+             This limit bounds only one session's view; it never trims the shared file. \
+             Auto-clean bounds the file itself with a vacuum that caps it at 262144 records by \
+             file position, independently of every session's memory limit.\n\
              Entries are stored in one shared file at $XDG_DATA_HOME/sharky/history, or \
-             ~/.local/share/sharky/history when that is unset, unless SHARKY_HISTORY overrides it.",
+             ~/.local/share/sharky/history when that is unset, unless SHARKY_HISTORY overrides it.\n\
+             New records use a one-line, TAB-separated v2 grammar: \
+             `h2 <when-us> <cwd> <npaths> <paths...> <cmd> <hits>`, with escapes inside each field. \
+             Legacy v1 lines coexist; migration is lazy, so nothing is rewritten on load and a \
+             legacy record keeps when = None and its original bytes. Downgrading to a 3.6.0 binary \
+             is non-destructive: it reads v2 lines as opaque commands and its vacuum keeps them \
+             opaque, so the history file is never lost or corrupted.",
             key = TIDE_NUMBER
         )),
         "anchor" => Some(format!(

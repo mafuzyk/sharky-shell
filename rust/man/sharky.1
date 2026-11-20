@@ -279,13 +279,42 @@ Leading \fB./\fR and \fB../\fR components are preserved in globstar results. A
 .SH HISTORY
 After each command is evaluated, sharky appends it to one shared history file
 under a lock. A failed write is reported and the entry stays only in memory; a
-torn tail from a crash is dropped and cleared on the next append. A shell that
-started earlier keeps its own view until it runs
-.B history merge
-from the prompt; this never rewrites entries from another session. Private mode
+torn tail from a crash is dropped and cleared on the next append. Private mode
 (\fB\-P\fR) keeps history in memory and leaves the file untouched. A history file
 that cannot be read warns at startup and makes \fBhistory \-c\fR fail instead of
 claiming it cleared the file.
+.PP
+An interactive session refreshes the shared file before every primary prompt:
+one \fBstat\fR fingerprint decides whether a read is needed, so a durable command
+another terminal appended appears at the next prompt with no manual step. The
+editor's history list, autosuggest and \fBhistory\fR see everything;
+.B history merge
+remains as the forced, idempotent full re-read. Expansion is guarded by origin:
+\fB!!\fR, \fB!n\fR and \fB!prefix\fR resolve only entries this session loaded at
+startup or ran itself, never a command picked up from another session, and after
+a refresh \fB!n\fR numbers that expansion list rather than the full
+\fBhistory\fR listing.
+.PP
+The in-memory limit (\fBtide history N\fR, default 1000) bounds only one
+session's memory; it never trims the file other sessions share. Auto-clean bounds
+the file itself: a vacuum caps the shared history at 262144 records by file
+position, independently of any session's memory limit.
+.PP
+New records use a one-line, TAB-separated v2 grammar,
+\fBh2 <when-us> <cwd> <npaths> <paths...> <cmd> <hits>\fR, with escapes inside
+each field so a record stays one line. Legacy v1 lines coexist: migration is
+lazy, so nothing is rewritten on load and a legacy record keeps \fBwhen = None\fR
+and its original bytes. Downgrading to a 3.6.0 binary is non-destructive, as it
+reads v2 lines as opaque commands and its vacuum keeps them opaque, so the
+history file is never lost or corrupted.
+.PP
+\fBhistory [\-\-max N] [\-\-reverse] [\-\-show\-time] [\-\-null]
+[\-\-case\-sensitive] [\-\-contains|\-\-prefix|\-\-exact] [PATTERN]\fR
+searches entries with a case-insensitive substring match by default, newest
+first; \fB\-\-max 0\fR prints nothing and \fB\-\-show\-time\fR prints a UTC
+timestamp line for entries that carry one (legacy entries have none).
+\fBhistory delete \-\-exact PATTERN\fR removes exactly matching records by
+rewriting the file under the history lock.
 .SH FILES
 .TP
 .I ~/.config/sharky/config.sharky
@@ -295,8 +324,9 @@ Shell preferences, environment, PATH entries, aliases and key bindings.
 Colour palette and prompt styles.
 .TP
 .I ~/.local/share/sharky/history
-Command history, limited by \fBtide history\fR. \fBSHARKY_HISTORY\fR overrides
-the path; otherwise \fBXDG_DATA_HOME\fR replaces the \fB~/.local/share\fR prefix.
+Shared command history, bounded by a 262144-record file cap, not by the
+\fBtide history\fR in-memory limit. \fBSHARKY_HISTORY\fR overrides the path;
+otherwise \fBXDG_DATA_HOME\fR replaces the \fB~/.local/share\fR prefix.
 .TP
 .I /etc/sharky/profile.sharky, ~/.config/sharky/profile.sharky
 Login profiles run by \fB\-l\fR.

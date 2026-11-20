@@ -297,8 +297,16 @@ fn builtin_text(id: &str) -> Option<&'static str> {
              (legacy entries have none and print none).\n\
              `history delete --exact PATTERN` removes the exactly matching records\n\
              (case-sensitively) and rewrites the file under the history lock; `-c`\n\
-             clears the file and `merge` picks up entries other shells appended\n\
-             since this shell started.\n"
+             clears the file.\n\
+             Interactive sessions refresh the shared file before every primary\n\
+             prompt, so entries another shell appended appear in the editor, the\n\
+             autosuggest and this listing at the next prompt without a manual step;\n\
+             `history merge` stays as the forced, idempotent full re-read. History\n\
+             expansion is guarded by origin: `!!`, `!n`, `!prefix` and the other\n\
+             event designs resolve only entries loaded at startup or run by this\n\
+             session, never one picked up from another terminal. After a refresh the\n\
+             expansion list (Loaded + Local) can be shorter than this listing, and\n\
+             `!n` numbers within that expansion list.\n"
         }
         "wake" => {
             "wake COMMAND  register a command to run at interactive startup.\n\

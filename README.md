@@ -193,10 +193,38 @@ After each command is evaluated, sharky appends it to one shared history file
 (`$SHARKY_HISTORY`, or `${XDG_DATA_HOME:-~/.local/share}/sharky/history`). The
 write happens under a lock; a failed write is reported and the entry stays only
 in memory, and a torn tail from a crash is dropped and cleared on the next
-append. Each session keeps its own view until it runs `history merge`, which
-never rewrites entries from another session. Use `-P`/`--private` to keep history
-in memory and leave the file untouched. A history file that cannot be read warns
-at startup and makes `history -c` fail rather than claim it cleared the file.
+append. Use `-P`/`--private` to keep history in memory and leave the file
+untouched. A history file that cannot be read warns at startup and makes
+`history -c` fail rather than claim it cleared the file.
+
+An interactive session refreshes the shared file before every primary prompt:
+one `stat` fingerprint decides whether a read is needed, so a durable command
+another terminal appended shows up at the next prompt with no manual step. The
+editor's history list, autosuggest and `history` see everything; `history merge`
+remains as the forced, idempotent full re-read. Expansion is guarded by origin:
+`!!`, `!n` and `!prefix` resolve only entries this session loaded at startup or
+ran itself, never a command picked up from another session, and after a refresh
+`!n` numbers that expansion list rather than the full `history` listing.
+
+The in-memory limit `tide history N` (default 1000) bounds only one session's
+memory; it never trims the file other sessions share. Auto-clean bounds the file
+itself: a vacuum caps the shared history at 262144 records by file position,
+independently of every session's memory limit.
+
+New records use a one-line, TAB-separated v2 grammar,
+`h2 \t <when-us> \t <cwd> \t <npaths> \t <paths...> \t <cmd> \t <hits>`, with
+escapes inside each field so a record stays one line. Legacy v1 lines coexist:
+migration is lazy, so nothing is rewritten on load and a legacy record keeps
+`when = None` and its original bytes. Downgrading to a 3.6.0 binary is
+non-destructive — it reads v2 lines as opaque commands and its vacuum keeps them
+opaque — so the history file is never lost or corrupted.
+
+`history [--max N] [--reverse] [--show-time] [--null] [--case-sensitive]
+[--contains|--prefix|--exact] [PATTERN]` searches entries with a
+case-insensitive substring match by default, newest first; `--max 0` prints
+nothing and `--show-time` prints a UTC timestamp line for entries that carry one
+(legacy entries have none). `history delete --exact PATTERN` removes exactly
+matching records by rewriting the file under the history lock.
 
 ## Shell language
 
@@ -304,7 +332,7 @@ and `\t` are escapes. Anything after `//` outside quotes is a comment.
 | `greeting` | `on` / `off` |
 | `autosuggest` | `on` / `off` |
 | `highlight` | `on` / `off` |
-| `history` | number of history entries to keep |
+| `history` | number of history entries to keep in memory (default 1000; the shared file has its own 262144-record cap) |
 | `starship` | `on` / `off`; use `starship prompt` for the prompt |
 | `profile_paths` | `on` / `off`; import `PATH` additions from shell profiles |
 
@@ -413,7 +441,7 @@ reuse these topics.
 | --- | --- |
 | `~/.config/sharky/config.sharky` | settings, environment, PATH, aliases, keys |
 | `~/.config/sharky/theme.sharky` | palette and prompt styles |
-| `~/.local/share/sharky/history` | command history |
+| `~/.local/share/sharky/history` | shared command history, bounded by a 262144-record file cap (not by `tide history`) |
 
 Environment: `SHARKY_CONFIG`, `SHARKY_HISTORY`, `XDG_CONFIG_HOME`,
 `XDG_DATA_HOME`, `NO_COLOR`, `PATH`.

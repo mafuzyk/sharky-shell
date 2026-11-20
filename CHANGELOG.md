@@ -32,6 +32,19 @@ rather than a separate preview track.
   `--show-time` prefixes each timed entry with a UTC timestamp line and
   `history delete --exact PATTERN` removes exact matches by rewriting the file
   under the history lock, preserving legacy bytes and the v2 record fields.
+- Auto-clean bounds the shared history file itself: a vacuum caps it at 262144
+  records by file position, independently of any session's in-memory
+  `tide history` limit (default 1000). A small in-memory limit never truncates a
+  file other sessions share; duplicate commands collapse to their newest record
+  and legacy lines keep their original bytes when rewritten.
+- History records use a one-line v2 format,
+  `h2 \t <when-us> \t <cwd> \t <npaths> \t <paths...> \t <cmd> \t <hits>`
+  (TAB-separated, with escapes inside each field), carrying the command's
+  timestamp, working directory, path hints and hit count. Legacy v1 lines
+  coexist and migrate lazily: loading rewrites nothing, and a legacy record
+  keeps `when = None` and its original bytes. Downgrading to a 3.6.0 binary is
+  non-destructive: that binary reads v2 lines as opaque commands and its vacuum
+  keeps them opaque, so the 3.6.0 history file is never lost or corrupted.
 - The flake now exposes `devShells` with the Rust toolchain, `nixosModules` and
   `homeManagerModules` for declarative setup, and `passthru.shellPath` on the
   package so it can be used as `users.users.<name>.shell` on NixOS.
