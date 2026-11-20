@@ -31,7 +31,9 @@
 //! TAB-separated record documented on [`Record`]. Both escape their own newlines,
 //! so a record is always one line and a torn tail stays detectable. Records are
 //! split on a bare `\n`, never on `str::lines`, so a carriage return a CRLF paste
-//! left in the command survives.
+//! left in the command survives. A complete legacy line whose bytes are not UTF-8
+//! still loads: its in-memory command decodes lossily while its original bytes stay
+//! attached for rewrites, so one such line never disables history I/O.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
@@ -86,6 +88,11 @@ pub const MAX_PATHS: usize = 8;
 /// A legacy (v1) line is a bare escaped command with no header. It loads with
 /// `when = None` and keeps the line it was decoded from, so compaction can write
 /// it back byte for byte.
+///
+/// A legacy line need not be UTF-8: a byte sequence older tools wrote survives as
+/// raw bytes in `original` and only its in-memory `command` is decoded lossily
+/// (invalid sequences become U+FFFD). Every v2 field is written from a Rust
+/// `String`, so an invalid line can only be legacy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
     pub command: String,
@@ -94,8 +101,9 @@ pub struct Record {
     pub paths: Vec<String>,
     /// How many times the command had been recorded when this line was written.
     pub hits: u64,
-    /// The line as it sits on disk, present only for a legacy record.
-    original: Option<String>,
+    /// The line as it sits on disk, present only for a legacy record. Bytes, not
+    /// text: a non-UTF-8 legacy line must be rewritten exactly as it was read.
+    original: Option<Vec<u8>>,
 }
 
 #[allow(dead_code)] // `is_legacy` and `original_line` are exercised by the codec tests
@@ -116,9 +124,11 @@ impl Record {
         self.original.is_some()
     }
 
-    /// The original line for a legacy record, still escaped and without its newline.
+    /// The original line for a legacy record, still escaped and without its
+    /// newline. `None` when the line is not valid UTF-8; its bytes are still
+    /// preserved for rewrites, they just cannot be returned as text.
     pub fn original_line(&self) -> Option<&str> {
-        self.original.as_deref()
+        std::str::from_utf8(self.original.as_deref()?).ok()
     }
 
     /// The record as one line, without the terminating newline. A legacy record is
@@ -126,8 +136,21 @@ impl Record {
     /// encodes as `0`, the epoch.
     pub fn encode(&self) -> String {
         if let Some(line) = &self.original {
-            return line.clone();
+            return String::from_utf8_lossy(line).into_owned();
         }
+        self.encode_v2()
+    }
+
+    /// The line as bytes. This is what a writer puts on disk, so a legacy record
+    /// keeps its exact original bytes even when they are not valid UTF-8.
+    fn encode_bytes(&self) -> Vec<u8> {
+        match &self.original {
+            Some(line) => line.clone(),
+            None => self.encode_v2().into_bytes(),
+        }
+    }
+
+    fn encode_v2(&self) -> String {
         let paths = &self.paths[..self.paths.len().min(MAX_PATHS)];
         let mut line = String::with_capacity(self.command.len() + 40);
         line.push_str(V2_MARKER);
@@ -159,8 +182,27 @@ pub fn decode(line: &str) -> Record {
         cwd: None,
         paths: Vec::new(),
         hits: 1,
-        original: Some(line.to_string()),
+        original: Some(line.as_bytes().to_vec()),
     })
+}
+
+/// Decodes one line from raw bytes, tolerating a legacy line that is not valid
+/// UTF-8. Such a line can only be legacy, since every v2 field is encoded from a
+/// `String`; its command decodes lossily (invalid bytes become U+FFFD) while the
+/// original bytes stay attached for rewrites. One bad line never invalidates the
+/// rest of the file.
+pub fn decode_bytes(line: &[u8]) -> Record {
+    match std::str::from_utf8(line) {
+        Ok(text) => decode(text),
+        Err(_) => Record {
+            command: unescape(&String::from_utf8_lossy(line)),
+            when: None,
+            cwd: None,
+            paths: Vec::new(),
+            hits: 1,
+            original: Some(line.to_vec()),
+        },
+    }
 }
 
 fn decode_v2(line: &str) -> Option<Record> {
@@ -579,16 +621,10 @@ impl History {
         let old_whens = std::mem::take(&mut self.whens);
         let old_hits = std::mem::take(&mut self.hits);
         let mut old_meta = std::mem::take(&mut self.meta);
-        let mut previous: HashMap<String, Origin> = old_entries
-            .iter()
-            .cloned()
-            .zip(old_origins)
-            .collect();
-        let mut old_when: HashMap<String, Option<i64>> = old_entries
-            .iter()
-            .cloned()
-            .zip(old_whens)
-            .collect();
+        let mut previous: HashMap<String, Origin> =
+            old_entries.iter().cloned().zip(old_origins).collect();
+        let mut old_when: HashMap<String, Option<i64>> =
+            old_entries.iter().cloned().zip(old_whens).collect();
         let mut merged = Vec::with_capacity(old_entries.len() + entries.len());
         let mut origins = Vec::with_capacity(merged.capacity());
         for entry in entries {
@@ -629,6 +665,7 @@ impl History {
             self.entries.clear();
             self.origins.clear();
             self.whens.clear();
+            self.hits.clear();
             self.meta.clear();
             return Ok(());
         };
@@ -668,9 +705,12 @@ impl History {
     ///
     /// Kept lines are copied byte for byte, so a legacy record stays byte identical,
     /// a v2 record keeps its `hits` field and any field this reader ignores, and an
-    /// undecodable line is preserved rather than re-encoded. Only complete newline
-    /// records take part: the torn tail a crash left is not a record and the rewrite
-    /// ends with a newline, exactly the state the next append expects.
+    /// unmodified line is preserved rather than re-encoded. Matching uses the same
+    /// lossy decode the view showed, so the command a listing prints is the one this
+    /// deletes; a non-UTF-8 line that does not match keeps its original bytes.
+    /// Only complete newline records take part: the torn tail a crash left is not a
+    /// record and the rewrite ends with a newline, exactly the state the next append
+    /// expects.
     ///
     /// Private mode deletes from memory only. The count is the number of removed
     /// records on disk (several legacy duplicates can match); memory holds one entry
@@ -685,7 +725,11 @@ impl History {
         let lock = lock_dir(&dir, FlockArg::LockExclusive)?;
         reject_special(&path)?;
         let bytes = read_bytes_unlocked(&path)?;
-        let Some(end) = bytes.iter().rposition(|byte| *byte == b'\n').map(|at| at + 1) else {
+        let Some(end) = bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map(|at| at + 1)
+        else {
             // No complete record on disk, so the file stays as it is; a matching
             // memory entry (a failed append) is still what the user asked to delete.
             drop(lock);
@@ -701,10 +745,7 @@ impl History {
         let mut kept: Vec<&[u8]> = Vec::with_capacity(lines.len());
         let mut removed = 0usize;
         for line in lines {
-            let matches = !line.is_empty()
-                && std::str::from_utf8(line)
-                    .ok()
-                    .is_some_and(|line| decode(line).command == pattern);
+            let matches = !line.is_empty() && decode_bytes(line).command == pattern;
             if matches {
                 removed += 1;
             } else {
@@ -744,9 +785,12 @@ impl History {
             return Err(describe("rename", &temp, err));
         }
         sync_dir(&dir);
+        // Statted while the lock is still held, like `append` and `try_clear`: a
+        // sibling append that lands after the rename must be seen as a change, not
+        // absorbed into a fingerprint taken outside the lock.
+        self.seen = Snapshot::current(&path);
         drop(lock);
         self.purge_exact(pattern);
-        self.seen = Snapshot::current(&path);
         Ok(removed)
     }
 
@@ -790,7 +834,9 @@ impl History {
         file.set_permissions(std::fs::Permissions::from_mode(0o600))
             .map_err(|err| describe("chmod", &path, err))?;
         discard_partial_tail(&mut file, &path)?;
-        file.write_all(format!("{}\n", record.encode()).as_bytes())
+        let mut line = record.encode_bytes();
+        line.push(b'\n');
+        file.write_all(&line)
             .map_err(|err| describe("write", &path, err))?;
         file.sync_data()
             .map_err(|err| describe("sync", &path, err))?;
@@ -848,10 +894,10 @@ impl History {
         let mut name = path.file_name().unwrap_or_default().to_os_string();
         name.push(".tmp");
         let temp = path.with_file_name(name);
-        let mut text = String::new();
+        let mut text = Vec::new();
         for record in &kept {
-            text.push_str(&record.encode());
-            text.push('\n');
+            text.extend_from_slice(&record.encode_bytes());
+            text.push(b'\n');
         }
 
         let mut options = OpenOptions::new();
@@ -861,12 +907,12 @@ impl History {
         };
         let written = file
             .set_permissions(std::fs::Permissions::from_mode(0o600))
-            .and_then(|()| file.write_all(text.as_bytes()))
+            .and_then(|()| file.write_all(&text))
             .and_then(|()| file.sync_data());
         drop(file);
-        if written.is_ok() {
-            let _ = std::fs::rename(&temp, path);
-        } else {
+        let replaced = written.is_ok() && std::fs::rename(&temp, path).is_ok();
+        if !replaced {
+            // Never leave an orphan `history.tmp` behind a failed compaction.
             let _ = std::fs::remove_file(&temp);
         }
         sync_dir(dir);
@@ -985,7 +1031,7 @@ fn sync_dir(dir: &Path) {
 
 /// Caller already holds the directory lock.
 fn read_unlocked(path: &Path) -> Result<Vec<Record>, String> {
-    parse(path, &read_bytes_unlocked(path)?)
+    Ok(parse(&read_bytes_unlocked(path)?))
 }
 
 /// The raw file under the caller's lock; `NotFound` is an empty file. Bytes are
@@ -1058,28 +1104,25 @@ fn view(records: Vec<Record>) -> View {
 }
 
 /// Only newline-terminated records count: a crash can leave a partial tail, which
-/// must not become an entry or make the whole file undecodable when its UTF-8 is
-/// cut mid-character. Both formats escape their own newlines, so a record never
-/// spans two lines and a bare `\n` split yields them exactly. The split is
-/// deliberate: `str::lines` also eats a trailing `\r`, which is part of a command
-/// pasted with CRLF endings. Order is file position: legacy lines carry no
-/// timestamp, and the newest append is the truth.
-pub fn parse(path: &Path, bytes: &[u8]) -> Result<Vec<Record>, String> {
+/// must not become an entry or make the whole file unreadable when its UTF-8 is cut
+/// mid-character. Both formats escape their own newlines, so a record never spans
+/// two lines and a bare `\n` split yields them exactly. The split is deliberate:
+/// `str::lines` also eats a trailing `\r`, which is part of a command pasted with
+/// CRLF endings. Order is file position: legacy lines carry no timestamp, and the
+/// newest append is the truth.
+///
+/// Each complete line decodes on its own, so a legacy line whose bytes are not
+/// UTF-8 is tolerated lossily instead of failing the read: history I/O continues
+/// for the whole file.
+pub fn parse(bytes: &[u8]) -> Vec<Record> {
     let Some(end) = bytes.iter().rposition(|byte| *byte == b'\n') else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
-    let complete = std::str::from_utf8(&bytes[..end]).map_err(|err| {
-        describe(
-            "read",
-            path,
-            std::io::Error::new(ErrorKind::InvalidData, err),
-        )
-    })?;
-    Ok(complete
-        .split('\n')
-        .map(decode)
+    bytes[..end]
+        .split(|byte| *byte == b'\n')
+        .map(decode_bytes)
         .filter(|record| !record.command.is_empty())
-        .collect())
+        .collect()
 }
 
 fn now_micros() -> i64 {

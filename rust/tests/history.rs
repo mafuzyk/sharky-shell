@@ -47,6 +47,26 @@ fn commands(path: &Path) -> Vec<String> {
         .collect()
 }
 
+/// The command of a v2 record, which is always valid UTF-8, so the text decoder
+/// applies.
+fn v2_command(line: &[u8]) -> String {
+    history::decode(std::str::from_utf8(line).unwrap()).command
+}
+
+/// The on-disk records as raw bytes, in file order, for lines the text helpers
+/// above cannot represent.
+fn file_records(path: &Path) -> Vec<Vec<u8>> {
+    let bytes = std::fs::read(path).unwrap();
+    let mut records: Vec<Vec<u8>> = bytes
+        .split(|byte| *byte == b'\n')
+        .map(<[u8]>::to_vec)
+        .collect();
+    if records.last().is_some_and(Vec::is_empty) {
+        records.pop();
+    }
+    records
+}
+
 fn now_micros() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -241,7 +261,11 @@ fn refresh_drops_the_entries_a_clear_removed_and_keeps_local_ones() {
     a.try_clear().unwrap();
     b.refresh().unwrap();
 
-    assert_eq!(b.entries(), ["mine"], "a cleared file hides foreign entries");
+    assert_eq!(
+        b.entries(),
+        ["mine"],
+        "a cleared file hides foreign entries"
+    );
 }
 
 #[test]
@@ -257,7 +281,10 @@ fn expansion_ignores_refreshed_entries() {
     // Everything is visible to the editor, the listing and the picker...
     assert_eq!(b.entries(), ["zsh foreign", "zsh newest"]);
     // ...but nothing a sibling ran may answer an event.
-    assert!(b.expansion_entries().is_empty(), "refreshed entry is expandable");
+    assert!(
+        b.expansion_entries().is_empty(),
+        "refreshed entry is expandable"
+    );
     assert_eq!(
         histexpand::expand("!!", &b.expansion_entries()),
         Err("!!: event not found".to_string())
@@ -367,7 +394,11 @@ fn refresh_after_a_failed_read_keeps_the_view_and_retries_on_a_change() {
     std::fs::create_dir(&path).unwrap();
 
     assert!(history.refresh().is_err(), "a directory is not history");
-    assert_eq!(history.entries(), ["kept"], "a failed refresh drops nothing");
+    assert_eq!(
+        history.entries(),
+        ["kept"],
+        "a failed refresh drops nothing"
+    );
 
     // A second prompt sees the same broken path: the fingerprint was taken, so
     // the failure is reported once instead of on every prompt.
@@ -645,10 +676,12 @@ fn load_failure_keeps_its_diagnostic_instead_of_looking_private() {
     );
     assert!(error.contains("history"), "unexpected error: {error}");
     assert!(History::try_load(dir.join("absent"), 100).is_ok());
-    assert!(History::try_load(PathBuf::new(), 100)
-        .unwrap()
-        .entries()
-        .is_empty());
+    assert!(
+        History::try_load(PathBuf::new(), 100)
+            .unwrap()
+            .entries()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -1121,6 +1154,91 @@ fn vacuum_preserves_legacy_record_bytes() {
         records(&path),
         ["tab\\there", v2.as_str(), "last legacy"],
         "kept records keep their original bytes"
+    );
+}
+
+/// A complete legacy line whose bytes are not UTF-8 must not disable history I/O:
+/// the command decodes lossily for the view, and the original bytes stay on disk.
+#[test]
+fn non_utf8_legacy_line_loads_and_history_io_continues() {
+    let path = scratch("non-utf8-legacy").join("history");
+    std::fs::write(&path, b"echo \xff\n").unwrap();
+
+    let mut history = History::try_load(path.clone(), 100)
+        .expect("a non-UTF-8 legacy line must not disable history");
+    assert_eq!(history.entries(), ["echo \u{fffd}"]);
+
+    history.try_add("echo APPENDX").unwrap();
+
+    assert_eq!(history.entries(), ["echo \u{fffd}", "echo APPENDX"]);
+    let stored = file_records(&path);
+    assert_eq!(stored.len(), 2, "the append reached the file");
+    assert_eq!(stored[0], b"echo \xff", "the legacy bytes stay verbatim");
+    assert!(stored[1].starts_with(b"h2\t"), "new records are v2");
+    assert_eq!(v2_command(&stored[1]), "echo APPENDX");
+    assert_eq!(
+        History::try_load(path, 100).unwrap().entries(),
+        ["echo \u{fffd}", "echo APPENDX"]
+    );
+}
+
+#[test]
+fn non_utf8_legacy_bytes_survive_rewrites() {
+    let path = scratch("non-utf8-rewrite").join("history");
+    std::fs::write(&path, b"echo \xff\ndup\ndup\n").unwrap();
+    let mut history = History::try_load(path.clone(), 100).unwrap();
+
+    // Deleting another command rewrites the file; the invalid line is copied as is.
+    assert_eq!(history.try_delete_exact("dup").unwrap(), 2);
+    assert_eq!(file_records(&path), [b"echo \xff".to_vec()]);
+    assert_eq!(history.entries(), ["echo \u{fffd}"]);
+
+    // A vacuum dedup rewrite keeps those bytes too.
+    std::fs::write(&path, b"echo \xff\ndup\ndup\n").unwrap();
+    let history = History::try_load(path.clone(), 100).unwrap();
+    history.vacuum_with_cap(10);
+    assert_eq!(
+        file_records(&path),
+        [b"echo \xff".to_vec(), b"dup".to_vec()]
+    );
+
+    // The listing prints the lossy command, so deleting it must reach that line.
+    let mut history = History::try_load(path.clone(), 100).unwrap();
+    assert_eq!(
+        history.try_delete_exact("echo \u{fffd}").unwrap(),
+        1,
+        "the lossy command deletes its invalid line"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"dup\n");
+    assert_eq!(history.entries(), ["dup"]);
+}
+
+#[test]
+fn mixed_valid_invalid_and_v2_lines_load_and_append() {
+    let path = scratch("mixed-invalid").join("history");
+    let v2 = v2_line("v2 cmd", 9_000_000, Some("/w"), &[]);
+    let mut file = Vec::new();
+    file.extend_from_slice(b"valid legacy\n");
+    file.extend_from_slice(b"bad \xff legacy\n");
+    file.extend_from_slice(v2.as_bytes());
+    file.push(b'\n');
+    std::fs::write(&path, &file).unwrap();
+
+    let mut history = History::try_load(path.clone(), 100).unwrap();
+    assert_eq!(
+        history.entries(),
+        ["valid legacy", "bad \u{fffd} legacy", "v2 cmd"]
+    );
+
+    history.try_add("after").unwrap();
+
+    let stored = file_records(&path);
+    assert_eq!(stored.len(), 4);
+    assert_eq!(stored[1], b"bad \xff legacy");
+    assert_eq!(v2_command(stored.last().unwrap()), "after");
+    assert_eq!(
+        History::try_load(path, 100).unwrap().entries(),
+        ["valid legacy", "bad \u{fffd} legacy", "v2 cmd", "after"]
     );
 }
 
