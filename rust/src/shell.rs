@@ -3010,6 +3010,17 @@ impl Shell {
         history.merge()
     }
 
+    /// Picks up history other sessions appended. The interactive loop calls this
+    /// before each primary prompt only, so a continuation line keeps the view it
+    /// started with; a warning is reported once, not on every prompt.
+    pub fn refresh_history(&mut self) {
+        if let Some(history) = self.history.as_mut() {
+            if let Err(err) = history.refresh() {
+                eprintln!("sharky: history: {err}");
+            }
+        }
+    }
+
     pub fn push_history(&mut self, line: &str) {
         if let Some(history) = &mut self.history {
             if let Err(err) = history.try_add(line) {
@@ -3023,6 +3034,17 @@ impl Shell {
             .as_ref()
             .map(History::entries)
             .unwrap_or(&[])
+    }
+
+    /// The entries `!!`, `!n` and `!prefix` may resolve: everything this session
+    /// loaded at startup and ran itself, never a command a refresh picked up from
+    /// another session. The editor and the `history` builtin use
+    /// [`Shell::history_entries`] instead, so they still show everything.
+    pub fn history_expansion_entries(&self) -> Vec<String> {
+        self.history
+            .as_ref()
+            .map(History::expansion_entries)
+            .unwrap_or_default()
     }
 
     fn z_builtin(&mut self, args: &[String], interactive: bool) -> i32 {

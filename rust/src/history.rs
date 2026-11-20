@@ -14,6 +14,13 @@
 //! newest one and answer `!!` correctly. Two identical consecutive commands are one
 //! event and write nothing the second time.
 //!
+//! Every entry remembers where it came from. What this session loaded at startup and
+//! what it ran itself may answer a history event; a record picked up from another
+//! session afterwards may not, so a command typed in one terminal is never executed
+//! in another by `!!`. [`History::refresh`] is what picks those records up, and the
+//! interactive loop calls it before each primary prompt; one `stat` decides whether
+//! the file has to be read at all.
+//!
 //! Writes and reads are newline records: a crash can leave a torn tail without its
 //! newline, which readers drop and the next append truncates away before writing.
 //! All disk access locks the parent directory and refuses symlinks, directories,
@@ -29,7 +36,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -193,12 +200,76 @@ fn decode_v2(line: &str) -> Option<Record> {
 
 pub struct History {
     entries: Vec<String>,
+    /// Parallel to `entries`: where each one came from, which decides whether a
+    /// history event may resolve it. Invariant: same length as `entries`.
+    origins: Vec<Origin>,
     /// The newest hit count known for each entry, keyed by command. Kept beside the
     /// view so a repeat can carry the count forward without re-reading the file.
     hits: HashMap<String, u64>,
     path: Option<PathBuf>,
     limit: usize,
     appends: usize,
+    /// What the file held when this view was built; one `stat` per prompt tells
+    /// whether anything has to be read.
+    seen: Snapshot,
+}
+
+/// Where a view entry came from.
+///
+/// [`Origin::Loaded`] was read at startup and [`Origin::Local`] was appended by this
+/// session, so both may answer `!!`, `!n` and `!prefix`. [`Origin::Refreshed`] was
+/// contributed by another session after startup and may not: the editor, the
+/// autosuggest and the `history` builtin show it, and that is all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Origin {
+    Loaded,
+    Local,
+    Refreshed,
+}
+
+/// The state of the file the in-memory view was built from, as one `stat` reports
+/// it. Comparison is exact on purpose: any doubt means a read, never a missed
+/// record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Snapshot {
+    /// No file existed when the view was built.
+    Absent,
+    /// The file held exactly this identity, size and modification time.
+    At(Fingerprint),
+    /// The view is older than the file and the next refresh has to read it.
+    Stale,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Fingerprint {
+    dev: u64,
+    ino: u64,
+    size: u64,
+    mtime: i64,
+    mtime_nsec: i64,
+}
+
+impl Snapshot {
+    fn current(path: &Path) -> Self {
+        match fingerprint(path) {
+            Some(fingerprint) => Snapshot::At(fingerprint),
+            None => Snapshot::Absent,
+        }
+    }
+}
+
+/// The file's identity in one `stat`; `None` when it cannot be statted, including
+/// when it does not exist. A refusal is not an error here, because the caller
+/// compares it and reads only on a difference.
+fn fingerprint(path: &Path) -> Option<Fingerprint> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(Fingerprint {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+        size: metadata.size(),
+        mtime: metadata.mtime(),
+        mtime_nsec: metadata.mtime_nsec(),
+    })
 }
 
 impl History {
@@ -224,13 +295,20 @@ impl History {
         if path.as_os_str().is_empty() {
             return Ok(History::private(limit));
         }
+        // Statted before the read: a change that lands while the read runs then
+        // shows up as a difference, and the next refresh reads again instead of
+        // missing it. The other order could hide a record for good.
+        let seen = Snapshot::current(&path);
         let (entries, hits) = view(read_history(&path)?);
+        let origins = vec![Origin::Loaded; entries.len()];
         let mut history = History {
             entries,
+            origins,
             hits,
             path: Some(path),
             limit,
             appends: initial_vacuum_offset(),
+            seen,
         };
         history.trim();
         Ok(history)
@@ -240,15 +318,33 @@ impl History {
     pub fn private(limit: usize) -> Self {
         History {
             entries: Vec::new(),
+            origins: Vec::new(),
             hits: HashMap::new(),
             path: None,
             limit,
             appends: initial_vacuum_offset(),
+            seen: Snapshot::Absent,
         }
     }
 
     pub fn entries(&self) -> &[String] {
         &self.entries
+    }
+
+    /// The commands a history event may resolve: what this session loaded at startup
+    /// and what it ran itself, in the same order as [`History::entries`].
+    ///
+    /// Records another session contributed are excluded, so a refresh can add to
+    /// the editor and the listing without ever giving `!!` a command this session
+    /// did not run. The list is also the numbering `!n` uses: after a refresh its
+    /// positions are the expandable entries, not the editor's.
+    pub fn expansion_entries(&self) -> Vec<String> {
+        self.entries
+            .iter()
+            .zip(&self.origins)
+            .filter(|(_, origin)| **origin != Origin::Refreshed)
+            .map(|(entry, _)| entry.clone())
+            .collect()
     }
 
     /// Overrides the vacuum trigger counter. Production starts it at a random
@@ -304,16 +400,26 @@ impl History {
             return Ok(());
         }
         if self.entries.last().map(String::as_str) == Some(command) {
+            // A command a sibling ran is not a duplicate of ours until this session
+            // has run it too. Promote it, so `!!` here resolves to it from now on
+            // while the file still holds the one record.
+            if let Some(origin) = self.origins.last_mut() {
+                if *origin == Origin::Refreshed {
+                    *origin = Origin::Local;
+                }
+            }
             return Ok(());
         }
         let hits = match self.entries.iter().position(|entry| entry == command) {
             Some(position) => {
                 self.entries.remove(position);
+                self.origins.remove(position);
                 self.hits.get(command).copied().unwrap_or(1) + 1
             }
             None => 1,
         };
         self.entries.push(command.to_string());
+        self.origins.push(Origin::Local);
         self.hits.insert(command.to_string(), hits);
         self.trim();
         if self.path.is_none() {
@@ -331,26 +437,91 @@ impl History {
         self.append(&record)
     }
 
-    /// Rebuilds memory from disk order (the shared chronology) and appends the
-    /// entries only this session holds, so a command whose append failed is kept.
+    /// Picks up what other sessions appended, which is what the interactive loop
+    /// calls before each primary prompt.
+    ///
+    /// One `stat` decides: while the file still has the identity, size and
+    /// modification time the view was built from, nothing is read and no lock is
+    /// taken. Any difference re-reads the whole file under a shared lock and merges
+    /// it in file order, which also covers a compaction or a clear that moved the
+    /// file's inode or shrank it.
+    ///
+    /// This session's own entries keep their order relative to each other, an entry
+    /// a failed append kept out of the file survives, and a record the disk no longer
+    /// has (a clear elsewhere) disappears unless this session appended it. Records
+    /// already known keep their origin, so a sibling's command stays
+    /// [`Origin::Refreshed`] and out of [`History::expansion_entries`].
+    ///
+    /// Private mode has no path and returns before any syscall.
+    pub fn refresh(&mut self) -> Result<(), String> {
+        let Some(path) = self.path.clone() else {
+            return Ok(());
+        };
+        let current = Snapshot::current(&path);
+        if current == self.seen {
+            return Ok(());
+        }
+        // Recorded before the read, so a file that cannot be read is reported once
+        // instead of on every prompt; the next real change still differs.
+        self.seen = current;
+        self.reload(&path)
+    }
+
+    /// Rebuilds memory from disk order (the shared chronology) and keeps the entries
+    /// only this session holds, so a command whose append failed is not lost.
     /// Duplicates collapse to their newest disk position, then the memory limit
     /// applies.
+    ///
+    /// This is [`History::refresh`] with the fingerprint check skipped: it always
+    /// re-reads, so it is idempotent. Private mode has nothing to merge.
     pub fn merge(&mut self) -> Result<(), String> {
         let Some(path) = self.path.clone() else {
             return Err(PRIVATE_MERGE.to_string());
         };
-        let (mut entries, mut hits) = view(read_history(&path)?);
-        let local_entries = std::mem::take(&mut self.entries);
-        let local_hits = std::mem::take(&mut self.hits);
-        for command in local_entries {
+        self.seen = Snapshot::current(&path);
+        self.reload(&path)
+    }
+
+    /// The one merge path behind [`History::refresh`] and [`History::merge`].
+    ///
+    /// The disk holds the shared chronology, so its order wins for everything on it,
+    /// and an entry keeps the origin the view already had for it: a command this
+    /// session ran stays [`Origin::Local`] and a sibling's stays
+    /// [`Origin::Refreshed`]. An entry this session appended that the file does not
+    /// have stays, at the end, where memory-only entries have always gone; an entry
+    /// the disk dropped was never local to this session and goes away.
+    fn reload(&mut self, path: &Path) -> Result<(), String> {
+        let (entries, mut hits) = view(read_history(path)?);
+        let old_entries = std::mem::take(&mut self.entries);
+        let old_origins = std::mem::take(&mut self.origins);
+        let old_hits = std::mem::take(&mut self.hits);
+        let mut previous: HashMap<String, Origin> = old_entries
+            .iter()
+            .cloned()
+            .zip(old_origins)
+            .collect();
+        let mut merged = Vec::with_capacity(old_entries.len() + entries.len());
+        let mut origins = Vec::with_capacity(merged.capacity());
+        for entry in entries {
+            origins.push(previous.remove(entry.as_str()).unwrap_or(Origin::Refreshed));
+            merged.push(entry);
+        }
+        for command in old_entries {
             if hits.contains_key(&command) {
+                // Already on disk, so its file position decides where it sits and
+                // the record carries the hit count.
                 continue;
             }
-            let count = local_hits.get(&command).copied().unwrap_or(1);
+            if previous.get(&command) != Some(&Origin::Local) {
+                continue;
+            }
+            let count = old_hits.get(&command).copied().unwrap_or(1);
             hits.insert(command.clone(), count);
-            entries.push(command);
+            origins.push(Origin::Local);
+            merged.push(command);
         }
-        self.entries = entries;
+        self.entries = merged;
+        self.origins = origins;
         self.hits = hits;
         self.trim();
         Ok(())
@@ -361,6 +532,7 @@ impl History {
     pub fn try_clear(&mut self) -> Result<(), String> {
         let Some(path) = self.path.clone() else {
             self.entries.clear();
+            self.origins.clear();
             return Ok(());
         };
         let dir = parent(&path);
@@ -382,8 +554,10 @@ impl History {
         if created {
             sync_dir(&dir);
         }
+        self.seen = Snapshot::current(&path);
         drop(lock);
         self.entries.clear();
+        self.origins.clear();
         self.hits.clear();
         Ok(())
     }
@@ -396,6 +570,10 @@ impl History {
         prepare_dir(&dir)?;
         let lock = lock_dir(&dir, FlockArg::LockExclusive)?;
         reject_special(&path)?;
+        // Under the exclusive lock the file cannot move, so this is exactly what the
+        // view was compared against a moment ago.
+        let known = self.seen;
+        let before = Snapshot::current(&path);
         let created = !path.exists();
         let mut options = OpenOptions::new();
         options.read(true).append(true).create(true);
@@ -416,6 +594,15 @@ impl History {
         if self.appends % VACUUM_EVERY == 0 {
             self.vacuum(&dir, &path, HISTORY_CAP);
         }
+        // The fingerprint may describe the new file only when the old one was
+        // already what this view holds: a record another session wrote before this
+        // one would otherwise be counted as read and never picked up. Otherwise the
+        // view is marked older than the file and the next prompt merges it.
+        self.seen = if before == known {
+            Snapshot::current(&path)
+        } else {
+            Snapshot::Stale
+        };
         drop(lock);
         Ok(())
     }
@@ -478,8 +665,10 @@ impl History {
     }
 
     fn trim(&mut self) {
+        debug_assert_eq!(self.entries.len(), self.origins.len());
         if self.entries.len() > self.limit {
             let excess = self.entries.len() - self.limit;
+            self.origins.drain(..excess);
             for command in self.entries.drain(..excess) {
                 self.hits.remove(&command);
             }

@@ -8,6 +8,21 @@ rather than a separate preview track.
 
 ## [Unreleased]
 
+### Changed
+
+- Interactive sessions refresh the shared history file before every primary
+  prompt, so a command another shell ran appears in the editor, the autosuggest
+  and the `history` listing without `history merge`, which stays as the forced,
+  idempotent form of the same path. One `stat` decides whether the file has to be
+  read, an unchanged file is neither read nor locked, and a continuation line
+  never refreshes. History expansion is guarded by origin: `!!`, `!n`, `!prefix`,
+  `!?text?` and `!-n` resolve only the entries a session loaded at startup or ran
+  itself, never a command a refresh picked up from another terminal, and after a
+  refresh `!n` numbers that expansion list. A `history -c` in one session clears
+  what the others had loaded while their own commands survive, and a failed
+  append stays expandable. Sessions no longer keep their own view until
+  `history merge`.
+
 ### Added
 
 - The flake now exposes `devShells` with the Rust toolchain, `nixosModules` and

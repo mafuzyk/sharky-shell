@@ -2,6 +2,10 @@
 #[allow(dead_code)] // this target exercises a subset of the module
 mod history;
 
+#[path = "../src/histexpand.rs"]
+#[allow(dead_code)] // this target exercises the expansion guard only
+mod histexpand;
+
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -159,6 +163,265 @@ fn legacy_newline_terminated_records_still_load() {
 }
 
 #[test]
+fn a_session_sees_a_foreign_command_without_merge() {
+    let path = scratch("refresh").join("history");
+    let mut a = History::try_load(path.clone(), 100).unwrap();
+    let mut b = History::try_load(path.clone(), 100).unwrap();
+    assert!(b.entries().is_empty());
+
+    a.try_add("from sibling").unwrap();
+    assert!(b.entries().is_empty(), "reading needs a refresh");
+
+    b.refresh().unwrap();
+
+    assert_eq!(b.entries(), ["from sibling"]);
+    assert_eq!(
+        b.expansion_entries(),
+        Vec::<String>::new(),
+        "a sibling command is never expandable"
+    );
+}
+
+#[test]
+fn refresh_keeps_local_failed_entries() {
+    if running_as_root() {
+        return;
+    }
+    let dir = scratch("refresh-local");
+    let path = dir.join("history");
+    let mut history = History::try_load(path.clone(), 100).unwrap();
+    history.try_add("kept").unwrap();
+
+    chmod(&path, 0o400);
+    assert!(history.try_add("local only").is_err());
+    chmod(&path, 0o600);
+
+    let mut other = History::try_load(path, 100).unwrap();
+    other.try_add("later").unwrap();
+
+    history.refresh().unwrap();
+
+    assert_eq!(history.entries(), ["kept", "later", "local only"]);
+    assert_eq!(
+        history.expansion_entries(),
+        ["kept", "local only"],
+        "a failed append is still this session's own command"
+    );
+}
+
+#[test]
+fn refresh_keeps_the_order_of_local_entries() {
+    let path = scratch("refresh-order").join("history");
+    let mut a = History::try_load(path.clone(), 100).unwrap();
+    let mut b = History::try_load(path.clone(), 100).unwrap();
+
+    b.try_add("mine one").unwrap();
+    b.try_add("mine two").unwrap();
+    a.try_add("sibling").unwrap();
+
+    for _ in 0..3 {
+        b.refresh().unwrap();
+        assert_eq!(b.entries(), ["mine one", "mine two", "sibling"]);
+    }
+}
+
+#[test]
+fn refresh_drops_the_entries_a_clear_removed_and_keeps_local_ones() {
+    let path = scratch("refresh-clear").join("history");
+    std::fs::write(&path, "loaded\n").unwrap();
+    let mut a = History::try_load(path.clone(), 100).unwrap();
+    let mut b = History::try_load(path.clone(), 100).unwrap();
+    b.try_add("mine").unwrap();
+    assert_eq!(b.entries(), ["loaded", "mine"]);
+
+    a.try_clear().unwrap();
+    b.refresh().unwrap();
+
+    assert_eq!(b.entries(), ["mine"], "a cleared file hides foreign entries");
+}
+
+#[test]
+fn expansion_ignores_refreshed_entries() {
+    let path = scratch("refresh-expansion").join("history");
+    let mut a = History::try_load(path.clone(), 100).unwrap();
+    let mut b = History::try_load(path.clone(), 100).unwrap();
+
+    a.try_add("zsh foreign").unwrap();
+    a.try_add("zsh newest").unwrap();
+    b.refresh().unwrap();
+
+    // Everything is visible to the editor, the listing and the picker...
+    assert_eq!(b.entries(), ["zsh foreign", "zsh newest"]);
+    // ...but nothing a sibling ran may answer an event.
+    assert!(b.expansion_entries().is_empty(), "refreshed entry is expandable");
+    assert_eq!(
+        histexpand::expand("!!", &b.expansion_entries()),
+        Err("!!: event not found".to_string())
+    );
+
+    b.try_add("printf own").unwrap();
+
+    assert_eq!(b.expansion_entries(), ["printf own"]);
+    assert_eq!(
+        histexpand::expand("!!", &b.expansion_entries()),
+        Ok("printf own".to_string())
+    );
+    assert_eq!(
+        histexpand::expand("!1", &b.expansion_entries()),
+        Ok("printf own".to_string()),
+        "!n numbers the expansion list"
+    );
+    assert_eq!(
+        histexpand::expand("!zsh", &b.expansion_entries()),
+        Err("!zsh: event not found".to_string()),
+        "a prefix may not reach a refreshed entry"
+    );
+    assert_eq!(
+        histexpand::expand("!?newest?", &b.expansion_entries()),
+        Err("!?newest?: event not found".to_string()),
+        "a needle may not reach a refreshed entry"
+    );
+    // The full view holds three entries, so a count that reached it would resolve
+    // here; the expansion list holds one.
+    assert_eq!(
+        histexpand::expand("!-2", &b.expansion_entries()),
+        Err("!-2: event not found".to_string()),
+        "counting back stays inside the expansion list"
+    );
+}
+
+#[test]
+fn refresh_reads_nothing_when_the_file_is_unchanged() {
+    if running_as_root() {
+        return;
+    }
+    let dir = scratch("refresh-noop");
+    let path = dir.join("history");
+    let mut history = History::try_load(path.clone(), 100).unwrap();
+    history.try_add("one").unwrap();
+
+    // The file stops being readable without moving, so any read or lock would
+    // fail. An unchanged fingerprint has to return before touching it.
+    chmod(&path, 0o000);
+    let result = history.refresh();
+    chmod(&path, 0o600);
+
+    assert_eq!(result, Ok(()), "refresh read an unchanged file");
+    assert_eq!(history.entries(), ["one"]);
+}
+
+#[test]
+fn refresh_in_private_mode_keeps_memory_and_touches_nothing() {
+    let dir = scratch("refresh-private");
+    let mut history = History::private(100);
+    history.try_add("mine").unwrap();
+
+    assert_eq!(history.refresh(), Ok(()));
+    assert_eq!(history.entries(), ["mine"]);
+    assert_eq!(
+        history.merge(),
+        Err("can't merge history in private mode".to_string())
+    );
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+
+    // An empty path is the same private mode, and also returns before any syscall.
+    let mut empty_path = History::try_load(PathBuf::new(), 100).unwrap();
+    empty_path.try_add("mine").unwrap();
+    assert_eq!(empty_path.refresh(), Ok(()));
+    assert_eq!(empty_path.entries(), ["mine"]);
+}
+
+#[test]
+fn merge_is_idempotent_and_forced() {
+    let path = scratch("merge-idempotent").join("history");
+    let mut a = History::try_load(path.clone(), 100).unwrap();
+    let mut b = History::try_load(path.clone(), 100).unwrap();
+    a.try_add("first").unwrap();
+    a.try_add("second").unwrap();
+    b.try_add("mine").unwrap();
+
+    b.merge().unwrap();
+    assert_eq!(b.entries(), ["first", "second", "mine"]);
+
+    b.merge().unwrap();
+    assert_eq!(b.entries(), ["first", "second", "mine"]);
+    assert_eq!(
+        b.expansion_entries(),
+        ["mine"],
+        "merging twice does not promote a sibling command"
+    );
+}
+
+#[test]
+fn refresh_after_a_failed_read_keeps_the_view_and_retries_on_a_change() {
+    let dir = scratch("refresh-failed");
+    let path = dir.join("history");
+    let mut history = History::try_load(path.clone(), 100).unwrap();
+    history.try_add("kept").unwrap();
+
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+
+    assert!(history.refresh().is_err(), "a directory is not history");
+    assert_eq!(history.entries(), ["kept"], "a failed refresh drops nothing");
+
+    // A second prompt sees the same broken path: the fingerprint was taken, so
+    // the failure is reported once instead of on every prompt.
+    assert_eq!(history.refresh(), Ok(()));
+
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::write(&path, "fresh\n").unwrap();
+    history.refresh().unwrap();
+    // Disk order first, then the entry only memory has, exactly as merge orders them.
+    assert_eq!(history.entries(), ["fresh", "kept"]);
+}
+
+#[test]
+fn a_deleted_history_file_keeps_local_entries_only() {
+    let path = scratch("refresh-deleted").join("history");
+    std::fs::write(&path, "loaded\n").unwrap();
+    let mut history = History::try_load(path.clone(), 100).unwrap();
+    history.try_add("mine").unwrap();
+
+    std::fs::remove_file(&path).unwrap();
+    history.refresh().unwrap();
+
+    assert_eq!(history.entries(), ["mine"]);
+    assert_eq!(history.expansion_entries(), ["mine"]);
+}
+
+#[test]
+fn a_local_repeat_of_a_refreshed_command_becomes_expandable() {
+    let path = scratch("refresh-repeat").join("history");
+    let mut a = History::try_load(path.clone(), 100).unwrap();
+    let mut b = History::try_load(path.clone(), 100).unwrap();
+    a.try_add("make test").unwrap();
+    b.refresh().unwrap();
+    assert!(b.expansion_entries().is_empty());
+
+    // Typing here what the sibling just ran makes it this session's own command,
+    // even though the view already ends with it and nothing new is written.
+    b.try_add("make test").unwrap();
+
+    assert_eq!(b.entries(), ["make test"]);
+    assert_eq!(b.expansion_entries(), ["make test"]);
+    assert_eq!(records(&path).len(), 1, "a duplicate still writes nothing");
+}
+
+#[test]
+fn refresh_needs_the_shared_view_to_survive_a_vacuum() {
+    let path = scratch("refresh-vacuum").join("history");
+    let mut history = History::try_load(path.clone(), 100).unwrap();
+    for index in 0..25 {
+        history.try_add(&format!("command {index}")).unwrap();
+    }
+
+    history.refresh().unwrap();
+
+    assert_eq!(history.entries().len(), 25, "a vacuum is not a new command");
+}
+
+#[test]
 fn stale_view_waits_for_merge_and_then_follows_disk_order() {
     let path = scratch("merge").join("history");
     let mut a = History::try_load(path.clone(), 100).unwrap();
@@ -232,6 +495,11 @@ fn private_mode_keeps_no_file_and_refuses_merge() {
 
     assert!(history.entries().is_empty());
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+
+    // Clearing in private mode must not leave an origin behind for the next entry.
+    history.try_add("after clear").unwrap();
+    assert_eq!(history.entries(), ["after clear"]);
+    assert_eq!(history.expansion_entries(), ["after clear"]);
 }
 
 #[test]
@@ -456,6 +724,9 @@ fn vacuum_collapses_duplicates_across_sessions_to_the_newest_occurrence() {
     let path = scratch("vacuum-dedup").join("history");
     let mut other = History::try_load(path.clone(), 100).unwrap();
     let mut history = History::try_load(path.clone(), 100).unwrap();
+    // The production trigger starts at a random offset; pinning it makes the
+    // compaction land on the last append instead of on `repeat` or before it.
+    history.set_vacuum_offset(0);
 
     other.try_add("repeat").unwrap();
     // Kept apart so the second "repeat" is an older-command repeat, not a

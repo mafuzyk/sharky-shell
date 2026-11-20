@@ -2366,8 +2366,19 @@ impl SharedSession {
     }
 }
 
+/// Writes one command into the shared file behind a running shell's back, the way
+/// another terminal would.
+fn append_foreign(dir: &std::path::Path, command: &str) {
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(dir.join("history"))
+        .unwrap();
+    writeln!(file, "{command}").unwrap();
+}
+
 #[test]
-fn two_shells_merge_brings_sibling_entries_into_view() {
+fn two_shells_see_each_others_entries_without_merge() {
     let dir = shared_fixture("merge-visibility");
     let mut a = shared_session(&dir, &[]);
     let mut b = shared_session(&dir, &[]);
@@ -2375,23 +2386,148 @@ fn two_shells_merge_brings_sibling_entries_into_view() {
     a.run("printf from-sibling > $HOME/from_sibling");
     assert!(wait_for(&dir.join("home/from_sibling"), Duration::from_secs(5)));
 
+    // The view is a snapshot taken at the prompt, so a command a sibling wrote
+    // afterwards is not in it yet. The next prompt refreshes it, and an empty line
+    // is enough to reach one.
     b.run("history > $HOME/before");
     let before = std::fs::read_to_string(dir.join("home/before")).unwrap();
     assert!(
         !before.contains("from-sibling"),
-        "sibling entry visible before merge: {before:?}"
+        "entry arrived without a prompt refresh: {before:?}"
     );
 
-    b.run("history merge");
+    b.run("");
     b.run("history > $HOME/after");
     let after = std::fs::read_to_string(dir.join("home/after")).unwrap();
     assert!(
         after.contains("printf from-sibling > $HOME/from_sibling"),
-        "merge missed sibling entry: {after:?}"
+        "the next prompt did not refresh the sibling entry: {after:?}"
+    );
+
+    // `history merge` is the forced form of the same path, so it changes nothing.
+    b.run("history merge");
+    b.run("history > $HOME/merged");
+    let merged = std::fs::read_to_string(dir.join("home/merged")).unwrap();
+    assert_eq!(
+        merged
+            .matches("printf from-sibling > $HOME/from_sibling")
+            .count(),
+        1,
+        "merge duplicated or dropped the sibling entry: {merged:?}"
     );
 
     a.finish();
     b.finish();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_foreign_append_is_visible_at_the_next_prompt() {
+    let dir = shared_fixture("refresh-visible");
+    let mut a = shared_session(&dir, &[]);
+    a.run("history -c");
+    a.run("printf mine");
+
+    append_foreign(&dir, "printf ghost-foreign");
+
+    // No `history merge`, no command: an empty line reaches the next primary prompt
+    // and that prompt has already refreshed.
+    a.run("");
+    a.run("history > $HOME/list");
+    let list = std::fs::read_to_string(dir.join("home/list")).unwrap();
+    assert!(
+        list.contains("printf ghost-foreign"),
+        "the prompt missed a foreign append: {list:?}"
+    );
+
+    // The editor sees it too: a prefix gets the rest from the ghost.
+    let _ = a.writer.write_all(b"printf gh");
+    let seen = read_until(a.master.as_raw_fd(), "ost-foreign", Duration::from_secs(5));
+    assert!(
+        seen.contains("ost-foreign"),
+        "no ghost from a refreshed entry: {seen:?}"
+    );
+    let _ = a.writer.write_all(b"\x03");
+    let _ = read_until(
+        a.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+
+    a.finish();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn expansion_ignores_a_command_a_refresh_brought_in() {
+    let dir = shared_fixture("refresh-expansion");
+    let mut a = shared_session(&dir, &[]);
+    a.run("history -c");
+    a.run("printf local-base");
+
+    // The foreign command is the newest record in the file and the newest entry in
+    // the list, so a guard that looked at the whole view would expand to it.
+    append_foreign(&dir, "printf foreign-base");
+    a.run("");
+
+    let out = a.run("!!");
+    assert!(
+        out.contains("printf local-base"),
+        "!! did not expand the local command: {out:?}"
+    );
+    assert!(
+        !out.contains("foreign-base"),
+        "!! expanded a command another session ran: {out:?}"
+    );
+
+    // The entry really is in the view: the expansion guard is what ignored it.
+    a.run("history > $HOME/list");
+    let list = std::fs::read_to_string(dir.join("home/list")).unwrap();
+    assert!(
+        list.contains("printf foreign-base"),
+        "the guard test needs the refreshed entry in the view: {list:?}"
+    );
+
+    a.finish();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_continuation_line_does_not_refresh() {
+    let dir = shared_fixture("refresh-continuation");
+    let mut a = shared_session(&dir, &[]);
+    a.run("printf setup");
+
+    // From here on every read of the shared file fails with a message on this same
+    // terminal, so a refresh is impossible to miss.
+    std::fs::remove_file(dir.join("history")).unwrap();
+    std::fs::create_dir(dir.join("history")).unwrap();
+
+    // An unterminated quote asks for more input instead of running anything; the
+    // line that draws the continuation prompt is where a refresh would happen.
+    let _ = a.writer.write_all(b"echo \"open\r");
+    let seen = read_until(a.master.as_raw_fd(), "... ", Duration::from_secs(5));
+    assert!(seen.contains("... "), "no continuation prompt: {seen:?}");
+    assert!(
+        !seen.contains("history"),
+        "a continuation line refreshed the file: {seen:?}"
+    );
+
+    // Closing the command reaches a primary prompt, where the refresh runs and the
+    // refused path is reported instead of the shell going quiet about it.
+    let _ = a.writer.write_all(b"\"\r");
+    let out = read_until(
+        a.master.as_raw_fd(),
+        HISTORY_PROMPT_END,
+        Duration::from_secs(5),
+    );
+    assert!(out.contains("open"), "the continued command did not run: {out:?}");
+    assert!(
+        out.contains("not a regular file"),
+        "the primary prompt did not refresh the broken path: {out:?}"
+    );
+
+    a.finish();
     std::fs::remove_dir_all(&dir).ok();
 }
 

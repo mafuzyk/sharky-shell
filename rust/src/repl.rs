@@ -33,6 +33,13 @@ pub fn run(shell: &mut Shell, private: bool) -> i32 {
         }
 
         let primary = buffer.is_empty();
+        if primary {
+            // Another session's commands become visible here, before the prompt is
+            // drawn, so the editor list and the ghost include them. One stat; the
+            // file is only read when it actually changed, and never on a
+            // continuation line.
+            shell.refresh_history();
+        }
         let mut prompt = if primary {
             prompt::render(shell)
         } else {
@@ -55,7 +62,7 @@ pub fn run(shell: &mut Shell, private: bool) -> i32 {
                 }
 
                 if buffer.is_empty() && shell.histexpand() {
-                    match histexpand::expand(&text, shell.history_entries()) {
+                    match histexpand::expand(&text, &shell.history_expansion_entries()) {
                         Ok(expanded) => {
                             if expanded != text {
                                 println!("{expanded}");
