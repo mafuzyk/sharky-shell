@@ -8,11 +8,11 @@
 
 stdenv.mkDerivation (finalAttrs: {
   pname = "sharky";
-  version = "3.6.0";
+  version = "3.7.0";
 
   src = fetchurl {
     url = "https://github.com/mafuzyk/sharky-shell/releases/download/v${finalAttrs.version}/sharky-x86_64-unknown-linux-musl.tar.gz";
-    hash = "sha256-xxUIj/4OM/ZoG4CJ8rCY+e/S58ICB+LRBYDtV0BnNiU=";
+    hash = "sha256-hRlRkwsZUt4FTVkOkwQVMl4IZnWutKIXhAgPZk+pRVM=";
   };
 
   # The tarball has no top-level directory and carries a prebuilt binary.

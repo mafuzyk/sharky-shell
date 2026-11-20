@@ -20,7 +20,7 @@ in
     package = lib.mkOption {
       type = lib.types.package;
       default = pkgs.callPackage ./package.nix { };
-      defaultText = lib.literalMD "the prebuilt static release binary shipped by the sharky flake (version 3.6.0)";
+      defaultText = lib.literalMD "the prebuilt static release binary shipped by the sharky flake (version 3.7.0)";
       description = ''
         The sharky package to install.
       '';
