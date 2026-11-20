@@ -1,12 +1,14 @@
 use std::ffi::CString;
 use std::io::Write;
 use std::os::fd::{AsRawFd, RawFd};
-use std::time::{Duration, Instant};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nix::libc;
 use nix::pty::{ForkptyResult, Winsize, forkpty};
 use nix::sys::termios::Termios;
-use nix::sys::wait::waitpid;
+use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::{Pid, execve};
 
 mod common;
@@ -14,17 +16,39 @@ mod common;
 struct Session {
     child: Pid,
     master: std::os::fd::OwnedFd,
+    home: PathBuf,
 }
 
 impl Session {
     fn start() -> Self {
+        // Every session gets its own HOME/XDG_DATA_HOME so parallel tests never
+        // share a history (or z) file under a common /tmp path.
+        static HOME_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let unique = format!(
+            "sharky-jc-{}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            HOME_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let home = std::env::temp_dir().join(&unique);
+        let xdg = home.join("xdg");
+        let _ = std::fs::create_dir_all(&xdg);
+
         let path = CString::new(env!("CARGO_BIN_EXE_sharky")).unwrap();
         let argv = [CString::new("sharky").unwrap()];
         let search_path = CString::new(format!("PATH={}", common::tool_path().to_string_lossy()))
             .expect("PATH must not contain NUL bytes");
+        let home_env = CString::new(format!("HOME={}", home.display()))
+            .expect("HOME must not contain NUL bytes");
+        let xdg_env = CString::new(format!("XDG_DATA_HOME={}", xdg.display()))
+            .expect("XDG_DATA_HOME must not contain NUL bytes");
         let env = [
             CString::new("SHARKY_CONFIG=/nonexistent/sharky-test").unwrap(),
-            CString::new("HOME=/tmp").unwrap(),
+            home_env,
+            xdg_env,
             search_path,
             CString::new("TERM=xterm").unwrap(),
         ];
@@ -41,7 +65,7 @@ impl Session {
                 let _ = execve(&path, &argv, &env);
                 unsafe { libc::_exit(1) }
             }
-            ForkptyResult::Parent { child, master } => Session { child, master },
+            ForkptyResult::Parent { child, master } => Session { child, master, home },
         }
     }
 
@@ -84,8 +108,11 @@ impl Session {
 
     fn exit_status(self) -> i32 {
         match waitpid(self.child, None) {
-            Ok(nix::sys::wait::WaitStatus::Exited(_, code)) => code,
-            _ => 0,
+            Ok(WaitStatus::Exited(_, code)) => code,
+            // Report a signal death the way a shell does, instead of collapsing
+            // it to 0 and letting `assert_eq!(..., 0)` pass on a crashed shell.
+            Ok(WaitStatus::Signaled(_, signal, _)) => 128 + signal as i32,
+            other => panic!("shell did not exit normally: {other:?}"),
         }
     }
 }
@@ -94,6 +121,7 @@ impl Drop for Session {
     fn drop(&mut self) {
         let _ = nix::sys::signal::killpg(self.child, nix::sys::signal::Signal::SIGKILL);
         let _ = waitpid(self.child, Some(nix::sys::wait::WaitPidFlag::WNOHANG));
+        let _ = std::fs::remove_dir_all(&self.home);
     }
 }
 
@@ -162,7 +190,6 @@ fn scoped_numbered_redirect_keeps_the_child_foreground() {
 // Runs `action` with a function that records whether the child it starts is in
 // the terminal's foreground process group.
 fn foreground_marker(name: &str, action: &str) -> (bool, bool) {
-    use std::sync::atomic::{AtomicUsize, Ordering};
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let count = COUNTER.fetch_add(1, Ordering::Relaxed);
 
@@ -208,7 +235,16 @@ fn ctrl_z_stops_a_job_and_fg_resumes_it() {
     let mut session = Session::start();
     session.read_until("❯", Duration::from_secs(5));
 
-    session.send("sleep 60\r");
+    let token = "SHARKY_JOBCTRL_RESUME";
+    let marker = session.home.join("resumed.marker");
+    let _ = std::fs::remove_file(&marker);
+
+    // The only side effect happens after the sleep, i.e. after the job has
+    // been resumed by `fg`. Its presence proves the job actually ran again.
+    session.send(&format!(
+        "sh -c 'sleep 1; echo {token} > {}'\r",
+        marker.display()
+    ));
     std::thread::sleep(Duration::from_millis(300));
     session.send("\x1a");
 
@@ -216,16 +252,35 @@ fn ctrl_z_stops_a_job_and_fg_resumes_it() {
     assert!(seen.contains("Stopped"), "ctrl-z did not stop the job: {seen:?}");
 
     session.send("jobs\r");
-    let seen = session.read_until("sleep 60", Duration::from_secs(5));
-    assert!(seen.contains("Stopped"), "job table lost the job: {seen:?}");
+    // The leftover from the status line has no "Stopped", so this only returns
+    // once the fresh `jobs` listing (carrying the token) has been read.
+    let seen = session.read_until("Stopped", Duration::from_secs(5));
+    assert!(
+        seen.contains("Stopped") && seen.contains(token),
+        "job table lost the job: {seen:?}"
+    );
 
     session.send("fg\r");
-    std::thread::sleep(Duration::from_millis(300));
-    session.send("\x03");
+    // Give the resumed command time to finish its sleep and write the marker.
+    std::thread::sleep(Duration::from_millis(1500));
 
     session.send("jobs\r");
     let seen = session.read_until("❯", Duration::from_secs(5));
     assert!(seen.contains('❯'), "missing prompt after fg: {seen:?}");
+
+    // The resumed command ran to completion: its marker carries the token.
+    let written = std::fs::read_to_string(&marker).unwrap_or_default();
+    assert!(
+        written.contains(token),
+        "fg did not resume the command to completion: marker={written:?}"
+    );
+
+    // `fg` removed the job from the table and it finished normally, so `jobs`
+    // now reports no job at all (neither Running nor Stopped).
+    assert!(
+        !seen.contains("Running") && !seen.contains("Stopped"),
+        "job table not empty after the resumed job finished: {seen:?}"
+    );
 
     session.send("exit\r");
     assert_eq!(session.exit_status(), 0);
