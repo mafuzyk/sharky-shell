@@ -168,6 +168,15 @@ impl Action {
 
 impl Shell {
     pub fn new() -> Self {
+        // Rust ignores SIGPIPE at startup, which leaves a write to a pipe with
+        // no reader returning EPIPE to code that can only panic. A shell must
+        // behave like bash instead: the default disposition ends the process
+        // with 128+SIGPIPE (141), so `sharky -c '...' | head -1` stops quietly
+        // on the first write nobody is reading.
+        unsafe {
+            let _ = signal(Signal::SIGPIPE, SigHandler::SigDfl);
+        }
+
         let env = std::env::vars_os()
             .map(|(key, value)| {
                 (

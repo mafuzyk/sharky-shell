@@ -106,3 +106,87 @@ fn command_substitution_warns_once_per_substitution() {
 }
 
 // ---------------------------------------------------------------------------
+// Hazard 2: a broken pipe must end the shell quietly with bash's status.
+//
+// bash: `bash -c 'while true; do pwd; done' | head -1` reports PIPESTATUS 141
+// and prints nothing on stderr. sharky aborted with SIGABRT and a Rust panic.
+// ---------------------------------------------------------------------------
+
+fn wait_with_deadline(mut child: std::process::Child, limit: Duration) -> Option<std::process::ExitStatus> {
+    let deadline = Instant::now() + limit;
+    while Instant::now() < deadline {
+        match child.try_wait().expect("try_wait") {
+            Some(status) => return Some(status),
+            None => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    None
+}
+
+#[test]
+fn broken_stdout_pipe_ends_the_shell_with_sigpipe() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args(["--no-config", "-c", "while true; do pwd; done"])
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .env("PATH", common::tool_path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn sharky");
+
+    let mut pipe = child.stdout.take().expect("stdout");
+    let mut line = Vec::new();
+    let mut byte = [0u8; 1];
+    while let Ok(1) = pipe.read(&mut byte) {
+        line.push(byte[0]);
+        if byte[0] == b'\n' {
+            break;
+        }
+    }
+    assert!(!line.is_empty(), "the shell printed no line before the pipe closed");
+    drop(pipe);
+
+    let status = wait_with_deadline(child, Duration::from_secs(10))
+        .expect("the shell kept running after the pipe closed");
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGPIPE),
+        "expected death by SIGPIPE (status 141), got {status:?}"
+    );
+}
+
+#[test]
+fn broken_stderr_pipe_ends_the_shell_with_sigpipe() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args(["--no-config", "-c", "set -x; while true; do pwd; done"])
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .env("PATH", common::tool_path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn sharky");
+
+    let mut pipe = child.stderr.take().expect("stderr");
+    let mut line = Vec::new();
+    let mut byte = [0u8; 1];
+    while let Ok(1) = pipe.read(&mut byte) {
+        line.push(byte[0]);
+        if byte[0] == b'\n' {
+            break;
+        }
+    }
+    assert!(!line.is_empty(), "the shell traced nothing before the pipe closed");
+    drop(pipe);
+
+    let status = wait_with_deadline(child, Duration::from_secs(10))
+        .expect("the shell kept running after the trace pipe closed");
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGPIPE),
+        "expected death by SIGPIPE (status 141), got {status:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
