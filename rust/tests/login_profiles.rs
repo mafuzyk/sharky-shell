@@ -4,8 +4,13 @@
 //! Every fixture lives in a throwaway `HOME`; the user's real dotfiles are
 //! never read or written.
 
+use std::io::Write;
+use std::os::fd::{FromRawFd, IntoRawFd};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+use nix::pty::openpty;
 
 /// Points the shell at a configuration directory that does not exist so the
 /// test observes profile handling alone.
@@ -28,6 +33,42 @@ fn run(home: &Path, args: &[&str]) -> Output {
         .env("HOME", home)
         .output()
         .expect("failed to run sharky")
+}
+
+/// Spawns a login shell on a pseudo-terminal so it takes the interactive path.
+fn login_pty(home: &Path) -> (Child, std::os::fd::OwnedFd) {
+    let pty = openpty(None, None).expect("pty");
+    let stdin = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stdout = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stderr = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+
+    let child = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args(["-l"])
+        .stdin(stdin)
+        .stdout(stdout)
+        .stderr(stderr)
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .env("TERM", "xterm-256color")
+        .env("HOME", home)
+        .spawn()
+        .expect("spawn sharky");
+
+    (child, pty.master)
+}
+
+/// Waits for `child` to exit, failing the test instead of hanging forever.
+fn wait_for_exit(child: &mut Child) -> std::process::ExitStatus {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(status) = child.try_wait().expect("wait for sharky") {
+            return status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("sharky did not exit");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// Appends `name` to `marker` when the file is executed.
@@ -211,6 +252,98 @@ fn login_survives_a_home_without_profiles() {
     let out = run(&home, &["-l", "-c", "printf OK"]);
     assert!(out.status.success(), "{out:?}");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "OK");
+
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn exit_in_a_login_profile_stops_the_c_command() {
+    let home = scratch("exit-c");
+    std::fs::write(home.join(".profile"), "exit 5\n").unwrap();
+
+    // bash runs the profile and never reaches the `-c` string: exit status 5,
+    // no `RAN` on stdout.
+    let out = run(&home, &["-l", "-c", "echo RAN"]);
+    assert_eq!(out.status.code(), Some(5), "{out:?}");
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("RAN"),
+        "{out:?}"
+    );
+
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn exit_zero_in_a_login_profile_exits_cleanly() {
+    let home = scratch("exit-zero");
+    std::fs::write(home.join(".profile"), "exit 0\n").unwrap();
+
+    let out = run(&home, &["-l", "-c", "echo RAN"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("RAN"),
+        "{out:?}"
+    );
+
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn exports_before_exit_still_apply() {
+    let home = scratch("exit-exports");
+    std::fs::write(
+        home.join(".profile"),
+        "trap 'printf \"%s\" \"$FOO\" > \"$HOME/trap.log\"' EXIT\n\
+         export FOO=bar\n\
+         exit 7\n",
+    )
+    .unwrap();
+
+    // bash applies the export, then `exit 7` runs the EXIT trap with the
+    // exported value visible and skips the `-c` string.
+    let out = run(&home, &["-l", "-c", "echo RAN"]);
+    assert_eq!(out.status.code(), Some(7), "{out:?}");
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("RAN"),
+        "{out:?}"
+    );
+    let seen = std::fs::read_to_string(home.join("trap.log")).unwrap_or_default();
+    assert_eq!(seen, "bar", "{out:?}");
+
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn exit_in_a_login_profile_stops_the_interactive_shell() {
+    let home = scratch("exit-pty");
+    std::fs::write(home.join(".profile"), "exit 5\n").unwrap();
+
+    let (mut child, master) = login_pty(&home);
+    let mut writer =
+        unsafe { std::fs::File::from_raw_fd(master.try_clone().unwrap().into_raw_fd()) };
+    // If the REPL starts despite the profile's exit, this line leaves a marker.
+    let _ = writer.write_all(b"printf TYPED > \"$HOME/typed.log\"\r");
+
+    let status = wait_for_exit(&mut child);
+    assert_eq!(status.code(), Some(5), "{status:?}");
+    assert!(
+        !home.join("typed.log").exists(),
+        "the REPL executed a line after the profile requested exit"
+    );
+
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn json_login_honors_a_profile_exit() {
+    let home = scratch("exit-json");
+    std::fs::write(home.join(".profile"), "exit 5\n").unwrap();
+
+    let out = run(&home, &["--json", "-l", "-c", "printf RAN"]);
+    assert_eq!(out.status.code(), Some(5), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("\"status\":5"), "{text}");
+    assert!(!text.contains("RAN"), "{text}");
 
     std::fs::remove_dir_all(&home).ok();
 }

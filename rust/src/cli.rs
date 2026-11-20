@@ -165,6 +165,9 @@ pub fn run() -> i32 {
     shell.set_command_string(command.is_some());
     if login && !(json && command.is_some()) {
         crate::profiles::login(&mut shell);
+        if let Some(code) = honor_login_exit(&mut shell) {
+            return code;
+        }
     }
 
     match (command, script) {
@@ -298,6 +301,15 @@ fn run_state(no_config: bool, include_env: bool) -> i32 {
     0
 }
 
+/// Consumes an `exit` requested by a login profile before the mode dispatch.
+///
+/// bash leaves a login shell from its startup files: the `-c` string, script or
+/// REPL never runs, the EXIT trap still fires and the profile's exports stay in
+/// the shell's environment.
+fn honor_login_exit(shell: &mut Shell) -> Option<i32> {
+    shell.exit_requested.map(|code| shell.finish(code))
+}
+
 fn run_json_command(shell: &mut Shell, source: &str, login: bool) -> i32 {
     let before = shell.env.clone();
     let stdout_file = match capture_file("out") {
@@ -337,6 +349,12 @@ fn run_json_command(shell: &mut Shell, source: &str, login: bool) -> i32 {
             shell.attach_json_exec(delta_file.as_raw_fd(), before.clone());
             if login {
                 crate::profiles::login(shell);
+            }
+            if let Some(status) = honor_login_exit(shell) {
+                write_delta(&delta_file, shell, &before);
+                let _ = std::io::stdout().flush();
+                let _ = std::io::stderr().flush();
+                unsafe { nix::libc::_exit(status) }
             }
             let status = shell.run(source);
             write_delta(&delta_file, shell, &before);

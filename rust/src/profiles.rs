@@ -30,9 +30,17 @@ const LOGIN_FILES: &[&str] = &[".bash_profile", ".bash_login", ".profile"];
 ///
 /// A file that fails to parse is reported with its path and line and the login
 /// continues with the next file, matching bash's survival of a broken profile.
+/// An `exit` requested by a file ends the login sequence at once: bash never
+/// reads a later startup file after the shell has been asked to leave.
 pub fn login(shell: &mut Shell) {
     source(shell, Path::new("/etc/profile"));
+    if shell.exit_requested.is_some() {
+        return;
+    }
     source(shell, Path::new("/etc/sharky/profile.sharky"));
+    if shell.exit_requested.is_some() {
+        return;
+    }
 
     let home = PathBuf::from(shell.var("HOME"));
     if home.as_os_str().is_empty() {
@@ -44,6 +52,9 @@ pub fn login(shell: &mut Shell) {
         .find(|path| path.is_file())
     {
         source(shell, &path);
+        if shell.exit_requested.is_some() {
+            return;
+        }
     }
     source(shell, &home.join(".config/sharky/profile.sharky"));
 }
