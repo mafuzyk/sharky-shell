@@ -32,6 +32,7 @@ pub const BUILTINS: &[&str] = &[
     "times",
     "disown",
     "exit",
+    "logout",
     "export",
     "unset",
     "set",
@@ -102,6 +103,8 @@ pub const CLI_TOPICS: &[&str] = &[
     "--private",
     "--env",
     "--no-config",
+    "--norc",
+    "--noprofile",
     "--version",
     "--help",
     "-h",
@@ -144,6 +147,8 @@ pub fn index() -> String {
     out.push_str("               requires -c or a file; reports line info and exits 2 on errors\n");
     out.push_str("  -i           force interactive mode\n");
     out.push_str("  -l, --login  read login profiles before the command\n");
+    out.push_str("  --noprofile  skip login startup profiles even with -l or --login\n");
+    out.push_str("  --norc       skip config.sharky and theme.sharky\n");
     out.push_str("  -P, --private  keep no history file: read and write nothing\n");
     out.push_str("  --json       print one JSON object for -c, state, capabilities or help\n");
     out.push_str("  --env        include the environment in state JSON\n");
@@ -393,7 +398,13 @@ fn builtin_text(id: &str) -> Option<&'static str> {
         }
         "exit" => {
             "exit [STATUS]  leave the shell.\n\
-             With no argument, use the status of the last command.\n"
+             With no argument, use the status of the last command.\n\
+             In an interactive shell, warns once if stopped jobs exist.\n"
+        }
+        "logout" => {
+            "logout [STATUS]  exit a login shell.\n\
+             Fails with status 1 if called outside a login shell. Runs user and system\n\
+             logout files before EXIT traps and honors shopt huponexit.\n"
         }
         "export" => {
             "export [-fn] [NAME[=value] ...] or export -p\n\
@@ -410,8 +421,9 @@ fn builtin_text(id: &str) -> Option<&'static str> {
         "set" => {
             "set [OPTIONS] [-- ARG ...]  set shell options and positional parameters.\n\
              Flags: -e errexit, -u nounset, -x xtrace, -H histexpand, -C noclobber,\n\
-             -o NAME and +o NAME for errexit, nounset, xtrace, histexpand, pipefail,\n\
-             noclobber and vi. `set -- a b` replaces the positional parameters.\n"
+             -E errtrace, -T functrace, -o NAME and +o NAME for errexit, nounset, xtrace,\n\
+             histexpand, pipefail, noclobber, errtrace, functrace, vi, and ignoreeof.\n\
+             `set -- a b` replaces the positional parameters.\n"
         }
         "source" => {
             "source FILE [ARG ...]  run FILE in the current shell.\n\
@@ -545,11 +557,11 @@ fn builtin_text(id: &str) -> Option<&'static str> {
         }
         "typeset" => "typeset [-a | -A] NAME[=VALUE] ...  synonym for declare.\n",
         "shopt" => {
-            "shopt [-s | -u] [OPTION]  query or set a shell option.\n\
-             Supported options are `globstar` (recursive `**` matching) and\n\
-             `autocd` (enter a directory typed as a command).\n\
-             `-s` enables an option, `-u` disables it, and `shopt OPTION`\n\
-             prints `OPTION<TAB>on|off`.\n"
+            "shopt [-s | -u | -q | -p] [OPTION]  query or set a shell option.\n\
+             Supported options are `autocd`, `dotglob`, `extglob`, `failglob`,\n\
+             `globstar`, `huponexit`, `login_shell` (read-only), `nocasematch`,\n\
+             and `nullglob`. `-s` enables, `-u` disables, `-q` is quiet, `-p` prints\n\
+             reusable `shopt` commands, and `shopt OPTION` prints `OPTION<TAB>on|off`.\n"
         }
         "command" => {
             "command [-pVv] NAME [ARG ...]  run NAME while bypassing functions.\n\
@@ -681,6 +693,8 @@ fn cli_text(id: &str) -> Option<&'static str> {
              Only valid together with state.\n"
         }
         "--no-config" => "--no-config  do not load the configuration file.\n",
+        "--norc" => "--norc  synonym for --no-config; skip config.sharky and theme.sharky.\n",
+        "--noprofile" => "--noprofile  skip login startup profiles even when -l or --login is set.\n",
         "--version" => "--version  print the version and exit.\n",
         "--help" => {
             "--help  print the help index and exit.\n\

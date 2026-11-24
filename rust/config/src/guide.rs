@@ -3,28 +3,29 @@
 //! This module only produces text. It parses no files and wires no CLI.
 
 use crate::{
-    ACTIONS, INSTRUCTIONS, KEY_PREFIXES, NAMED_KEYS, TIDE_FLAGS, TIDE_NUMBER, TIDE_OMP_CONFIG,
-    TIDE_PROMPT, TIDE_PROMPT_ENGINES, presets,
+    ACTIONS, INSTRUCTIONS, KEY_PREFIXES, NAMED_KEYS, TIDE_CURSOR, TIDE_CURSOR_STYLES, TIDE_FLAGS,
+    TIDE_NUMBER, TIDE_OMP_CONFIG, TIDE_PROMPT, TIDE_PROMPT_ENGINES, presets,
 };
 
 /// Stable topic id with a short human-readable title.
 pub const INDEX: &[(&str, &str)] = &[
     ("index", "Configuration guide"),
     ("directives", "Parser directives"),
-    ("tide", "tide — shell preferences and defaults"),
-    ("pearl", "pearl — environment variable"),
-    ("current", "current — PATH entry"),
-    ("reef", "reef — alias"),
-    ("shoal", "shoal — abbreviation"),
-    ("anchor", "anchor — key binding"),
-    ("coral", "coral — colour definition"),
-    ("wave", "wave — prompt or style"),
-    ("wake", "wake — startup command"),
-    ("tide history", "tide history"),
-    ("files", "config.sharky and theme.sharky"),
+    ("set", "set — shell preferences and defaults"),
+    ("env", "env — environment variable"),
+    ("path", "path — PATH entry"),
+    ("alias", "alias — command alias"),
+    ("abbr", "abbr — abbreviation"),
+    ("bind", "bind — key binding"),
+    ("color", "color — colour definition"),
+    ("style", "style — prompt or style"),
+    ("startup", "startup — interactive startup command"),
+    ("include", "include — modular config inclusion"),
+    ("set history", "set history"),
+    ("files", "config.sharky, conf.d/*.sharky and theme.sharky"),
     ("theme", "Palette, prompt and styles"),
     ("presets", "Built-in prompt presets"),
-    ("prompt", "Prompt engines, templates and rprompt"),
+    ("prompt", "Prompt engines, templates, transient and rprompt"),
     ("overwrite", "Overwrite target styling"),
 ];
 
@@ -38,29 +39,32 @@ pub fn index_text() -> String {
     out
 }
 
-/// Human text for a topic id from [`INDEX`], or `None` for an unknown id.
+/// Human text for a topic id from [`INDEX`], or legacy aliases.
 pub fn topic(id: &str) -> Option<String> {
     match id {
         "index" => Some(
-            "Sharky reads two declarative files at startup: config.sharky for settings and \
-             theme.sharky for colours and styles. They are data, never shell code: one \
-             statement per line, // comments, optional double quotes, and no =, braces or \
-             semicolons. A line reads `instruction property value`. Look up a topic by its \
-             id: directives, tide, tide history, anchor, files, theme, overwrite. Invalid \
-             input is reported as `file:line: message` and the shell continues with defaults."
+            "Sharky reads declarative configuration at startup: config.sharky, conf.d/*.sharky, \
+             and theme.sharky. They are data, never shell code: one statement per line, // \
+             comments, optional double quotes, and no =, braces or semicolons. A line reads \
+             `instruction property value`. Look up a topic by its id: directives, set, \
+             set history, bind, include, files, theme, overwrite. Legacy directives \
+             (tide, pearl, current, reef, shoal, anchor, coral, wave, wake) remain accepted as \
+             deprecated aliases. Invalid input is reported as `file:line: message` and the \
+             shell continues with defaults."
                 .to_string(),
         ),
         "directives" => {
             let meanings = [
-                ("tide", "shell preference"),
-                ("pearl", "environment variable"),
-                ("current", "prepend a directory to PATH"),
-                ("reef", "alias"),
-                ("shoal", "abbreviation expanded on space or Enter"),
-                ("wake", "command run at interactive startup"),
-                ("anchor", "key binding"),
-                ("coral", "colour definition"),
-                ("wave", "prompt template or style"),
+                ("set", "shell preference (legacy alias: tide)"),
+                ("env", "environment variable (legacy alias: pearl)"),
+                ("path", "prepend a directory to PATH (legacy alias: current)"),
+                ("alias", "alias (legacy alias: reef)"),
+                ("abbr", "abbreviation expanded on space or Enter (legacy alias: shoal)"),
+                ("startup", "command run at interactive startup (legacy alias: wake)"),
+                ("bind", "key binding (legacy alias: anchor)"),
+                ("color", "colour definition (legacy alias: coral)"),
+                ("style", "prompt template, preset or style (legacy alias: wave)"),
+                ("include", "load another .sharky config file inline"),
             ];
             let list = INSTRUCTIONS
                 .iter()
@@ -76,12 +80,12 @@ pub fn topic(id: &str) -> Option<String> {
             Some(format!(
                 "Each line starts with one parser directive. The accepted instructions are:\n\
                  {list}\n\
-                 coral and wave normally live in theme.sharky; the rest live in config.sharky. \
-                 An unknown instruction, the wrong number of values or an unclosed quote is \
-                 rejected instead of being executed."
+                 color and style normally live in theme.sharky; the rest live in config.sharky \
+                 or conf.d/*.sharky. Legacy maritime names are deprecated and will be removed \
+                 in a future release."
             ))
         }
-        "tide" => {
+        "set" | "tide" => {
             let defaults = [
                 ("greeting", "off"),
                 ("autosuggest", "on"),
@@ -90,6 +94,8 @@ pub fn topic(id: &str) -> Option<String> {
                 ("profile_paths", "on"),
                 ("autocd", "on"),
                 ("rprompt", "off"),
+                ("vi", "off"),
+                ("transient_prompt", "off"),
             ];
             let flags = TIDE_FLAGS
                 .iter()
@@ -103,72 +109,86 @@ pub fn topic(id: &str) -> Option<String> {
                 .collect::<Vec<_>>()
                 .join("; ");
             Some(format!(
-                "`tide KEY VALUE` sets a shell preference.\n\
+                "`set KEY VALUE` (legacy alias `tide`) sets a shell preference.\n\
                  Flags: {flags}.\n\
                  `{prompt}` selects the prompt engine ({engines}; default native).\n\
+                 `{cursor}` sets cursor shape ({cursors}; default terminal default).\n\
                  `{omp_cfg}` sets an optional Oh My Posh theme file path (supports ~/ and defaults to POSH_THEME).\n\
                  `{key}` takes a number of history entries to keep (default 1000).\n\
                  Invalid values are rejected with `file:line: message`.",
                 prompt = TIDE_PROMPT,
                 engines = TIDE_PROMPT_ENGINES.join(", "),
+                cursor = TIDE_CURSOR,
+                cursors = TIDE_CURSOR_STYLES.join(", "),
                 omp_cfg = TIDE_OMP_CONFIG,
                 key = TIDE_NUMBER
             ))
         }
-        "pearl" => Some(
-            "`pearl NAME value` sets an environment variable for the shell and its children. \
-             NAME is a bare word and the value may be double quoted. A line with no name is \
-             rejected; several pearl lines set several variables."
+        "env" | "pearl" => Some(
+            "`env NAME value` (legacy alias `pearl`) sets an environment variable for the shell \
+             and its children. NAME is a bare word and the value may be double quoted. A line \
+             with no name is rejected; several env lines set several variables."
                 .to_string(),
         ),
-        "current" => Some(
-            "`current directory` prepends one directory to PATH. Quote a directory that contains \
-             spaces. Multiple current lines are applied in order, so the last directory listed \
-             ends up first in PATH."
+        "path" | "current" => Some(
+            "`path directory` (legacy alias `current`) prepends one directory to PATH. Quote a \
+             directory that contains spaces. Multiple path lines are applied in order, so the \
+             last directory listed ends up first in PATH."
                 .to_string(),
         ),
-        "reef" => Some(
-            "`reef name command` defines an alias. The command may be double quoted when it \
-             contains spaces. Aliases expand when the name is used as a command."
+        "alias" | "reef" => Some(
+            "`alias name command` (legacy alias `reef`) defines an alias. The command may be \
+             double quoted when it contains spaces. Aliases expand when the name is used as a \
+             command."
                 .to_string(),
         ),
-        "shoal" => Some(
-            "`shoal abbreviation expansion` defines an abbreviation for the line editor: typing \
-             the abbreviation and then pressing space or Enter expands it. Quote an expansion \
-             that contains spaces. Abbreviations affect typed input, not scripts."
+        "abbr" | "shoal" => Some(
+            "`abbr abbreviation expansion` (legacy alias `shoal`) defines an abbreviation for the \
+             line editor: typing the abbreviation and then pressing space or Enter expands it. \
+             Quote an expansion that contains spaces. Abbreviations affect typed input, not scripts."
                 .to_string(),
         ),
-        "wake" => Some(
-            "`wake command` registers one command to run at interactive startup, before the first \
-             prompt. Quote a command that contains spaces. Multiple wake lines append and all run; \
-             a non-interactive shell does not run them."
+        "startup" | "wake" => Some(
+            "`startup command` (legacy alias `wake`) registers one command to run at interactive \
+             startup, before the first prompt. Quote a command that contains spaces. Multiple \
+             startup lines append and all run; a non-interactive shell does not run them."
                 .to_string(),
         ),
-        "coral" => Some(
-            "`coral name #RRGGBB` defines a colour, normally in theme.sharky. The value must be six \
-             hexadecimal digits after #; the name can then be used as @name in a wave style. \
-             Defining a colour twice keeps the last value."
+        "include" => Some(
+            "`include path` loads another declarative .sharky file inline. Relative paths resolve \
+             from the containing file's directory and ~/ expands to HOME. Cycles and depth over 16 \
+             are rejected."
                 .to_string(),
         ),
-        "wave" => Some(
-            "`wave key value` sets a prompt template, preset or style, normally in theme.sharky.\n\
-             `wave preset NAME` applies a built-in preset as a base layer (see `presets`).\n\
+        "color" | "coral" => Some(
+            "`color name #RRGGBB` (legacy alias `coral`) defines a colour, normally in theme.sharky. \
+             The value must be six hexadecimal digits after #; the name can then be used as @name \
+             in a style. Defining a colour twice keeps the last value."
+                .to_string(),
+        ),
+        "style" | "wave" => Some(
+            "`style key value` (legacy alias `wave`) sets a prompt template, preset or style, \
+             normally in theme.sharky.\n\
+             `style preset NAME` applies a built-in preset as a base layer (see `presets`).\n\
              Styles accept @name or #RRGGBB, optional `on @bg`/`on #RRGGBB`, and attributes \
              `bold`, `dim`, `italic`, `underline`, `reverse`/`invert` (for example \
-             `wave prompt.git \"@abyss on @kelp bold\"`).\n\
-             `wave prompt` and `wave rprompt` support \\uXXXX/\\u{X} Unicode escapes, {cwd}, \
+             `style prompt.git \"@ink on @kelp bold\"`).\n\
+             `style prompt`, `style rprompt`, `style prompt.transient` and \
+             `style prompt.continuation` support \\uXXXX/\\u{X} Unicode escapes, {cwd}, \
              {cwd_short}, {cwd_full}, {cwd_home}, {git}, {git_dirty}, {duration}, {duration_ms}, \
              {symbol}, {status}, {error_status}, {user}, {host}, {os_icon}, {shell}, {mem}, \
-             {venv}, {nix}, {ssh}, {jobs}, {time} and {fill}, conditional [...] groups, inline \
-             {style:text} spans, and `wave prompt.symbol.glyph` / `wave prompt.error.glyph` / \
-             `wave prompt.os.glyph`. `wave overwrite` is the optional style for redirect targets."
+             {venv}, {nix}, {ssh}, {jobs}, {time}, {env:VAR} and {fill}, conditional [...] groups, \
+             inline {style:text} spans, and `style prompt.symbol.glyph` / \
+             `style prompt.error.glyph` / `style prompt.os.glyph`. `style overwrite` is the \
+             optional style for redirect targets."
                 .to_string(),
         ),
-        "tide history" => Some(format!(
-            "`tide {key} N` sets how many command lines a session keeps in memory (default 1000). \
-             N must be a non-negative integer; an unset key or 0 falls back to 1000.\n\
-             A non-numeric value is rejected when config.sharky is parsed: `tide {key} many` \
-             reports `tide {key} expects a number, found 'many'` and the shell keeps its \
+        "set history" | "tide history" => Some(format!(
+            "`set {key} N` (legacy alias `tide {key}`) sets how many command lines a session keeps \
+             in memory (default 1000). N must be a non-negative integer; an unset key or 0 falls \
+             back to 1000.\n\
+             A non-numeric value is rejected when config.sharky is parsed: `set {key} many` \
+             reports `set {key} expects a number, found 'many'` and the shell keeps its \
              defaults.\n\
              This limit bounds only one session's view; it never trims the shared file. \
              Auto-clean bounds the file itself with a vacuum that caps it at 262144 records by \
@@ -177,14 +197,11 @@ pub fn topic(id: &str) -> Option<String> {
              ~/.local/share/sharky/history when that is unset, unless SHARKY_HISTORY overrides it.\n\
              New records use a one-line, TAB-separated v2 grammar: \
              `h2 <when-us> <cwd> <npaths> <paths...> <cmd> <hits>`, with escapes inside each field. \
-             Legacy v1 lines coexist; migration is lazy, so nothing is rewritten on load and a \
-             legacy record keeps when = None and its original bytes. Downgrading to a 3.6.0 binary \
-             is non-destructive: it reads v2 lines as opaque commands and its vacuum keeps them \
-             opaque, so the history file is never lost or corrupted.",
+             Legacy v1 lines coexist; migration is lazy, so nothing is rewritten on load.",
             key = TIDE_NUMBER
         )),
-        "anchor" => Some(format!(
-            "`anchor KEY ACTION` binds a key to a reader action.\n\
+        "bind" | "anchor" => Some(format!(
+            "`bind KEY ACTION` (legacy alias `anchor`) binds a key to a reader action.\n\
              Actions: {}.\n\
              Keys: named keys {}; modifier prefixes {} followed by one character; or a single \
              character. Unknown actions and keys are rejected with `file:line: message`.",
@@ -194,22 +211,24 @@ pub fn topic(id: &str) -> Option<String> {
         )),
         "files" => Some(
             "Sharky reads $SHARKY_CONFIG, or ${XDG_CONFIG_HOME:-~/.config}/sharky, at startup. \
-             It parses config.sharky first, then theme.sharky, and merges them: a later value \
-             overwrites an earlier one for the same key, while the list-like instructions \
-             pearl, current and wake append. Inside one file a later line for the same key \
-             wins as well. Both files are data only, so a typo cannot execute code. Invalid \
-             input is reported as `file:line: message`; the shell continues with defaults."
+             It parses config.sharky first, then conf.d/*.sharky in alphabetical order, then \
+             theme.sharky, and merges them: a later value overwrites an earlier one for the same \
+             key, while the list-like instructions env, path and startup append. Inside one file \
+             a later line for the same key wins as well. `include` pulls extra files inline. \
+             Invalid input is reported as `file:line: message`; the shell continues with defaults."
                 .to_string(),
         ),
         "theme" => Some(
-            "theme.sharky defines the palette and the prompt. `wave preset NAME` loads a built-in \
-             preset (neolambda, sharky, pure, robbyrussell, powerline) before your own overrides. \
-             `coral NAME #RRGGBB` defines a colour; `wave KEY VALUE` sets a prompt template, \
-             right prompt (`rprompt`), symbol glyph (`prompt.symbol.glyph`) or style (`@name`, \
-             `#RRGGBB`, `on @bg`, `bold`/`dim`/`italic`/`underline`/`reverse`). Prompt placeholders are \
-             {cwd}, {cwd_short}, {cwd_full}, {cwd_home}, {git}, {git_dirty}, {duration}, {duration_ms}, \
-             {symbol}, {status}, {error_status}, {user}, {host}, {os_icon}, {shell}, {mem}, {venv}, \
-             {nix}, {ssh}, {jobs}, {time} and {fill}. Set NO_COLOR=1 to keep the prompt plain."
+            "theme.sharky defines the palette and the prompt. `style preset NAME` loads a built-in \
+             preset (catppuccin, tokyonight, sharky, neolambda, pure, robbyrussell, powerline) \
+             before your own overrides. `color NAME #RRGGBB` defines a colour; `style KEY VALUE` \
+             sets a prompt template, right prompt (`rprompt`), transient prompt (`prompt.transient`), \
+             continuation prompt (`prompt.continuation`), symbol glyph (`prompt.symbol.glyph`) or \
+             style (`@name`, `#RRGGBB`, `on @bg`, `bold`/`dim`/`italic`/`underline`/`reverse`). \
+             Prompt placeholders are {cwd}, {cwd_short}, {cwd_full}, {cwd_home}, {git}, \
+             {git_dirty}, {duration}, {duration_ms}, {symbol}, {status}, {error_status}, {user}, \
+             {host}, {os_icon}, {shell}, {mem}, {venv}, {nix}, {ssh}, {jobs}, {time}, {env:VAR} \
+             and {fill}. Set NO_COLOR=1 to keep the prompt plain."
                 .to_string(),
         ),
         "presets" => {
@@ -219,29 +238,30 @@ pub fn topic(id: &str) -> Option<String> {
                 .collect::<Vec<_>>()
                 .join("\n");
             Some(format!(
-                "Built-in presets activated via `wave preset NAME` in theme.sharky or config.sharky:\n\
+                "Built-in presets activated via `style preset NAME` in theme.sharky or config.sharky:\n\
                  {list}\n\
-                 User `coral` and `wave` rules always override preset defaults regardless of order."
+                 User `color` and `style` rules always override preset defaults regardless of order."
             ))
         }
         "prompt" => Some(
             "Sharky supports native declarative templates and external prompt binaries:\n\
-             - Native (default, `tide prompt native`): `wave prompt`, `wave rprompt`, `wave preset NAME`, \
-             conditional `[...]` groups (shown when an inner placeholder is non-empty), inline `{style:text}` \
-             spans (e.g. `{@muted:╭─}`), and `wave prompt.symbol.glyph \"λ\"`.\n\
-             - Starship (`tide prompt starship` or legacy `tide starship on`): runs `starship prompt`.\n\
-             - Oh My Posh (`tide prompt omp`, optional `tide omp_config \"~/theme.omp.json\"`): runs \
+             - Native (default, `set prompt native`): `style prompt`, `style rprompt`, \
+             `style prompt.transient` (with `set transient_prompt on`), `style prompt.continuation`, \
+             `style preset NAME`, conditional `[...]` groups (shown when an inner placeholder is \
+             non-empty), inline `{style:text}` spans, `{env:VAR}`, and `style prompt.symbol.glyph \"λ\"`.\n\
+             - Starship (`set prompt starship` or `set starship on`): runs `starship prompt`.\n\
+             - Oh My Posh (`set prompt omp`, optional `set omp_config \"~/theme.omp.json\"`): runs \
              `oh-my-posh print primary --shell=universal --escape=false`.\n\
-             Enable external right prompts with `tide rprompt on`; native `wave rprompt` is active \
-             whenever defined unless `tide rprompt off` is set."
+             Enable external right prompts with `set rprompt on`; native `style rprompt` is active \
+             whenever defined unless `set rprompt off` is set."
                 .to_string(),
         ),
         "overwrite" => Some(
-            "`wave overwrite @colour` is the current optional style for files a redirect would \
-             truncate. It paints the literal target of >, 2> and &> when that path already exists. \
-             Only unquoted static paths are matched: quotes, variables, tilde and other expansions \
-             stay plain, and no filesystem check runs when highlighting or colour is off. Leave \
-             the style out for no overwrite colour."
+            "`style overwrite @colour` (legacy `wave overwrite`) is the optional style for files \
+             a redirect would truncate. It paints the literal target of >, 2> and &> when that \
+             path already exists. Only unquoted static paths are matched: quotes, variables, \
+             tilde and other expansions stay plain, and no filesystem check runs when highlighting \
+             or colour is off. Leave the style out for no overwrite colour."
                 .to_string(),
         ),
         _ => None,
@@ -291,8 +311,8 @@ mod tests {
     }
 
     #[test]
-    fn anchor_covers_parser_actions_and_keys() {
-        let text = topic("anchor").unwrap();
+    fn bind_covers_parser_actions_and_keys() {
+        let text = topic("bind").unwrap();
         for action in ACTIONS {
             assert!(text.contains(*action), "missing action {action}");
         }
@@ -302,30 +322,35 @@ mod tests {
         for prefix in KEY_PREFIXES {
             assert!(text.contains(*prefix), "missing prefix {prefix}");
         }
+        assert_eq!(topic("anchor").unwrap(), text);
     }
 
     #[test]
-    fn tide_covers_parser_flags_and_defaults() {
-        let text = topic("tide").unwrap();
+    fn set_covers_parser_flags_and_defaults() {
+        let text = topic("set").unwrap();
         for key in TIDE_FLAGS {
             assert!(text.contains(&format!("`{key}`")), "missing {key}");
         }
         assert!(text.contains(TIDE_NUMBER));
+        assert!(text.contains(TIDE_CURSOR));
         assert!(text.contains("default 1000"));
+        assert_eq!(topic("tide").unwrap(), text);
     }
 
     #[test]
-    fn tide_history_is_a_targeted_topic() {
-        let text = topic("tide history").unwrap();
-        assert!(text.contains("tide history"));
+    fn set_history_is_a_targeted_topic() {
+        let text = topic("set history").unwrap();
+        assert!(text.contains("set history"));
         assert!(text.contains("1000"));
         assert!(text.contains("expects a number"));
+        assert_eq!(topic("tide history").unwrap(), text);
     }
 
     #[test]
     fn files_topic_documents_merge_and_overwrite() {
         let text = topic("files").unwrap();
         assert!(text.contains("config.sharky"));
+        assert!(text.contains("conf.d/*.sharky"));
         assert!(text.contains("theme.sharky"));
         assert!(text.contains("overwrites"));
         assert!(text.contains("append"));
@@ -334,7 +359,7 @@ mod tests {
     #[test]
     fn overwrite_topic_documents_the_current_style() {
         let text = topic("overwrite").unwrap();
-        assert!(text.contains("wave overwrite"));
+        assert!(text.contains("style overwrite"));
         assert!(text.contains("@colour"));
         assert!(text.contains("2>"));
         assert!(text.contains("&>"));

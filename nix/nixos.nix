@@ -18,7 +18,7 @@ in
     package = lib.mkOption {
       type = lib.types.package;
       default = pkgs.callPackage ./package.nix { };
-      defaultText = lib.literalMD "the prebuilt static release binary shipped by the sharky flake (version 0.1.0-alpha.1)";
+      defaultText = lib.literalMD "the prebuilt static release binary shipped by the sharky flake (version 0.1.1-alpha)";
       description = ''
         The sharky package to install and register as a login shell.
       '';

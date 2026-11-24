@@ -40,6 +40,8 @@ impl Editor {
         let Some(_raw) = term::RawMode::enable() else {
             return fallback_line();
         };
+        let mut cursor_guard = CursorGuard::new(shell.setting("cursor"));
+        cursor_guard.apply(false)?;
 
         let mut buffer: Vec<char> = Vec::new();
         let mut cursor = 0;
@@ -67,6 +69,7 @@ impl Editor {
         let mut last_row = prompt_width / rendered_cols;
 
         loop {
+            cursor_guard.apply(vi_normal)?;
             // A fatal signal ends the shell with its EXIT action; there is no
             // line left to keep, so hand control back to the REPL, which runs
             // the action and leaves with 128+signal.
@@ -173,38 +176,6 @@ impl Editor {
                 continue;
             }
 
-            if matches!(key, Key::AltLeft | Key::AltRight) {
-                menu = None;
-                let changed = if key == Key::AltLeft {
-                    shell.dir_back()
-                } else {
-                    shell.dir_forward()
-                };
-                if changed {
-                    let raw_new = if raw_prompt == "... " {
-                        "... ".to_string()
-                    } else {
-                        prompt::render_raw(shell)
-                    };
-                    let upper_rows = prompt_upper_rows(&prompt, rendered_cols);
-                    let (cursor_row, _) = position(&buffer, cursor, rendered_cols, prompt_width);
-                    let move_up = upper_rows.saturating_add(cursor_row);
-                    let new_prompt = format_prompt(&raw_new, input_marker, rendered_cols, shell);
-                    let mut out = String::new();
-                    if move_up > 0 {
-                        out.push_str(&format!("\x1b[{move_up}A"));
-                    }
-                    out.push_str("\r\x1b[J");
-                    out.push_str(&new_prompt);
-                    term::write_stdout(&out)?;
-                    prompt = new_prompt;
-                    prompt_width = last_line_width(&prompt);
-                    prompt_last = prompt.rsplit('\n').next().unwrap_or("").to_string();
-                    last_row = prompt_width / rendered_cols;
-                }
-                continue;
-            }
-
             if let Some(active) = menu.as_mut() {
                 match key {
                     Key::Tab => {
@@ -253,7 +224,15 @@ impl Editor {
                 match key {
                     Key::Enter => {
                         expand_abbreviation(&mut buffer, &mut cursor, shell, "");
-                        term::write_stdout("\r\n")?;
+                        finish_submitted_line(
+                            &prompt,
+                            rendered_cols,
+                            prompt_width,
+                            &buffer,
+                            cursor,
+                            input_marker,
+                            shell,
+                        )?;
                         return Ok(Line::Content(buffer.iter().collect()));
                     }
                     Key::Backspace => {
@@ -276,7 +255,15 @@ impl Editor {
                         let before = buffer.clone();
                         if history_search(prompt_width, &prompt_last, shell, &mut buffer, &mut cursor)?
                         {
-                            term::write_stdout("\r\n")?;
+                            finish_submitted_line(
+                                &prompt,
+                                rendered_cols,
+                                prompt_width,
+                                &buffer,
+                                cursor,
+                                input_marker,
+                                shell,
+                            )?;
                             return Ok(Line::Content(buffer.iter().collect()));
                         }
                         if buffer != before {
@@ -342,7 +329,15 @@ impl Editor {
                     Outcome::Continue => continue,
                     Outcome::Submit => {
                         expand_abbreviation(&mut buffer, &mut cursor, shell, "");
-                        term::write_stdout("\r\n")?;
+                        finish_submitted_line(
+                            &prompt,
+                            rendered_cols,
+                            prompt_width,
+                            &buffer,
+                            cursor,
+                            input_marker,
+                            shell,
+                        )?;
                         return Ok(Line::Content(buffer.iter().collect()));
                     }
                     Outcome::Abort => {
@@ -353,7 +348,15 @@ impl Editor {
                         let before = buffer.clone();
                         if history_search(prompt_width, &prompt_last, shell, &mut buffer, &mut cursor)?
                         {
-                            term::write_stdout("\r\n")?;
+                            finish_submitted_line(
+                                &prompt,
+                                rendered_cols,
+                                prompt_width,
+                                &buffer,
+                                cursor,
+                                input_marker,
+                                shell,
+                            )?;
                             return Ok(Line::Content(buffer.iter().collect()));
                         }
                         if buffer != before {
@@ -380,6 +383,39 @@ impl Editor {
                         }
                         if buffer != before {
                             self.reset_history_nav(shell);
+                        }
+                        continue;
+                    }
+                    Outcome::DirBack | Outcome::DirForward => {
+                        menu = None;
+                        let changed = if matches!(action, Action::DirBack) {
+                            shell.dir_back()
+                        } else {
+                            shell.dir_forward()
+                        };
+                        if changed {
+                            let raw_new = if input_marker.is_empty() {
+                                prompt::render_continuation(shell)
+                            } else {
+                                prompt::render_raw(shell)
+                            };
+                            let upper_rows = prompt_upper_rows(&prompt, rendered_cols);
+                            let (cursor_row, _) =
+                                position(&buffer, cursor, rendered_cols, prompt_width);
+                            let move_up = upper_rows.saturating_add(cursor_row);
+                            let new_prompt =
+                                format_prompt(&raw_new, input_marker, rendered_cols, shell);
+                            let mut out = String::new();
+                            if move_up > 0 {
+                                out.push_str(&format!("\x1b[{move_up}A"));
+                            }
+                            out.push_str("\r\x1b[J");
+                            out.push_str(&new_prompt);
+                            term::write_stdout(&out)?;
+                            prompt = new_prompt;
+                            prompt_width = last_line_width(&prompt);
+                            prompt_last = prompt.rsplit('\n').next().unwrap_or("").to_string();
+                            last_row = prompt_width / rendered_cols;
                         }
                         continue;
                     }
@@ -570,6 +606,8 @@ impl Editor {
                     self.recall_older(buffer, cursor, shell);
                 }
             }
+            Action::DirBack => return Ok(Outcome::DirBack),
+            Action::DirForward => return Ok(Outcome::DirForward),
         }
         if !matches!(action, Action::HistoryPrev | Action::HistoryNext) && *buffer != before {
             self.reset_history_nav(shell);
@@ -770,6 +808,8 @@ enum Action {
     FuzzyFiles,
     HistoryPrev,
     HistoryNext,
+    DirBack,
+    DirForward,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -780,6 +820,8 @@ enum Outcome {
     HistorySearch,
     Complete,
     FuzzyFiles,
+    DirBack,
+    DirForward,
 }
 
 const DEFAULT_BINDINGS: &[(&str, &str)] = &[
@@ -792,6 +834,8 @@ const DEFAULT_BINDINGS: &[(&str, &str)] = &[
     ("end", "end_of_line"),
     ("left", "backward_char"),
     ("right", "forward_char"),
+    ("alt-left", "dir_back"),
+    ("alt-right", "dir_forward"),
     ("alt-b", "backward_word"),
     ("alt-f", "forward_word"),
     ("up", "history_prev"),
@@ -847,6 +891,8 @@ fn parse_action(name: &str) -> Option<Action> {
         "fuzzy_files" => Action::FuzzyFiles,
         "history_prev" => Action::HistoryPrev,
         "history_next" => Action::HistoryNext,
+        "dir_back" => Action::DirBack,
+        "dir_forward" => Action::DirForward,
         _ => return None,
     })
 }
@@ -864,6 +910,8 @@ enum BoundKey {
     Down,
     Left,
     Right,
+    AltLeft,
+    AltRight,
     Home,
     End,
     Delete,
@@ -883,11 +931,13 @@ fn bound_key(key: Key) -> Option<BoundKey> {
         Key::Down => BoundKey::Down,
         Key::Left => BoundKey::Left,
         Key::Right => BoundKey::Right,
+        Key::AltLeft => BoundKey::AltLeft,
+        Key::AltRight => BoundKey::AltRight,
         Key::Home => BoundKey::Home,
         Key::End => BoundKey::End,
         Key::Delete => BoundKey::Delete,
         Key::Backspace => BoundKey::Backspace,
-        Key::Unknown | Key::PasteStart | Key::PasteEnd | Key::AltLeft | Key::AltRight => return None,
+        Key::Unknown | Key::PasteStart | Key::PasteEnd => return None,
     })
 }
 
@@ -902,6 +952,8 @@ fn parse_bound(name: &str) -> Option<BoundKey> {
         "down" => return Some(BoundKey::Down),
         "left" => return Some(BoundKey::Left),
         "right" => return Some(BoundKey::Right),
+        "alt-left" | "alt+left" => return Some(BoundKey::AltLeft),
+        "alt-right" | "alt+right" => return Some(BoundKey::AltRight),
         "home" => return Some(BoundKey::Home),
         "end" => return Some(BoundKey::End),
         "delete" => return Some(BoundKey::Delete),
@@ -944,6 +996,75 @@ fn strip_prefix_any<'a>(name: &'a str, prefixes: &[&str]) -> Option<&'a str> {
         }
     }
     None
+}
+
+struct CursorGuard {
+    configured: Option<&'static str>,
+    last_code: Option<&'static str>,
+}
+
+impl CursorGuard {
+    fn new(setting: Option<&str>) -> Self {
+        let configured = match setting {
+            Some("block") => Some("\x1b[2 q"),
+            Some("beam") => Some("\x1b[6 q"),
+            Some("underline") => Some("\x1b[4 q"),
+            _ => None,
+        };
+        Self {
+            configured,
+            last_code: None,
+        }
+    }
+
+    fn apply(&mut self, vi_normal: bool) -> std::io::Result<()> {
+        let Some(base) = self.configured else {
+            return Ok(());
+        };
+        let target = if vi_normal { "\x1b[2 q" } else { base };
+        if self.last_code != Some(target) {
+            term::write_stdout(target)?;
+            self.last_code = Some(target);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for CursorGuard {
+    fn drop(&mut self) {
+        if self.last_code.is_some() {
+            let _ = term::write_stdout("\x1b[0 q");
+        }
+    }
+}
+
+fn finish_submitted_line(
+    prompt: &str,
+    rendered_cols: usize,
+    prompt_width: usize,
+    buffer: &[char],
+    cursor: usize,
+    input_marker: &str,
+    shell: &Shell,
+) -> std::io::Result<()> {
+    if shell.setting("transient_prompt") == Some("on")
+        && !input_marker.is_empty()
+        && !buffer.is_empty()
+    {
+        let upper_rows = prompt_upper_rows(prompt, rendered_cols);
+        let (cursor_row, _) = position(buffer, cursor, rendered_cols, prompt_width);
+        let move_up = upper_rows.saturating_add(cursor_row);
+        let mut out = String::new();
+        if move_up > 0 {
+            out.push_str(&format!("\x1b[{move_up}A"));
+        }
+        out.push_str("\r\x1b[J");
+        out.push_str(&prompt::render_transient(shell));
+        out.push_str(&highlight::render(shell, buffer));
+        out.push_str("\r\n");
+        return term::write_stdout(&out);
+    }
+    term::write_stdout("\r\n")
 }
 
 fn push_undo(undo: &mut Vec<(Vec<char>, usize)>, buffer: &[char], cursor: usize) {

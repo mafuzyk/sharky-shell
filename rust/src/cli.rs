@@ -84,6 +84,7 @@ pub fn run() -> i32 {
     let mut script: Option<String> = None;
     let mut script_args = Vec::new();
     let mut no_config = false;
+    let mut no_profile = false;
     let mut json = false;
     let mut state = false;
     let mut state_env = false;
@@ -117,7 +118,8 @@ pub fn run() -> i32 {
                 print_help();
                 return 0;
             }
-            "--no-config" => no_config = true,
+            "--no-config" | "--norc" => no_config = true,
+            "--noprofile" => no_profile = true,
             "--check" => check = true,
             "--json" => json = true,
             "--env" => state_env = true,
@@ -251,7 +253,14 @@ pub fn run() -> i32 {
     if let Some(arg0) = command_args.first().cloned() {
         shell.set_command_args(Some(arg0), command_args[1..].to_vec());
     }
-    if login && !(json && command.is_some()) {
+    let tty = crate::term::is_tty(0) && crate::term::is_tty(1);
+    shell.set_login_shell(login);
+    if (command.is_none() && script.is_none() && tty)
+        || (interactive && (command.is_some() || script.is_some()))
+    {
+        shell.set_interactive(true);
+    }
+    if login && !no_profile && !(json && command.is_some()) {
         crate::profiles::login(&mut shell);
         if let Some(code) = honor_login_exit(&mut shell) {
             return code;
@@ -261,13 +270,12 @@ pub fn run() -> i32 {
     match (command, script) {
         (Some(source), _) => {
             if json {
-                return run_json_command(&mut shell, &source, login);
+                return run_json_command(&mut shell, &source, login && !no_profile);
             }
             shell.run(&source)
         }
         (None, Some(path)) => shell.run_script(&path, &script_args),
         (None, None) => {
-            let tty = crate::term::is_tty(0) && crate::term::is_tty(1);
             if interactive && !tty {
                 eprintln!("sharky: interactive mode requires a terminal");
                 return 1;

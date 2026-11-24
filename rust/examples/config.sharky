@@ -1,37 +1,46 @@
-// Sharky ~ settings
+// Sharky configuration
 // One statement per line: instruction property value
 
 // Shell behaviour
-tide greeting off
-tide autosuggest on
-tide highlight on
-tide history 10000
+set greeting off
+set autosuggest on
+set highlight on
+set history 10000
+// set cursor beam
+// set vi off
+// set transient_prompt off
 // Prompt engine: native (default), starship, or omp (Oh My Posh)
-// tide prompt native
-// tide prompt starship
-// tide prompt omp
-// tide omp_config "~/.config/oh-my-posh/theme.omp.json"
-// tide rprompt on
+// set prompt native
+// set prompt starship
+// set prompt omp
+// set omp_config "~/.config/oh-my-posh/theme.omp.json"
+// set rprompt on
 
 // Environment
-pearl EDITOR "nvim"
-pearl BROWSER "firefox"
+env EDITOR "nvim"
+env BROWSER "firefox"
 
 // Extra PATH entries, prepended in order
-current "~/.cargo/bin"
-current "~/.local/bin"
+path "~/.cargo/bin"
+path "~/.local/bin"
 
 // Startup commands, run once before the first prompt
-// wake "fastfetch"
+// startup "fastfetch"
 
 // Abbreviations expand when you press space or Enter
-// shoal gco "git checkout"
+// abbr gco "git checkout"
 
 // Aliases
-reef ll "ls -lah"
-reef gs "git status"
-reef cls "clear"
+alias ll "ls -lah"
+alias gs "git status"
+alias cls "clear"
 
 // Key bindings
-anchor ctrl+r history_search
-anchor tab complete
+bind ctrl+r history_search
+bind tab complete
+// bind alt+left dir_back
+// bind alt+right dir_forward
+
+// Optional modular overrides: files in conf.d/*.sharky load automatically,
+// or include a file explicitly:
+// include "local.sharky"

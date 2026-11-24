@@ -62,6 +62,16 @@ pub fn login(shell: &mut Shell) {
     }
 }
 
+/// Runs interactive login-shell logout files in order before the `EXIT` trap.
+pub fn logout(shell: &mut Shell) {
+    let home = PathBuf::from(shell.var("HOME"));
+    if !home.as_os_str().is_empty() {
+        source(shell, &home.join(".config/sharky/logout.sharky"));
+        source(shell, &home.join(".bash_logout"));
+    }
+    source(shell, Path::new("/etc/sharky/logout.sharky"));
+}
+
 /// Executes one startup file through [`Shell::eval`], so expansions, `export`,
 /// conditionals and `.` all behave as they would interactively.
 fn source(shell: &mut Shell, path: &Path) {

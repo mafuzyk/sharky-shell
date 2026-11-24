@@ -22,7 +22,7 @@
 
 <img src="assets/screenshots/hero-sharky.png" width="900" alt="sharky interactive shell, --check preflight, and Code Mode JSON output" />
 
-<p><em>Interactive shell with live syntax highlighting, syntax preflight, and native parallel Code Mode (v0.1.0-alpha.1)</em></p>
+<p><em>Interactive shell with live syntax highlighting, syntax preflight, and native parallel Code Mode (v0.1.1-alpha)</em></p>
 
 </div>
 
@@ -44,7 +44,7 @@ install -Dm755 sharky ~/.local/bin/sharky
 ```
 
 > [!NOTE]
-> `sharky` is currently in `alpha` (`0.1.0-alpha.1`). Use it freely as an interactive shell and structured agent runtime; setting it as a system login shell (`/etc/passwd`) is not recommended during alpha.
+> `sharky` is currently in `alpha` (`0.1.1-alpha`). Use it freely as an interactive shell, login shell (`-l`/`--login`, `logout`, `shopt -q login_shell`), and structured agent runtime.
 
 <details>
 <summary>NixOS module, Home Manager module, AUR git package, and building from source</summary>
@@ -80,13 +80,13 @@ Add the flake input and enable `programs.sharky` (installs the package and regis
   programs.sharky = {
     enable = true;
     configFile = ''
-      tide greeting off
-      tide autosuggest on
-      reef gs "git status"
+      set greeting off
+      set autosuggest on
+      alias gs "git status"
     '';
     themeFile = ''
-      coral sea #35B8C5
-      wave prompt "{cwd} ❯ "
+      color sea #35B8C5
+      style prompt "{cwd} ❯ "
     '';
   };
 }
@@ -121,23 +121,23 @@ See [`rust/PORTING.md`](rust/PORTING.md) and [`rust/RELEASING.md`](rust/RELEASIN
 
 Median wall-clock time across 15 isolated `--no-config` / `--norc --noprofile` runs on Linux `x86_64`:
 
-| Benchmark | sharky `4.0.0-alpha.2` | bash | Comparison vs bash | fish | Comparison vs fish |
-| --- | ---: | ---: | --- | ---: | --- |
-| Cold startup (`-c ""`) | **2.04 ms** | 5.34 ms | **2.61× faster** | 7.39 ms | **3.6× faster** |
-| 1,000× `while [ $i -lt 1000 ]` loop | **4.40 ms** | 8.57 ms | **1.95× faster** | 76.94 ms | **17.5× faster** |
-| 1,000× function + `local` + `case` calls | **10.49 ms** | 23.15 ms | **2.21× faster** | 141.28 ms | **13.5× faster** |
+| Benchmark | sharky `0.1.1-alpha` | bash | Comparison vs bash |
+| --- | ---: | ---: | --- |
+| Cold startup (`-c ""`) | **0.75 ms** | 0.89 ms | **1.18× faster** |
+| 1,000× `while [ $i -lt 1000 ]` loop | **2.10 ms** | 2.55 ms | **1.21× faster** |
+| 1,000× function + `local` + `case` calls | **5.17 ms** | 6.50 ms | **1.26× faster** |
 
 ### Bash-syntax microbenchmarks
 
-| Benchmark | sharky `4.0.0-alpha.2` | bash | Comparison |
+| Benchmark | sharky `0.1.1-alpha` | bash | Comparison |
 | --- | ---: | ---: | --- |
-| 1,000× `[[ $i -lt 1000 ]] + ((i++))` | **3.59 ms** | 6.81 ms | **1.90× faster** |
-| 200× `$(printf a)` subshells | **203.68 ms** | 241.58 ms | **1.19× faster** |
+| 1,000× `[[ $i -lt 1000 ]] + ((i++))` | **1.54 ms** | 1.76 ms | **1.14× faster** |
+| 200× `$(printf a)` subshells | **51.54 ms** | 56.39 ms | **1.09× faster** |
 
 <details>
 <summary>Reproduce benchmarks</summary>
 
-Measured on the same machine comparing `/home/mafu/HDD/sharky-shell/rust/target/release/sharky` (`4.0.0-alpha.2`), `bash`, and `fish` across 15 iterations each using non-interactive minimal startup (`--no-config` for `sharky`/`fish`, `--norc --noprofile` for `bash`).
+Measured on the same machine comparing `sharky 0.1.1-alpha` (`cargo build --release --locked`) and `/usr/bin/bash` across 15 iterations each after 1 warmup run, using non-interactive minimal startup (`--no-config` for `sharky`, `--norc --noprofile` for `bash`).
 
 - **Startup:** `$SH -c ""`
 - **POSIX loop:** `i=0; while [ $i -lt 1000 ]; do i=$((i + 1)); done`
@@ -170,7 +170,7 @@ Measured on the same machine comparing `/home/mafu/HDD/sharky-shell/rust/target/
     <td align="center" width="50%">
       <img src="assets/screenshots/native-mcp.png" width="440" alt="Native MCP server tools and isolated copy-on-write execution" />
       <br />
-      <sub><b>Native JSON-RPC 2.0 MCP server (10 tools)</b></sub>
+      <sub><b>Native JSON-RPC 2.0 MCP server (16 tools)</b></sub>
     </td>
     <td align="center" width="50%">
       <img src="assets/screenshots/declarative-config.png" width="440" alt="Declarative config.sharky, theme.sharky, and doctor checks" />
@@ -190,8 +190,8 @@ Measured on the same machine comparing `/home/mafu/HDD/sharky-shell/rust/target/
 
 - **Path-validated ghost autosuggestions:** completes tokens chronologically from shared history, skipping entries whose referenced file paths no longer exist.
 - **Live syntax highlighting:** commands, builtins, strings, variables, unknown commands (`@error`), and `>` clobbers over existing files (`@overwrite`).
-- **Inline completions & directory jumper:** `Tab` / `Shift-Tab` menu (directories only for `cd`/`pushd`, case-insensitive fallback), `Ctrl-T` fuzzy finder, and built-in frecency `z` / `zi`.
-- **Vi mode & multi-line editing:** bracketed paste, `set -o vi` (`h/l/0/$/w/b/e/j/k`, `dd/dw/d$/D/cw/C/p/P/u/r`, counts), abbreviations (`shoal`), and custom keybindings (`anchor`).
+- **Inline completions & directory jumper:** `Tab` / `Shift-Tab` menu with Fish-style descriptions (`complete`/`compgen`, directories only for `cd`/`pushd`, case-insensitive fallback), `Ctrl-T` fuzzy finder, `Alt-Left` / `Alt-Right` directory history (`prevd`/`nextd`), and built-in frecency `z` / `zi`.
+- **Vi mode, hooks & customization:** bracketed paste, `set -o vi` (`set vi on`, `h/l/0/$/w/b/e/j/k`, `dd/dw/d$/D/cw/C/p/P/u/r`, counts), Zsh-compatible `precmd`/`preexec`/`chpwd` hooks, structured pipes (`from-json`, `to-json`, `where`, `select`, `table`), `set cursor` (`block`/`beam`/`underline`), `set transient_prompt`, abbreviations (`abbr`), and custom keybindings (`bind`).
 
 <details>
 <summary>Default keybindings and v2 shared history format</summary>
@@ -202,7 +202,8 @@ Measured on the same machine comparing `/home/mafu/HDD/sharky-shell/rust/target/
 | --- | --- |
 | `Tab` | Complete current token or open inline menu (`Shift-Tab` cycles backwards) |
 | `Right` / `End` | Accept full ghost autosuggestion at end of line |
-| `Alt-Right` / `Ctrl-Right` / `Alt-F` | Accept one word of ghost autosuggestion |
+| `Alt-Right` / `Ctrl-Right` / `Alt-F` | Accept one word of ghost autosuggestion (`Alt-Right` / `Alt-Left` also navigate dir history) |
+| `Alt-Left` / `Alt-Right` | Navigate directory history (`dir_back` / `dir_forward`, rebound via `bind`) |
 | `Up` / `Down` | Prefix-filtered history navigation (restores current draft at bottom) |
 | `Ctrl-R` | Incremental frecency-ranked reverse history search (`Ctrl-G` cancels) |
 | `Ctrl-T` | Fuzzy file finder in working tree |
@@ -212,7 +213,7 @@ Measured on the same machine comparing `/home/mafu/HDD/sharky-shell/rust/target/
 
 - Locked append after every command with `stat`-fingerprinted cross-terminal refresh before each primary prompt (`history merge` forces a full reload).
 - Origin-guarded history expansion (`!!`, `!n`, `!prefix` only expand commands from the current session, never freshly pulled commands from another terminal).
-- Tab-separated single-line **v2** records (`h2 <when-us> <cwd> <npaths> <paths...> <cmd> <hits>`), backward-compatible with legacy v1 lines and bounded on disk by a 262,144-record vacuum independently of `tide history N`.
+- Tab-separated single-line **v2** records (`h2 <when-us> <cwd> <npaths> <paths...> <cmd> <hits>`), backward-compatible with legacy v1 lines and bounded on disk by a 262,144-record vacuum independently of `set history N`.
 - `history [--max N] [--reverse] [--show-time] [--null] [--case-sensitive] [--contains|--prefix|--exact] [PATTERN]` and `history delete --exact PATTERN`.
 
 </details>
@@ -225,7 +226,7 @@ Designed for both humans and coding agents — zero extra wrapper daemon require
 
 - **Discovery before startup:** `sharky capabilities --json`, `sharky agent guide --json`, `sharky completions list --json`, `sharky help <topic> --json`, and `sharky --check -c ...` (exits `0` silently or `2` on syntax error without running anything).
 - **One-shot JSON & Code Mode:** `sharky --json -c 'COMMAND' --no-config` and `sharky code -e 'PROGRAM' --no-config` with native `run([...])`, `sh(cmd, {cwd, env})`, `parallel(...)`, `workflow(...)` DAGs (`depends_on`, `retry`, `condition`, `lock`), `map_parallel(...)`, and full `audit` summaries (`calls`, `failed_calls`, `cancelled_calls`, `first_failure_status`).
-- **Persistent sessions & Native MCP:** `sharky agent --stdio`, `sharky agent --socket PATH` (`0600` Unix socket), and `sharky agent --mcp` exposing 10 typed MCP tools: `sharky_capabilities`, `sharky_exec`, `sharky_session_open`, `sharky_session_exec`, `sharky_parallel`, `sharky_workflow`, `sharky_code`, `sharky_read_capture`, `sharky_cancel`, and `sharky_session_close`.
+- **Persistent sessions & Native MCP:** `sharky agent --stdio`, `sharky agent --socket PATH` (`0600` Unix socket, optional `--multi-client`), and `sharky agent --mcp` (with optional `--policy <file>`) exposing 16 typed MCP tools: `sharky_capabilities`, `sharky_exec`, `sharky_session_open`, `sharky_session_exec`, `sharky_parallel`, `sharky_workflow`, `sharky_code`, `sharky_read_capture`, `sharky_cancel`, `sharky_session_close`, `sharky_snapshot`, `sharky_restore`, `sharky_job_start`, `sharky_job_poll`, `sharky_job_send`, and `sharky_job_stop` (plus structured `output.parse` and `fs_delta`).
 - **Isolation boundaries:** `isolated: true` copy-on-write forks isolate shell interpreter state (CWD, env, variables, functions), not disk writes — request `sandbox: true` or `{ no_network, read_only_root, max_file_bytes, max_procs, cpu_seconds }` when kernel isolation/rlimits are required.
 
 ---
@@ -238,18 +239,18 @@ One unified grammar shared between interactive prompts, `-c`, and scripts — **
 | --- | --- |
 | **Control flow & functions** | `if`/`elif`/`else`, `for`, `for ((...))`, `while`, `until`, `case` (`;;`, `;;&`, `;&`), functions, `local`, groups `{ ...; }`, subshells `( ... )`, `!` |
 | **Tests & arithmetic** | `[ ... ]`, `[[ ... ]]` (`-e/-f/-d/-L/-r/-w/-x/-s/-S/-p/-v/-o`, regex `=~`, pattern `==`, `&&`/`\|\|`), `$((...))` and `((...))` |
-| **Expansions & arrays** | `${NAME:-default}`, substrings, case conversion, indirect `${!ref}`, `$(...)`, tilde, extglob, indexed & associative arrays (`declare -a/-A`), `IFS` splitting |
-| **Redirections & plumbing** | `>`, `>>`, `>|` (`noclobber`), `<`, `2>&1`, `\|&`, `<&N`/`>&N`/`<&-`/`>&-`, `<(list)`, `>(list)`, heredocs, `<<<` here-strings |
-| **Options & job control** | `set -e/-u/-o pipefail/-o vi`, `shopt -s/-u globstar\|autocd`, `trap`, `jobs`, `fg`, `bg`, `wait [-n]`, `kill`, `disown`, `times`, `hash`, `ulimit` |
-| **Unsupported (exits `2`)** | `coproc`, namerefs (`declare -n`), `select` loops, loadable builtins |
+| **Expansions & arrays** | `${NAME:-default}`, `${var@Q/@U/@u/@L/@A/@a}`, substrings, case conversion, indirect `${!ref}`, `declare -n/-i/-l/-u`, `$(...)`, tilde, full `extglob`, indexed & associative arrays (`declare -a/-A`), `IFS` splitting |
+| **Redirections & plumbing** | `>`, `>>`, `>|` (`noclobber`), `<`, `2>&1`, `\|&`, `<&N`/`>&N`/`<&-`/`>&-`, dynamic FD dup, `<(list)`, `>(list)`, `coproc`, heredocs, `<<<` here-strings |
+| **Options & job control** | `set -e/-u/-o pipefail/-o vi/-o ignoreeof`, `shopt -s/-u globstar\|autocd\|huponexit\|login_shell`, `trap` (`ERR`/`RETURN`/`EXIT`), `caller`, `BASH_SOURCE`/`FUNCNAME`/`BASH_LINENO`, `jobs`, `fg`, `bg`, `wait [-n]`, `kill`, `disown`, `times`, `hash`, `ulimit`, `logout`, `complete`/`compgen`, `prevd`/`nextd`, structured pipes |
+| **Unsupported (exits `2`)** | `select` loops, loadable builtins |
 
 <details>
 <summary>Login mode & diagnostics (`status`, `doctor`, `config explain`)</summary>
 
 - `sharky status [--no-config]` prints version, resolved config/theme/history paths with existence checks, and active compile-time feature flags.
-- `sharky doctor [--no-config]` runs read-only checks on stdin/stdout descriptors, config/theme parsing, history permissions, and baseline PATH tools (`sh`, `ls`, `cat`).
+- `sharky doctor [--no-config]` runs read-only checks on stdin/stdout descriptors, config/theme parsing, history permissions, baseline PATH tools (`sh`, `ls`, `cat`), and `login-shell` (`/etc/shells`).
 - `sharky config explain [TOPIC]` prints builtin documentation for every declarative configuration directive without touching runtime state.
-- Login mode (`-l` / `--login`) runs `/etc/sharky/profile.sharky` and `~/.config/sharky/profile.sharky`, and safely imports literal `NAME=value` / `export NAME=value` lines from `/etc/profile`, `~/.profile`, `~/.bash_profile`, and `~/.zshprofile`.
+- Login mode (`-l` / `--login`, plus `--noprofile` / `--norc`) sets `shopt -q login_shell` and executes `/etc/profile`, `/etc/sharky/profile.sharky`, the first of `~/.bash_profile`/`~/.bash_login`/`~/.profile`, and `~/.config/sharky/profile.sharky`; interactive login exit (`exit`, `logout`, `Ctrl-D`) runs `~/.config/sharky/logout.sharky`, `~/.bash_logout`, and `/etc/sharky/logout.sharky`.
 
 </details>
 
@@ -261,47 +262,51 @@ Declarative configuration in `$SHARKY_CONFIG` (defaults to `~/.config/sharky/`) 
 
 ```sh
 // ~/.config/sharky/config.sharky
-tide greeting off
-tide autosuggest on
-tide highlight on
-tide history 10000
+set greeting off
+set autosuggest on
+set highlight on
+set history 10000
 
-pearl EDITOR "nvim"
-current "~/.local/bin"
+env EDITOR "nvim"
+path "~/.local/bin"
 
-shoal gco "git checkout"
-reef gs "git status"
-anchor ctrl+r history_search
-anchor tab complete
+abbr gco "git checkout"
+alias gs "git status"
+bind ctrl+r history_search
+bind tab complete
 ```
 
 ```sh
 // ~/.config/sharky/theme.sharky
-coral abyss  #071923
-coral foam   #E4F5F4
-coral sea    #35B8C5
-coral kelp   #8CCFA8
-coral danger #FF8F80
+color bg     #071923
+color fg     #E4F5F4
+color accent #35B8C5
+color ok     #8CCFA8
+color danger #FF8F80
 
-wave prompt "{cwd_short} {git}{symbol} "
-wave prompt.cwd @kelp
-wave prompt.symbol @sea
+style prompt "{cwd_short} {git}{symbol} "
+style prompt.cwd @ok
+style prompt.symbol @accent
 ```
 
 <details>
 <summary>All declarative directives and prompt tokens</summary>
 
-- **`config.sharky`**:
-  - `tide <key> <value>` — `greeting`, `autosuggest`, `autocd`, `highlight`, `starship`, `rprompt`, `profile_paths` (`on`/`off`), `prompt` (`native`/`starship`/`omp`), `omp_config` (Oh My Posh theme path), `history` (integer)
-  - `pearl NAME "value"` — export an environment variable
-  - `current "/dir"` — prepend to `PATH`
-  - `reef name "command"` — alias
-  - `shoal name "expansion"` — command-position abbreviation (expands on space/Enter)
-  - `anchor <key> <action>` — bind `ctrl+x`/`alt+x`/`tab`/`shift-tab`/`home`/`end` to `accept_line`, `abort`, `backward_char`, `forward_char`, `backward_word`, `forward_word`, `kill_line`, `yank`, `undo`, `history_search`, `complete`, `accept_suggestion`, or `fuzzy_files`
+- **`config.sharky` / `conf.d/*.sharky`**:
+  - `set <key> <value>` — `greeting`, `autosuggest`, `autocd`, `highlight`, `starship`, `rprompt`, `profile_paths`, `vi`, `transient_prompt` (`on`/`off`), `cursor` (`block`/`beam`/`underline`), `prompt` (`native`/`starship`/`omp`), `omp_config` (Oh My Posh theme path), `history` (integer)
+  - `env NAME "value"` — export an environment variable
+  - `path "/dir"` — prepend to `PATH`
+  - `alias name "command"` — alias
+  - `abbr name "expansion"` — command-position abbreviation (expands on space/Enter)
+  - `startup "command"` — command run once at interactive startup
+  - `include "file.sharky"` — include another config file inline (and files in `conf.d/*.sharky` load automatically)
+  - `bind <key> <action>` — bind `ctrl+x`/`alt+x`/`tab`/`shift-tab`/`alt+left`/`alt+right`/`home`/`end` to `accept_line`, `abort`, `backward_char`, `forward_char`, `backward_word`, `forward_word`, `kill_line`, `yank`, `undo`, `history_search`, `complete`, `accept_suggestion`, `fuzzy_files`, `dir_back`, or `dir_forward`
 - **`theme.sharky`**:
-  - `wave preset <name>` — built-in zero-cost presets: `sharky`, `neolambda`, `pure`, `robbyrussell`, `powerline` (run `sharky config explain presets`)
-  - `coral <name> #RRGGBB` — define colour token
-  - `wave <key> <style | template>` — configure `prompt` and `rprompt` (`\uXXXX` escapes, `{cwd}`, `{cwd_short}`, `{cwd_full}`, `{cwd_home}`, `{git}`, `{git_dirty}`, `{duration}`, `{duration_ms}`, `{symbol}`, `{status}`, `{error_status}`, `{user}`, `{host}`, `{os_icon}`, `{shell}`, `{mem}`, `{venv}`, `{nix}`, `{ssh}`, `{jobs}`, `{time}`, `{fill}`, conditional `[...]` groups, inline `{style:text}` spans, `prompt.symbol.glyph`, `prompt.os.glyph`), rich styles (`@token`, `#RRGGBB`, `on @bg`, `bold`/`dim`/`italic`/`underline`/`reverse`), syntax styles (`command`, `builtin`, `string`, `variable`, `error`, `overwrite`), and UI accents (`prompt.*`, `suggestion`, `selection`). Set `NO_COLOR=1` for monochrome prompts.
+  - `style preset <name>` — built-in zero-cost presets: `catppuccin`, `tokyonight`, `sharky`, `neolambda`, `pure`, `robbyrussell`, `powerline` (run `sharky config explain presets`)
+  - `color <name> #RRGGBB` — define colour token
+  - `style <key> <style | template>` — configure `prompt`, `rprompt`, `prompt.transient`, and `prompt.continuation` (`\uXXXX` escapes, `{cwd}`, `{cwd_short}`, `{cwd_full}`, `{cwd_home}`, `{git}`, `{git_dirty}`, `{duration}`, `{duration_ms}`, `{symbol}`, `{status}`, `{error_status}`, `{user}`, `{host}`, `{os_icon}`, `{shell}`, `{mem}`, `{venv}`, `{nix}`, `{ssh}`, `{jobs}`, `{time}`, `{env:VAR}`, `{fill}`, conditional `[...]` groups, inline `{style:text}` spans, `prompt.symbol.glyph`, `prompt.os.glyph`), rich styles (`@token`, `#RRGGBB`, `on @bg`, `bold`/`dim`/`italic`/`underline`/`reverse`), syntax styles (`command`, `builtin`, `string`, `variable`, `error`, `overwrite`), and UI accents (`prompt.*`, `suggestion`, `selection`). Set `NO_COLOR=1` for monochrome prompts.
+
+*(Deprecated legacy aliases `tide`, `pearl`, `current`, `reef`, `shoal`, `anchor`, `coral`, `wave`, `wake` still parse with an interactive migration prompt on startup and will be removed in a future release.)*
 
 </details>
 
@@ -309,7 +314,7 @@ wave prompt.symbol @sea
 
 ## Docs & development
 
-- [`CHANGELOG.md`](CHANGELOG.md) — release history across 4.x and 3.x milestones
+- [`CHANGELOG.md`](CHANGELOG.md) — release history and changelog
 - [`docs/roadmap-status.md`](docs/roadmap-status.md) — active roadmap and implemented phases
 - [`docs/agent-runtime-mvp-design.md`](docs/agent-runtime-mvp-design.md) — session protocol (`--stdio` / `--socket` / `--mcp`)
 - [`docs/parallel-executor-design.md`](docs/parallel-executor-design.md) — CoW parallel task worker specification

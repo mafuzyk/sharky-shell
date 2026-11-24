@@ -5,12 +5,12 @@ the source of truth. The Ruby v1 tree is frozen at tag `v1-ruby` and is not
 published here; keep a local checkout at `../.ruby-oracle/` only when you need
 the behavioural oracle for the differential tests.
 
-Status: `0.1.0-alpha.1`, an ongoing stage of maturity shipped through the normal
-release channel; using sharky as a login shell is not recommended during alpha.
+Status: `0.1.1-alpha`, an ongoing stage of maturity shipped through the normal
+release channel.
 Interactive features include path-checked ghost autosuggestions with word-by-word
 acceptance (`Alt+Right`/`Ctrl+Right`), prefix-filtered `Up`/`Down` history recall,
 live syntax highlighting (`@error`, `@overwrite`), multi-position abbreviations
-(`abbr`/`shoal`), `autocd`, interactive `"did you mean"` hints, `z`/`zi`, fuzzy
+(`abbr`), `autocd`, interactive `"did you mean"` hints, `z`/`zi`, fuzzy
 file search (`Ctrl+T`), completion menus (`cd`/`pushd` directories-only,
 case-insensitive fallback), vi mode, and `{cwd_short}`/`{git}`/`{duration}` prompt
 tokens. Non-interactive scripting and automation include `[[ ]]`, `((...))`,
@@ -55,21 +55,21 @@ executed by the command parser:
 
 ```text
 // config.sharky
-tide greeting off
-tide history 10000
-pearl EDITOR "nvim"
-current "~/.local/bin"
-reef ll "ls -lah"
-anchor ctrl+r history_search
+set greeting off
+set history 10000
+env EDITOR "nvim"
+path "~/.local/bin"
+alias ll "ls -lah"
+bind ctrl+r history_search
 ```
 
 ```text
 // theme.sharky
-coral kelp #8CCFA8
-coral sea #35B8C5
-wave prompt "{cwd} {symbol} "
-wave prompt.cwd @kelp
-wave prompt.symbol @sea
+color ok #8CCFA8
+color accent #35B8C5
+style prompt "{cwd} {symbol} "
+style prompt.cwd @ok
+style prompt.symbol @accent
 ```
 
 Copies of both files ship in `examples/`. Invalid instructions, wrong arity,
@@ -79,7 +79,7 @@ and the shell continues with defaults.
 ## History
 
 Stored in `$SHARKY_HISTORY`, or `${XDG_DATA_HOME:-~/.local/share}/sharky/history`,
-and limited by `tide history`. Commands are appended after evaluation under a
+and limited by `set history`. Commands are appended after evaluation under a
 lock; a failed write keeps the entry only in memory. `-P`/`--private` keeps
 history in memory and leaves the file untouched. Ctrl-R opens an incremental
 reverse search; Enter runs the selected entry and Ctrl-G cancels.

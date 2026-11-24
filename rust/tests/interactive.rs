@@ -166,6 +166,7 @@ fn starship_can_provide_the_prompt() {
         .stdout(stdout)
         .stderr(stderr)
         .env("SHARKY_CONFIG", &config)
+        .env("SHARKY_NO_MIGRATE_PROMPT", "1")
         .env("TERM", "xterm-256color")
         .env("HOME", "/tmp")
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
@@ -203,6 +204,7 @@ fn a_multi_line_prompt_is_drawn_once_per_read_line() {
         .stdout(stdout)
         .stderr(stderr)
         .env("SHARKY_CONFIG", &config)
+        .env("SHARKY_NO_MIGRATE_PROMPT", "1")
         .env("TERM", "xterm-256color")
         .env("HOME", "/tmp")
         .spawn()
@@ -249,6 +251,7 @@ fn wake_runs_commands_before_the_first_prompt() {
         .stdout(stdout)
         .stderr(stderr)
         .env("SHARKY_CONFIG", &config)
+        .env("SHARKY_NO_MIGRATE_PROMPT", "1")
         .env("TERM", "xterm-256color")
         .env("HOME", "/tmp")
         .spawn()
@@ -288,6 +291,7 @@ fn abbreviations_expand_on_space_and_enter() {
         .stdout(stdout)
         .stderr(stderr)
         .env("SHARKY_CONFIG", &config)
+        .env("SHARKY_NO_MIGRATE_PROMPT", "1")
         .env("TERM", "xterm-256color")
         .env("HOME", &dir)
         .spawn()
@@ -343,6 +347,7 @@ fn ctrl_r_searches_history_and_accepts_on_enter() {
         .stdout(stdout)
         .stderr(stderr)
         .env("SHARKY_CONFIG", &config)
+        .env("SHARKY_NO_MIGRATE_PROMPT", "1")
         .env("SHARKY_HISTORY", dir.join("history"))
         .env("TERM", "xterm-256color")
         .env("HOME", &dir)
@@ -394,6 +399,7 @@ fn ctrl_r_cycles_to_older_matches_and_cancels_with_ctrl_g() {
         .stdout(stdout)
         .stderr(stderr)
         .env("SHARKY_CONFIG", &config)
+        .env("SHARKY_NO_MIGRATE_PROMPT", "1")
         .env("SHARKY_HISTORY", dir.join("history"))
         .env("TERM", "xterm-256color")
         .env("HOME", &dir)
@@ -478,6 +484,7 @@ fn ctrl_r_session(lines: &[String]) -> CtrlRSession {
         .stdout(stdout)
         .stderr(stderr)
         .env("SHARKY_CONFIG", &config)
+        .env("SHARKY_NO_MIGRATE_PROMPT", "1")
         .env("SHARKY_HISTORY", dir.join("history"))
         .env("XDG_DATA_HOME", dir.join("xdg"))
         .env("TERM", "xterm-256color")
@@ -676,6 +683,7 @@ fn koral_marks_wrap_commands_and_report_the_status() {
         .stdout(stdout)
         .stderr(stderr)
         .env("SHARKY_CONFIG", &config)
+        .env("SHARKY_NO_MIGRATE_PROMPT", "1")
         .env("TERM", "xterm-256color")
         .env("HOME", &dir)
         .spawn()
@@ -728,6 +736,7 @@ fn koral_marks_keep_multi_line_commands_together() {
         .stdout(stdout)
         .stderr(stderr)
         .env("SHARKY_CONFIG", &config)
+        .env("SHARKY_NO_MIGRATE_PROMPT", "1")
         .env("TERM", "xterm-256color")
         .env("HOME", &dir)
         .spawn()
@@ -784,6 +793,7 @@ fn koral_osc7_encodes_the_working_directory() {
         .stdout(stdout)
         .stderr(stderr)
         .env("SHARKY_CONFIG", &config)
+        .env("SHARKY_NO_MIGRATE_PROMPT", "1")
         .env("TERM", "xterm-256color")
         .env("HOME", &dir)
         .spawn()
@@ -855,6 +865,7 @@ fn history_session_with_env(
         .stdout(stdout)
         .stderr(stderr)
         .env("SHARKY_CONFIG", config_env)
+        .env("SHARKY_NO_MIGRATE_PROMPT", "1")
         .env("TERM", "xterm-256color")
         .env("HOME", &home)
         .env("XDG_DATA_HOME", &data);
@@ -2645,6 +2656,7 @@ fn a_full_width_line_does_not_move_the_cursor_up() {
         .stdout(stdout)
         .stderr(stderr)
         .env("SHARKY_CONFIG", &config)
+        .env("SHARKY_NO_MIGRATE_PROMPT", "1")
         .env("TERM", "xterm-256color")
         .env("HOME", "/tmp")
         .spawn()
@@ -2695,6 +2707,7 @@ fn redraw_keeps_the_prompt_on_screen() {
         .stdout(stdout)
         .stderr(stderr)
         .env("SHARKY_CONFIG", &config)
+        .env("SHARKY_NO_MIGRATE_PROMPT", "1")
         .env("TERM", "xterm-256color")
         .env("HOME", "/tmp")
         .spawn()
@@ -3307,6 +3320,7 @@ fn omp_can_provide_the_prompt() {
         .stdout(stdout)
         .stderr(stderr)
         .env("SHARKY_CONFIG", &config)
+        .env("SHARKY_NO_MIGRATE_PROMPT", "1")
         .env("XDG_DATA_HOME", dir.join("data"))
         .env("TERM", "xterm-256color")
         .env("HOME", "/tmp")
@@ -3344,6 +3358,7 @@ fn omp_can_provide_the_prompt() {
         .stdout(stdout2)
         .stderr(stderr2)
         .env("SHARKY_CONFIG", &config)
+        .env("SHARKY_NO_MIGRATE_PROMPT", "1")
         .env("XDG_DATA_HOME", dir.join("data"))
         .env("TERM", "xterm-256color")
         .env("HOME", "/tmp")
@@ -3384,6 +3399,7 @@ fn neolambda_preset_renders_two_lines_and_redraws_cleanly() {
         .stdout(stdout)
         .stderr(stderr)
         .env("SHARKY_CONFIG", &config)
+        .env("SHARKY_NO_MIGRATE_PROMPT", "1")
         .env("XDG_DATA_HOME", dir.join("data"))
         .env("TERM", "xterm-256color")
         .env("HOME", "/home/julia")
@@ -3447,6 +3463,7 @@ fn right_prompt_renders_and_hides_when_input_grows() {
         .stdout(stdout)
         .stderr(stderr)
         .env("SHARKY_CONFIG", &config)
+        .env("SHARKY_NO_MIGRATE_PROMPT", "1")
         .env("XDG_DATA_HOME", dir.join("data"))
         .env("TERM", "xterm-256color")
         .env("HOME", "/tmp")
@@ -3527,6 +3544,7 @@ wave prompt.symbol "@blue bold"
         .stdout(stdout)
         .stderr(stderr)
         .env("SHARKY_CONFIG", &config)
+        .env("SHARKY_NO_MIGRATE_PROMPT", "1")
         .env("XDG_DATA_HOME", dir.join("data"))
         .env("TERM", "xterm-256color")
         .env("HOME", &home)
@@ -3590,6 +3608,7 @@ fn prompt_fill_redraws_on_sigwinch_and_drops_right_when_narrow() {
         .stdout(stdout)
         .stderr(stderr)
         .env("SHARKY_CONFIG", &config)
+        .env("SHARKY_NO_MIGRATE_PROMPT", "1")
         .env("XDG_DATA_HOME", dir.join("data"))
         .env("TERM", "xterm-256color")
         .env("HOME", "/tmp");
@@ -3658,4 +3677,112 @@ fn prompt_fill_redraws_on_sigwinch_and_drops_right_when_narrow() {
     let _ = writer.write_all(b"exit\r");
     let _ = child.wait();
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn interactive_startup_prompts_and_migrates_legacy_config_on_yes() {
+    let dir = std::env::temp_dir().join(format!("sharky-mig-yes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let config = dir.join("config");
+    let data = dir.join("data");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::create_dir_all(&data).unwrap();
+    let orig = "tide greeting off\nreef hi \"echo MIGRATED\"\n";
+    std::fs::write(config.join("config.sharky"), orig).unwrap();
+
+    let pty = openpty(None, None).expect("pty");
+    let stdin = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stdout = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stderr = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .stdin(stdin)
+        .stdout(stdout)
+        .stderr(stderr)
+        .env("SHARKY_CONFIG", &config)
+        .env("XDG_DATA_HOME", &data)
+        .env("TERM", "xterm-256color")
+        .env("HOME", &dir)
+        .spawn()
+        .expect("spawn sharky");
+
+    let fd = pty.master.as_raw_fd();
+    let mut writer = unsafe { std::fs::File::from_raw_fd(pty.master.try_clone().unwrap().into_raw_fd()) };
+
+    let prompt_seen = read_until(fd, "Migrate automatically", Duration::from_secs(5));
+    assert!(prompt_seen.contains("Migrate automatically"), "{prompt_seen:?}");
+
+    writer.write_all(b"y\r").unwrap();
+    let ready = read_until(fd, "❯", Duration::from_secs(5));
+    assert!(ready.contains('❯'), "{ready:?}");
+
+    writer.write_all(b"hi\r").unwrap();
+    let out = read_until(fd, "MIGRATED", Duration::from_secs(5));
+    assert!(out.contains("MIGRATED"), "{out:?}");
+
+    writer.write_all(b"exit\r").unwrap();
+    let status = child.wait().expect("wait");
+    assert!(status.success(), "{status:?}");
+
+    let updated = std::fs::read_to_string(config.join("config.sharky")).unwrap();
+    assert!(updated.contains("set greeting off"), "{updated:?}");
+    assert!(updated.contains("alias hi \"echo MIGRATED\""), "{updated:?}");
+    assert_eq!(
+        std::fs::read_to_string(config.join("config.sharky.bak")).unwrap(),
+        orig
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn interactive_startup_keeps_legacy_config_on_no() {
+    let dir = std::env::temp_dir().join(format!("sharky-mig-no-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let config = dir.join("config");
+    let data = dir.join("data");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::create_dir_all(&data).unwrap();
+    let orig = "tide greeting off\nreef hi \"echo KEPT\"\n";
+    std::fs::write(config.join("config.sharky"), orig).unwrap();
+
+    let pty = openpty(None, None).expect("pty");
+    let stdin = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stdout = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+    let stderr = unsafe { Stdio::from_raw_fd(pty.slave.try_clone().unwrap().into_raw_fd()) };
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .stdin(stdin)
+        .stdout(stdout)
+        .stderr(stderr)
+        .env("SHARKY_CONFIG", &config)
+        .env("XDG_DATA_HOME", &data)
+        .env("TERM", "xterm-256color")
+        .env("HOME", &dir)
+        .spawn()
+        .expect("spawn sharky");
+
+    let fd = pty.master.as_raw_fd();
+    let mut writer = unsafe { std::fs::File::from_raw_fd(pty.master.try_clone().unwrap().into_raw_fd()) };
+
+    let prompt_seen = read_until(fd, "Migrate automatically", Duration::from_secs(5));
+    assert!(prompt_seen.contains("Migrate automatically"), "{prompt_seen:?}");
+
+    writer.write_all(b"n\r").unwrap();
+    let ready = read_until(fd, "❯", Duration::from_secs(5));
+    assert!(ready.contains('❯'), "{ready:?}");
+
+    writer.write_all(b"hi\r").unwrap();
+    let out = read_until(fd, "KEPT", Duration::from_secs(5));
+    assert!(out.contains("KEPT"), "{out:?}");
+
+    writer.write_all(b"exit\r").unwrap();
+    let status = child.wait().expect("wait");
+    assert!(status.success(), "{status:?}");
+
+    assert_eq!(
+        std::fs::read_to_string(config.join("config.sharky")).unwrap(),
+        orig
+    );
+    assert!(!config.join("config.sharky.bak").exists());
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -320,6 +320,35 @@ fn check_tools(dir: Option<&Path>) -> Check {
     Check::ok("tools", format!("{} resolvable on PATH", tools.join(", ")))
 }
 
+fn check_login_shell() -> Check {
+    let exe_candidates: Vec<String> = [
+        std::env::current_exe().ok(),
+        std::env::current_exe().ok().and_then(|p| p.canonicalize().ok()),
+        Some(PathBuf::from("/usr/bin/sharky")),
+        Some(PathBuf::from("/bin/sharky")),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|p| p.display().to_string())
+    .collect();
+
+    let Ok(text) = std::fs::read_to_string("/etc/shells") else {
+        return Check::ok("login-shell", "/etc/shells not readable");
+    };
+    let listed = text.lines().any(|line| {
+        let trimmed = line.split('#').next().unwrap_or("").trim();
+        !trimmed.is_empty() && exe_candidates.iter().any(|cand| cand == trimmed)
+    });
+    if listed {
+        Check::ok("login-shell", "listed in /etc/shells")
+    } else {
+        Check::ok(
+            "login-shell",
+            "not listed in /etc/shells (optional; add before chsh)",
+        )
+    }
+}
+
 fn run_doctor() -> i32 {
     let dir = config_dir();
     let checks = [
@@ -329,6 +358,7 @@ fn run_doctor() -> i32 {
         check_theme(dir.as_deref()),
         check_history(),
         check_tools(dir.as_deref()),
+        check_login_shell(),
     ];
     let mut ok = true;
     for check in checks {

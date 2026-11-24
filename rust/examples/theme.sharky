@@ -1,32 +1,32 @@
-// Sharky ~ under the sea
-// Optional built-in presets: sharky, neolambda, pure, robbyrussell, powerline
-// wave preset neolambda
+// Sharky theme
+// Optional built-in presets: catppuccin, tokyonight, sharky, neolambda, pure, robbyrussell, powerline
+// style preset catppuccin
 
 // Palette
-coral abyss  #071923
-coral foam   #E4F5F4
-coral sea    #35B8C5
-coral kelp   #8CCFA8
-coral danger #FF8F80
-coral muted  #6C8A96
+color bg     #071923
+color fg     #E4F5F4
+color accent #35B8C5
+color ok     #8CCFA8
+color danger #FF8F80
+color muted  #6C8A96
 
 // Prompt
-wave prompt "{cwd}[ {git}{git_dirty}][ {duration}] {symbol} "
-wave prompt.symbol.glyph "❯"
-wave prompt.cwd @kelp
-wave prompt.git @sea
-wave prompt.git_dirty @danger
-wave prompt.duration @muted
-wave prompt.symbol @sea
-wave prompt.error "@danger bold"
+style prompt "{cwd}[ {git}{git_dirty}][ {duration}] {symbol} "
+style prompt.symbol.glyph "❯"
+style prompt.cwd @ok
+style prompt.git @accent
+style prompt.git_dirty @danger
+style prompt.duration @muted
+style prompt.symbol @accent
+style prompt.error "@danger bold"
 
 // Syntax highlighting
-wave command @foam
-wave builtin @sea
-wave string @kelp
-wave variable @sea
-wave error @danger
+style command @fg
+style builtin @accent
+style string @ok
+style variable @accent
+style error @danger
 
 // Suggestions & selection
-wave suggestion @muted
-wave selection "@abyss on @sea"
+style suggestion @muted
+style selection "@bg on @accent"

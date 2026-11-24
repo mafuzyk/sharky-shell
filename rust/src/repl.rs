@@ -7,12 +7,14 @@ use crate::term;
 pub fn run(shell: &mut Shell, private: bool) -> i32 {
     install_signals();
     shell.set_interactive(true);
+    maybe_prompt_config_migration(shell);
 
     shell.prepare_history(private);
     let mut editor = Editor::new();
     let mut buffer = String::new();
     let mut status = 0;
     let mut pending_end: Option<i32> = None;
+    let mut consecutive_eofs: usize = 0;
 
     if shell.setting("greeting") == Some("on") {
         println!("sharky {}", env!("CARGO_PKG_VERSION"));
@@ -53,7 +55,7 @@ pub fn run(shell: &mut Shell, private: bool) -> i32 {
         let (raw_prompt, rprompt) = if primary {
             (prompt::render_raw(shell), prompt::render_right(shell))
         } else {
-            ("... ".to_string(), None)
+            (prompt::render_continuation(shell), None)
         };
         let input_marker = if primary {
             if let Some(code) = pending_end.take() {
@@ -68,9 +70,14 @@ pub fn run(shell: &mut Shell, private: bool) -> i32 {
 
         match editor.read_line(&raw_prompt, input_marker, rprompt.as_deref(), shell) {
             Ok(Line::Content(mut text)) => {
+                consecutive_eofs = 0;
                 if buffer.is_empty() && text.trim().is_empty() {
                     status = shell.last_status;
                     continue;
+                }
+                let first_word = text.split_whitespace().next().unwrap_or("");
+                if !matches!(first_word, "exit" | "logout") {
+                    shell.reset_stopped_jobs_warning();
                 }
 
                 if buffer.is_empty() && shell.histexpand() {
@@ -128,6 +135,8 @@ pub fn run(shell: &mut Shell, private: bool) -> i32 {
                 }
             }
             Ok(Line::Interrupted) => {
+                consecutive_eofs = 0;
+                shell.reset_stopped_jobs_warning();
                 // The editor consumed Ctrl-C as a byte; an installed INT action
                 // still has to run, and may ask the shell to exit.
                 crate::signal::clear_interrupt();
@@ -144,9 +153,30 @@ pub fn run(shell: &mut Shell, private: bool) -> i32 {
                 // fatal handler recorded the signal, and the EXIT action still
                 // has to run before the shell leaves. A hangup whose SIGHUP is
                 // still in flight is recognized by the terminal itself.
-                let code = match crate::signal::fatal_signal() {
+                let fatal = crate::signal::fatal_signal();
+                let lost = term::terminal_lost();
+                if fatal.is_none() && !lost {
+                    let eof_var = shell.var("IGNOREEOF");
+                    if shell.ignoreeof_enabled() || !eof_var.is_empty() {
+                        let threshold = eof_var.trim().parse::<usize>().unwrap_or(10);
+                        if consecutive_eofs < threshold {
+                            consecutive_eofs += 1;
+                            let cmd = if shell.is_login_shell() {
+                                "logout"
+                            } else {
+                                "exit"
+                            };
+                            eprintln!("Use \"{cmd}\" to leave the shell.");
+                            continue;
+                        }
+                    }
+                    if shell.check_stopped_jobs_before_exit() {
+                        continue;
+                    }
+                }
+                let code = match fatal {
                     Some(signal) => 128 + signal,
-                    None if term::terminal_lost() => 129,
+                    None if lost => 129,
                     None => status,
                 };
                 return shell.finish(code);
@@ -184,5 +214,48 @@ fn install_signals() {
         // the handler both interrupts the input read and records the change.
         crate::signal::watch_children();
         crate::signal::watch_winch();
+    }
+}
+
+fn maybe_prompt_config_migration(shell: &mut Shell) {
+    use std::io::Write;
+
+    let files = shell.legacy_config_files().to_vec();
+    if files.is_empty() || std::env::var_os("SHARKY_NO_MIGRATE_PROMPT").is_some() {
+        return;
+    }
+
+    eprintln!("sharky: deprecated config directives detected in:");
+    for path in &files {
+        eprintln!("  {}", path.display());
+    }
+    eprintln!(
+        "Legacy keywords (tide, pearl, current, reef, shoal, anchor, coral, wave, wake) will be removed in a future release."
+    );
+    eprint!("Migrate automatically to the new syntax now? (backups saved as *.bak) [y/N] ");
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+
+    let mut answer = String::new();
+    if std::io::stdin().read_line(&mut answer).is_err() {
+        shell.clear_legacy_config_files();
+        return;
+    }
+    if matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes" | "s" | "sim"
+    ) {
+        let mut total = 0usize;
+        for path in &files {
+            match sharky_config::migrate_file(path) {
+                Ok(n) => total += n,
+                Err(err) => eprintln!("sharky: migrate {}: {err}", path.display()),
+            }
+        }
+        shell.clear_legacy_config_files();
+        let _ = shell.reload_config();
+        eprintln!("sharky: migrated {total} directive(s).");
+    } else {
+        shell.clear_legacy_config_files();
     }
 }

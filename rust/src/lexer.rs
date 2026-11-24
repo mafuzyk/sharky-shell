@@ -1161,7 +1161,7 @@ impl Lexer {
                 None => Err(LexError::new("unclosed parameter expansion", start, true)),
             },
             Some('\'') => self.scan_ansi_c(start),
-            Some(char @ ('?' | '$' | '!' | '#' | '@' | '*')) => {
+            Some(char @ ('?' | '$' | '!' | '#' | '@' | '*' | '-')) => {
                 self.pos += 1;
                 Ok(Part::Variable(char.to_string()))
             }

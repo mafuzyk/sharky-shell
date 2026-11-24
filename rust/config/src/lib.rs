@@ -1,16 +1,21 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub mod guide;
 pub mod presets;
 pub mod style;
 
 pub const INSTRUCTIONS: &[&str] = &[
+    "set", "env", "path", "alias", "abbr", "bind", "color", "style", "startup", "include",
+];
+
+/// Deprecated maritime directive names retained as compatibility aliases.
+pub const LEGACY_INSTRUCTIONS: &[&str] = &[
     "tide", "pearl", "current", "reef", "shoal", "anchor", "coral", "wave", "wake",
 ];
 
-/// `tide` keys that take `on` or `off`.
+/// `set` (formerly `tide`) keys that take `on` or `off`.
 pub const TIDE_FLAGS: &[&str] = &[
     "greeting",
     "autosuggest",
@@ -19,27 +24,35 @@ pub const TIDE_FLAGS: &[&str] = &[
     "profile_paths",
     "autocd",
     "rprompt",
+    "vi",
+    "transient_prompt",
 ];
 
-/// `tide` key that takes a number.
+/// `set` (formerly `tide`) key that takes a number.
 pub const TIDE_NUMBER: &str = "history";
 
-/// `tide` key that selects the prompt engine.
+/// `set` (formerly `tide`) key that selects the prompt engine.
 pub const TIDE_PROMPT: &str = "prompt";
 
-/// Valid values for `tide prompt`.
+/// Valid values for `set prompt`.
 pub const TIDE_PROMPT_ENGINES: &[&str] = &["native", "starship", "omp"];
 
-/// `tide` key for an explicit Oh My Posh configuration path.
+/// `set` (formerly `tide`) key for an explicit Oh My Posh configuration path.
 pub const TIDE_OMP_CONFIG: &str = "omp_config";
 
-/// Named keys accepted by `anchor` without a modifier prefix.
+/// `set` key that selects cursor shape.
+pub const TIDE_CURSOR: &str = "cursor";
+
+/// Valid values for `set cursor`.
+pub const TIDE_CURSOR_STYLES: &[&str] = &["block", "beam", "underline"];
+
+/// Named keys accepted by `bind` without a modifier prefix.
 pub const NAMED_KEYS: &[&str] = &[
-    "tab", "shift-tab", "enter", "escape", "up", "down", "left", "right", "home", "end",
-    "delete", "backspace",
+    "tab", "shift-tab", "enter", "escape", "up", "down", "left", "right", "alt-left",
+    "alt+left", "alt-right", "alt+right", "home", "end", "delete", "backspace",
 ];
 
-/// Modifier prefixes accepted by `anchor`, each followed by one character.
+/// Modifier prefixes accepted by `bind`, each followed by one character.
 pub const KEY_PREFIXES: &[&str] = &["ctrl-", "ctrl+", "c-", "c+", "alt-", "alt+", "m-", "m+"];
 
 pub const ACTIONS: &[&str] = &[
@@ -65,6 +78,8 @@ pub const ACTIONS: &[&str] = &[
     "undo",
     "accept_suggestion",
     "fuzzy_files",
+    "dir_back",
+    "dir_forward",
 ];
 
 pub fn valid_key(name: &str) -> bool {
@@ -93,6 +108,90 @@ pub struct Config {
     pub keybinds: HashMap<String, String>,
     pub colors: HashMap<String, String>,
     pub styles: HashMap<String, String>,
+    pub legacy_files: Vec<PathBuf>,
+}
+
+/// Map a deprecated maritime directive name to its modern replacement.
+pub fn legacy_directive_replacement(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "tide" => "set",
+        "pearl" => "env",
+        "current" => "path",
+        "reef" => "alias",
+        "shoal" => "abbr",
+        "anchor" => "bind",
+        "coral" => "color",
+        "wave" => "style",
+        "wake" => "startup",
+        _ => return None,
+    })
+}
+
+/// Rewrite deprecated config directives in `source` while preserving comments,
+/// blank lines, indentation, spacing, and line endings. Returns `(new_source, count)`.
+pub fn migrate_source(source: &str) -> (String, usize) {
+    let mut out = String::with_capacity(source.len());
+    let mut count = 0usize;
+    for segment in source.split_inclusive('\n') {
+        let (line, eol) = if let Some(stripped) = segment.strip_suffix("\r\n") {
+            (stripped, "\r\n")
+        } else if let Some(stripped) = segment.strip_suffix('\n') {
+            (stripped, "\n")
+        } else {
+            (segment, "")
+        };
+        let indent_len = line.len() - line.trim_start_matches([' ', '\t']).len();
+        let indent = &line[..indent_len];
+        let rest = &line[indent_len..];
+        if rest.is_empty() || rest.starts_with("//") {
+            out.push_str(segment);
+            continue;
+        }
+        let word_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let word = &rest[..word_end];
+        if let Some(replacement) = legacy_directive_replacement(word) {
+            out.push_str(indent);
+            out.push_str(replacement);
+            out.push_str(&rest[word_end..]);
+            out.push_str(eol);
+            count += 1;
+        } else {
+            out.push_str(segment);
+        }
+    }
+    (out, count)
+}
+
+/// Migrate deprecated directives in `path` in-place, saving a `.bak` backup
+/// before atomic replacement. Returns the number of migrated lines.
+pub fn migrate_file(path: &Path) -> Result<usize, std::io::Error> {
+    let source = std::fs::read_to_string(path)?;
+    let (migrated, count) = migrate_source(&source);
+    if count == 0 {
+        return Ok(0);
+    }
+    let bak_name = path
+        .file_name()
+        .map(|n| format!("{}.bak", n.to_string_lossy()))
+        .unwrap_or_else(|| "sharky.bak".to_string());
+    let bak_path = path.with_file_name(bak_name);
+    if !bak_path.exists() {
+        std::fs::copy(path, &bak_path)?;
+    }
+    let tmp_name = path
+        .file_name()
+        .map(|n| format!("{}.tmp.{}", n.to_string_lossy(), std::process::id()))
+        .unwrap_or_else(|| format!("sharky.tmp.{}", std::process::id()));
+    let tmp_path = path.with_file_name(tmp_name);
+    if std::fs::write(&tmp_path, &migrated).is_ok() {
+        if std::fs::rename(&tmp_path, path).is_err() {
+            let _ = std::fs::remove_file(&tmp_path);
+            std::fs::write(path, &migrated)?;
+        }
+    } else {
+        std::fs::write(path, &migrated)?;
+    }
+    Ok(count)
 }
 
 #[derive(Debug)]
@@ -122,16 +221,33 @@ pub fn prompt_engine(settings: &HashMap<String, String>) -> &'static str {
 pub fn load(dir: &Path) -> Result<Config, ConfigError> {
     let mut config = Config::default();
     let mut last_file = dir.join("config.sharky").display().to_string();
+    let mut stack = Vec::new();
 
-    for name in ["config.sharky", "theme.sharky"] {
-        let path = dir.join(name);
-        let Ok(source) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let file = path.display().to_string();
-        let parsed = parse_raw(&source, &file)?;
-        last_file = file;
-        merge(&mut config, parsed);
+    let main_cfg = dir.join("config.sharky");
+    if main_cfg.exists() {
+        parse_file_recursive(&main_cfg, &mut config, &mut last_file, &mut stack)?;
+    }
+
+    let conf_d = dir.join("conf.d");
+    if conf_d.is_dir()
+        && let Ok(entries) = std::fs::read_dir(&conf_d)
+    {
+        let mut files: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("sharky")
+            })
+            .collect();
+        files.sort();
+        for path in files {
+            parse_file_recursive(&path, &mut config, &mut last_file, &mut stack)?;
+        }
+    }
+
+    let theme_cfg = dir.join("theme.sharky");
+    if theme_cfg.exists() {
+        parse_file_recursive(&theme_cfg, &mut config, &mut last_file, &mut stack)?;
     }
 
     materialize_preset(&mut config);
@@ -144,6 +260,124 @@ pub fn parse(source: &str, file: &str) -> Result<Config, ConfigError> {
     materialize_preset(&mut config);
     validate(&config, file)?;
     Ok(config)
+}
+
+fn expand_include_path(base_dir: &Path, raw: &str) -> PathBuf {
+    if let Some(rest) = raw.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return PathBuf::from(home).join(rest);
+    }
+    let path = Path::new(raw);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base_dir.join(path)
+    }
+}
+
+fn parse_file_recursive(
+    path: &Path,
+    config: &mut Config,
+    last_file: &mut String,
+    stack: &mut Vec<PathBuf>,
+) -> Result<(), ConfigError> {
+    const MAX_INCLUDE_DEPTH: usize = 16;
+    if stack.len() >= MAX_INCLUDE_DEPTH {
+        return Err(ConfigError {
+            file: path.display().to_string(),
+            line: 0,
+            message: format!("include depth limit ({MAX_INCLUDE_DEPTH}) exceeded"),
+        });
+    }
+    let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if stack.contains(&canon) {
+        return Err(ConfigError {
+            file: path.display().to_string(),
+            line: 0,
+            message: format!("cyclic include of {}", path.display()),
+        });
+    }
+    let file = path.display().to_string();
+    let source = match std::fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(err) if stack.is_empty() && err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(ConfigError {
+                file,
+                line: 0,
+                message: format!("cannot read config file: {err}"),
+            });
+        }
+    };
+    *last_file = file.clone();
+    stack.push(canon);
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut file_has_legacy = false;
+
+    for (index, line) in source.lines().enumerate() {
+        let number = index + 1;
+        let tokens = tokenize(line).map_err(|message| ConfigError {
+            file: file.clone(),
+            line: number,
+            message,
+        })?;
+        if tokens.is_empty() {
+            continue;
+        }
+        if tokens[0] == "include" {
+            let [target] = &tokens[1..] else {
+                stack.pop();
+                return Err(ConfigError {
+                    file,
+                    line: number,
+                    message: "include takes one path".to_string(),
+                });
+            };
+            if target.trim().is_empty() {
+                stack.pop();
+                return Err(ConfigError {
+                    file,
+                    line: number,
+                    message: "include path cannot be empty".to_string(),
+                });
+            }
+            let resolved = expand_include_path(base_dir, target);
+            if let Err(err) = parse_file_recursive(&resolved, config, last_file, stack) {
+                stack.pop();
+                return Err(if err.line == 0 {
+                    ConfigError {
+                        file,
+                        line: number,
+                        message: err.message,
+                    }
+                } else {
+                    err
+                });
+            }
+            continue;
+        }
+        if legacy_directive_replacement(&tokens[0]).is_some() {
+            file_has_legacy = true;
+        }
+        if let Err(message) = apply(config, &tokens) {
+            stack.pop();
+            return Err(ConfigError {
+                file,
+                line: number,
+                message,
+            });
+        }
+    }
+
+    stack.pop();
+    if file_has_legacy {
+        let owned = path.to_path_buf();
+        if !config.legacy_files.contains(&owned) {
+            config.legacy_files.push(owned);
+        }
+    }
+    Ok(())
 }
 
 fn parse_raw(source: &str, file: &str) -> Result<Config, ConfigError> {
@@ -201,7 +435,9 @@ fn validate(config: &Config, file: &str) -> Result<(), ConfigError> {
     for (key, value) in &config.styles {
         match key.as_str() {
             "preset" | "prompt.symbol.glyph" | "prompt.error.glyph" | "prompt.os.glyph" => continue,
-            "prompt" | "rprompt" => validate_template_styles(config, file, key, value)?,
+            "prompt" | "rprompt" | "prompt.transient" | "prompt.continuation" => {
+                validate_template_styles(config, file, key, value)?
+            }
             _ if style::looks_like_style(value) => {
                 validate_style_spec(config, file, key, value)?;
             }
@@ -215,29 +451,38 @@ fn validate(config: &Config, file: &str) -> Result<(), ConfigError> {
                 return Err(ConfigError {
                     file: file.to_string(),
                     line: 0,
-                    message: format!("tide {key} expects on or off, found '{value}'"),
+                    message: format!("set {key} expects on or off, found '{value}'"),
                 });
             }
         } else if key.as_str() == TIDE_NUMBER && value.parse::<usize>().is_err() {
             return Err(ConfigError {
                 file: file.to_string(),
                 line: 0,
-                message: format!("tide {key} expects a number, found '{value}'"),
+                message: format!("set {key} expects a number, found '{value}'"),
             });
         } else if key.as_str() == TIDE_PROMPT && !TIDE_PROMPT_ENGINES.contains(&value.as_str()) {
             return Err(ConfigError {
                 file: file.to_string(),
                 line: 0,
                 message: format!(
-                    "tide {key} expects {}, found '{value}'",
+                    "set {key} expects {}, found '{value}'",
                     TIDE_PROMPT_ENGINES.join(", ")
+                ),
+            });
+        } else if key.as_str() == TIDE_CURSOR && !TIDE_CURSOR_STYLES.contains(&value.as_str()) {
+            return Err(ConfigError {
+                file: file.to_string(),
+                line: 0,
+                message: format!(
+                    "set {key} expects {}, found '{value}'",
+                    TIDE_CURSOR_STYLES.join(", ")
                 ),
             });
         } else if key.as_str() == TIDE_OMP_CONFIG && value.trim().is_empty() {
             return Err(ConfigError {
                 file: file.to_string(),
                 line: 0,
-                message: format!("tide {key} expects a path"),
+                message: format!("set {key} expects a path"),
             });
         }
     }
@@ -336,56 +581,52 @@ fn find_top_level_colon(expr: &str) -> Option<usize> {
     None
 }
 
-fn merge(into: &mut Config, from: Config) {
-    into.settings.extend(from.settings);
-    into.env.extend(from.env);
-    into.paths.extend(from.paths);
-    into.aliases.extend(from.aliases);
-    into.abbreviations.extend(from.abbreviations);
-    into.wake.extend(from.wake);
-    into.keybinds.extend(from.keybinds);
-    into.colors.extend(from.colors);
-    into.styles.extend(from.styles);
-}
-
 fn apply(config: &mut Config, tokens: &[String]) -> Result<(), String> {
     let instruction = tokens[0].as_str();
     let rest = &tokens[1..];
 
     match instruction {
-        "tide" => {
-            let (key, value) = pair(rest, "tide")?;
+        "set" | "tide" => {
+            let (key, value) = pair(rest, instruction)?;
             config.settings.insert(key, value);
         }
-        "pearl" => {
-            let (key, value) = pair(rest, "pearl")?;
+        "env" | "pearl" => {
+            let (key, value) = pair(rest, instruction)?;
             if key.is_empty() {
-                return Err("pearl needs a variable name".to_string());
+                return Err(format!("{instruction} needs a variable name"));
             }
             config.env.push((key, value));
         }
-        "current" => {
+        "path" | "current" => {
             let [value] = rest else {
-                return Err("current takes one directory".to_string());
+                return Err(format!("{instruction} takes one directory"));
             };
             config.paths.push(value.clone());
         }
-        "reef" => {
-            let (key, value) = pair(rest, "reef")?;
+        "alias" | "reef" => {
+            let (key, value) = pair(rest, instruction)?;
             config.aliases.insert(key, value);
         }
-        "shoal" => {
-            let (key, value) = pair(rest, "shoal")?;
+        "abbr" | "shoal" => {
+            let (key, value) = pair(rest, instruction)?;
             config.abbreviations.insert(key, value);
         }
-        "wake" => {
+        "startup" | "wake" => {
             let [value] = rest else {
-                return Err("wake takes one command".to_string());
+                return Err(format!("{instruction} takes one command"));
             };
             config.wake.push(value.clone());
         }
-        "anchor" => {
-            let (key, value) = pair(rest, "anchor")?;
+        "include" => {
+            let [value] = rest else {
+                return Err("include takes one path".to_string());
+            };
+            if value.trim().is_empty() {
+                return Err("include path cannot be empty".to_string());
+            }
+        }
+        "bind" | "anchor" => {
+            let (key, value) = pair(rest, instruction)?;
             if !ACTIONS.contains(&value.as_str()) {
                 return Err(format!("unknown action '{value}'"));
             }
@@ -394,15 +635,15 @@ fn apply(config: &mut Config, tokens: &[String]) -> Result<(), String> {
             }
             config.keybinds.insert(key, value);
         }
-        "coral" => {
-            let (key, value) = pair(rest, "coral")?;
+        "color" | "coral" => {
+            let (key, value) = pair(rest, instruction)?;
             if !is_colour(&value) {
                 return Err(format!("'{value}' is not a colour like #071923"));
             }
             config.colors.insert(key, value);
         }
-        "wave" => {
-            let (key, value) = pair(rest, "wave")?;
+        "style" | "wave" => {
+            let (key, value) = pair(rest, instruction)?;
             if key == "preset" && presets::find(&value).is_none() {
                 return Err(format!(
                     "unknown preset '{value}', expected one of {}",
@@ -817,5 +1058,94 @@ wave command @sea
 
         assert!(parse("wave prompt \"\\uZZZZ\"", "theme.sharky").is_err());
         assert!(parse("wave prompt \"\\u{110000}\"", "theme.sharky").is_err());
+    }
+
+    #[test]
+    fn supports_serious_directives_cursor_vi_transient_and_presets() {
+        let src = r#"
+set greeting off
+set vi on
+set cursor beam
+set transient_prompt on
+env EDITOR "nvim"
+path "~/.local/bin"
+alias gs "git status"
+abbr gco "git checkout"
+startup "true"
+bind alt+left dir_back
+bind alt+right dir_forward
+color bg #1E1E2E
+style preset catppuccin
+style prompt.transient "❯ "
+style prompt.continuation ".. "
+"#;
+        let cfg = parse(src, "config.sharky").unwrap();
+        assert_eq!(cfg.settings["vi"], "on");
+        assert_eq!(cfg.settings["cursor"], "beam");
+        assert_eq!(cfg.settings["transient_prompt"], "on");
+        assert_eq!(cfg.keybinds["alt+left"], "dir_back");
+        assert_eq!(cfg.styles["prompt.transient"], "❯ ");
+        assert_eq!(cfg.styles["prompt.continuation"], ".. ");
+        assert_eq!(cfg.colors["mauve"], "#CBA6F7");
+
+        let bad_cursor = parse("set cursor triangle\n", "config.sharky").unwrap_err();
+        assert!(bad_cursor.message.contains("block, beam, underline"), "{bad_cursor}");
+
+        assert!(presets::find("tokyonight").is_some());
+    }
+
+    #[test]
+    fn loads_conf_d_and_recursive_includes_and_rejects_cycles() {
+        let dir = std::env::temp_dir().join(format!("sharky-cfg-inc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("conf.d")).unwrap();
+        std::fs::write(
+            dir.join("config.sharky"),
+            "set history 2000\ninclude \"extra.sharky\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("extra.sharky"), "alias inc \"echo inc\"\n").unwrap();
+        std::fs::write(dir.join("conf.d/10-aliases.sharky"), "alias d10 \"echo 10\"\n").unwrap();
+        std::fs::write(dir.join("conf.d/20-override.sharky"), "set history 4000\n").unwrap();
+        std::fs::write(dir.join("theme.sharky"), "wave preset tokyonight\n").unwrap();
+
+        let cfg = load(&dir).unwrap();
+        assert_eq!(cfg.aliases["inc"], "echo inc");
+        assert_eq!(cfg.aliases["d10"], "echo 10");
+        assert_eq!(cfg.settings["history"], "4000");
+        assert_eq!(cfg.colors["cyan"], "#7DCFFF");
+        assert_eq!(cfg.legacy_files, vec![dir.join("theme.sharky")]);
+
+        // Cyclic include detection
+        std::fs::write(dir.join("a.sharky"), "include \"b.sharky\"\n").unwrap();
+        std::fs::write(dir.join("b.sharky"), "include \"a.sharky\"\n").unwrap();
+        std::fs::write(dir.join("config.sharky"), "include \"a.sharky\"\n").unwrap();
+        let err = load(&dir).unwrap_err();
+        assert!(err.message.contains("cyclic include"), "{err}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migrates_legacy_directives_while_preserving_formatting_and_creating_backup() {
+        let dir = std::env::temp_dir().join(format!("sharky-cfg-mig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.sharky");
+        let orig = "// comment tide stays intact\n  tide greeting off\npearl EDITOR \"nvim\"\ncurrent \"~/.local/bin\"\nreef gs \"git status\"\nshoal gco \"git checkout\"\nanchor ctrl+r history_search\nwake \"true\"\ncoral sea #35B8C5\nwave prompt \"{cwd} \"\n";
+        std::fs::write(&cfg_path, orig).unwrap();
+
+        let count = migrate_file(&cfg_path).unwrap();
+        assert_eq!(count, 9);
+        assert_eq!(std::fs::read_to_string(dir.join("config.sharky.bak")).unwrap(), orig);
+        let migrated = std::fs::read_to_string(&cfg_path).unwrap();
+        assert!(migrated.starts_with("// comment tide stays intact\n  set greeting off\n"));
+        assert!(migrated.contains("env EDITOR \"nvim\"\n"));
+        assert!(migrated.contains("startup \"true\"\n"));
+        assert!(migrated.contains("style prompt \"{cwd} \"\n"));
+
+        let loaded = load(&dir).unwrap();
+        assert!(loaded.legacy_files.is_empty(), "{:?}", loaded.legacy_files);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

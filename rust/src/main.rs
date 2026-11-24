@@ -22,5 +22,10 @@ mod z;
 mod shell;
 
 fn main() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        term::restore_on_panic();
+        default_hook(info);
+    }));
     std::process::exit(cli::run());
 }

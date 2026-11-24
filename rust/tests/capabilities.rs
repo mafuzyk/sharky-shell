@@ -235,7 +235,7 @@ fn help_json_index_topics_and_unknown_topic() {
         json_index
             .get("config_topics")
             .and_then(json::Value::as_array)
-            .is_some_and(|a| a.iter().any(|v| v.as_str() == Some("tide history")))
+            .is_some_and(|a| a.iter().any(|v| v.as_str() == Some("set history")))
     );
 
     for (args, expected_kind, expected_topic) in [
@@ -243,6 +243,7 @@ fn help_json_index_topics_and_unknown_topic() {
         (&["help", "--json", "cd"][..], "builtin", "cd"),
         (&["help", "agent", "--json"][..], "cli", "agent"),
         (&["help", "config", "explain", "--json"][..], "cli", "config explain"),
+        (&["help", "set", "history", "--json"][..], "config", "set history"),
         (&["help", "tide", "history", "--json"][..], "config", "tide history"),
         (&["help", "--json", "--json"][..], "cli", "--json"),
     ] {

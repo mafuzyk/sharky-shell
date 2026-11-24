@@ -8,6 +8,26 @@ rather than a separate preview track.
 
 ## [Unreleased]
 
+## [0.1.1-alpha] - 2026-11-24
+
+### Added
+
+- **Login Shell Lifecycle (`cli.rs`, `profiles.rs`, `shell.rs`, `repl.rs`, `diagnostics.rs`)**:
+  - Tracked login mode in `Shell` (`shopt -q login_shell` as read-only option) and added `--noprofile` / `--norc` flags.
+  - Marked interactive `$-` (`i`) prior to login profile execution so `/etc/profile`, `~/.bash_profile`, and `~/.profile` see an interactive session.
+  - Added `logout [STATUS]` builtin, execution of `~/.config/sharky/logout.sharky`, `~/.bash_logout`, and `/etc/sharky/logout.sharky` on interactive login exit, and `SHELL` fallback when empty.
+  - Added stopped-jobs exit guard (`There are stopped jobs.` on first `exit`/`logout`/`Ctrl-D`), `shopt -s/-u huponexit`, and informative `login-shell` check (`/etc/shells`) in `sharky doctor`.
+- **Stability & Guards (`term.rs`, `main.rs`, `shell.rs`, `repl.rs`)**:
+  - Installed a panic hook calling `term::restore_on_panic()` to restore termios, disable bracketed paste, and leave alternate screen on unexpected panics.
+  - Added recursion depth guards for `source` (`64`) and function nesting (`FUNCNEST`, default `256`).
+  - Added `set -o ignoreeof` / `IGNOREEOF` handling in interactive REPL.
+- **Configuration Modernization & Customization (`sharky-config`, `prompt.rs`, `editor.rs`, `repl.rs`)**:
+  - Replaced maritime config keywords with clear standard directives (`set`, `env`, `path`, `alias`, `abbr`, `bind`, `color`, `style`, `startup`, `include`) while retaining legacy aliases (`tide`, `pearl`, `current`, `reef`, `shoal`, `anchor`, `coral`, `wave`, `wake`) and adding an interactive startup auto-migration prompt with `.bak` backups.
+  - Added modular `conf.d/*.sharky` auto-loading and `include` directives with cycle detection.
+  - Added `set cursor block|beam|underline` (DECSCUSR with vi-normal block switching), `set vi on|off`, `set transient_prompt on|off`, `style prompt.transient`, `style prompt.continuation`, `{env:VAR}` prompt token, `catppuccin` and `tokyonight` presets, and rebindable `dir_back` / `dir_forward` actions (`alt+left` / `alt+right`).
+- **Release Automation (`.github/workflows/release.yml`)**:
+  - Automatically marks tagged pre-releases (`v*-alpha*`, etc.) as GitHub pre-releases.
+
 ## [0.1.0-alpha.1] - 2026-11-24
 
 ### Added

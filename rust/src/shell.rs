@@ -215,6 +215,12 @@ pub struct Shell {
     dir_history: Vec<PathBuf>,
     dir_history_index: usize,
     completions: HashMap<String, CompletionSpec>,
+    legacy_config_files: Vec<PathBuf>,
+    login_shell: bool,
+    huponexit: bool,
+    ignoreeof: bool,
+    logout_ran: bool,
+    stopped_jobs_warned: bool,
 }
 
 struct SavedLocal {
@@ -522,6 +528,12 @@ impl Shell {
             dir_history: vec![cwd.clone()],
             dir_history_index: 0,
             completions: HashMap::new(),
+            legacy_config_files: Vec::new(),
+            login_shell: false,
+            huponexit: false,
+            ignoreeof: false,
+            logout_ran: false,
+            stopped_jobs_warned: false,
         };
         shell.set_var("PWD", cwd.display().to_string());
         // Bash creates PWD exported and OLDPWD exported but unset at startup.
@@ -588,6 +600,12 @@ impl Shell {
         self.settings.extend(config.settings);
         self.colors.extend(config.colors);
         self.styles.extend(config.styles);
+        self.legacy_config_files = config.legacy_files;
+        match self.settings.get("vi").map(String::as_str) {
+            Some("on") => self.vi = true,
+            Some("off") => self.vi = false,
+            _ => {}
+        }
     }
 
     fn append_path(&mut self, dir: &str) {
@@ -701,26 +719,34 @@ impl Shell {
         }
         self.exit_trap_ran = true;
 
-        let Some(command) = self.traps.get("EXIT").cloned() else {
-            return status;
-        };
-        if command.trim().is_empty() {
-            return status;
+        if self.interactive && self.login_shell && !self.logout_ran {
+            self.logout_ran = true;
+            let saved_exit = self.exit_requested.take();
+            self.last_status = status;
+            crate::profiles::logout(self);
+            self.exit_requested = saved_exit;
         }
 
-        // `$?` inside the EXIT action is the status the shell is leaving with.
-        self.last_status = status;
-        // A fatal signal that brought us here must not abort its own cleanup:
-        // the flag has done its job once the action starts.
-        crate::signal::clear_fatal();
-        let saved = self.exit_requested;
-        self.exit_requested = None;
-        let _ = self.run(&command);
-        if let Some(code) = self.exit_requested.take() {
-            return code;
+        let mut final_status = status;
+        if let Some(command) = self.traps.get("EXIT").cloned()
+            && !command.trim().is_empty()
+        {
+            // `$?` inside the EXIT action is the status the shell is leaving with.
+            self.last_status = status;
+            // A fatal signal that brought us here must not abort its own cleanup:
+            // the flag has done its job once the action starts.
+            crate::signal::clear_fatal();
+            let saved = self.exit_requested;
+            self.exit_requested = None;
+            let _ = self.run(&command);
+            if let Some(code) = self.exit_requested.take() {
+                final_status = code;
+            } else {
+                self.exit_requested = saved;
+            }
         }
-        self.exit_requested = saved;
-        status
+        self.hup_jobs_if_login();
+        final_status
     }
 
     /// Runs the EXIT action a parallel task defined for itself, once, at task
@@ -847,6 +873,61 @@ impl Shell {
 
     pub fn set_interactive(&mut self, interactive: bool) {
         self.interactive = interactive;
+    }
+
+    pub fn set_login_shell(&mut self, login: bool) {
+        self.login_shell = login;
+        if login
+            && self.var("SHELL").is_empty()
+            && let Ok(exe) = std::env::current_exe()
+        {
+            self.set_var("SHELL", exe.display().to_string());
+            self.exported.insert("SHELL".to_string());
+        }
+    }
+
+    pub fn is_login_shell(&self) -> bool {
+        self.login_shell
+    }
+
+    pub fn legacy_config_files(&self) -> &[PathBuf] {
+        &self.legacy_config_files
+    }
+
+    pub fn clear_legacy_config_files(&mut self) {
+        self.legacy_config_files.clear();
+    }
+
+    pub fn reload_config(&mut self) -> i32 {
+        self.reload()
+    }
+
+    pub fn ignoreeof_enabled(&self) -> bool {
+        self.ignoreeof
+    }
+
+    pub fn has_stopped_jobs(&self) -> bool {
+        self.jobs.iter().any(|job| job.stop.is_some())
+    }
+
+    pub fn reset_stopped_jobs_warning(&mut self) {
+        self.stopped_jobs_warned = false;
+    }
+
+    pub fn check_stopped_jobs_before_exit(&mut self) -> bool {
+        if self.interactive && self.has_stopped_jobs() && !self.stopped_jobs_warned {
+            self.stopped_jobs_warned = true;
+            eprintln!("There are stopped jobs.");
+            self.last_status = 1;
+            return true;
+        }
+        false
+    }
+
+    pub fn hup_jobs_if_login(&self) {
+        if self.interactive && self.login_shell && self.huponexit {
+            crate::signal::forward_hangup();
+        }
     }
 
     /// Marks the source as a `-c` command string, which changes the status bash
@@ -1455,7 +1536,7 @@ impl Shell {
         let mut words: Vec<String> = [
             ":", "true", "false", "cd", "pushd", "popd", "dirs", "ulimit", "hash",
             "let", "times",
-            "exit", "export", "unset", "set", "source", ".",
+            "exit", "logout", "export", "unset", "set", "source", ".",
             "break", "continue", "return", "jobs", "fg", "bg", "disown", "declare", "local", "pwd", "type",
             "alias", "abbr", "unabbr", "unalias", "history", "wait", "kill", "z", "zi",
             "reload", "trap", "read", "shift", "wake", "exec", "time", "shopt",
@@ -2453,6 +2534,18 @@ impl Shell {
     }
 
     fn invoke_function(&mut self, name: &str, body: &List, args: &[String]) -> Flow {
+        const DEFAULT_FUNCNEST: usize = 256;
+        let max_nest = self
+            .var("FUNCNEST")
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_FUNCNEST);
+        if self.local_scopes.len() >= max_nest {
+            eprintln!("sharky: {name}: maximum function nesting level exceeded ({max_nest})");
+            return Flow::Status(1);
+        }
         let saved = std::mem::replace(&mut self.positional, args.to_vec());
         self.local_scopes.push(Vec::new());
         let pushed_main = if !self.bash_source.is_empty() && self.funcname.is_empty() {
@@ -3448,6 +3541,28 @@ impl Shell {
             ":" | "true" => Some(Flow::Status(0)),
             "false" => Some(Flow::Status(1)),
             "exit" => {
+                if self.interactive
+                    && self.source_depth == 0
+                    && self.local_scopes.is_empty()
+                    && self.check_stopped_jobs_before_exit()
+                {
+                    return Some(Flow::Status(1));
+                }
+                let code = words
+                    .get(1)
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(self.last_status);
+                self.exit_requested = Some(code);
+                Some(Flow::Exit(code))
+            }
+            "logout" => {
+                if !self.login_shell {
+                    eprintln!("sharky: logout: not login shell: use 'exit'");
+                    return Some(Flow::Status(1));
+                }
+                if self.check_stopped_jobs_before_exit() {
+                    return Some(Flow::Status(1));
+                }
                 let code = words
                     .get(1)
                     .and_then(|n| n.parse().ok())
@@ -3718,6 +3833,7 @@ impl Shell {
             }
             "@" => return self.positional.join(" "),
             "*" => return self.positional.join(&self.ifs_join_separator()),
+            "-" => return self.option_flags(),
             "BASHPID" => return std::process::id().to_string(),
             "UID" => return nix::unistd::getuid().as_raw().to_string(),
             "EUID" => return nix::unistd::geteuid().as_raw().to_string(),
@@ -3758,6 +3874,35 @@ impl Shell {
             .find(|(key, _)| key == name)
             .map(|(_, value)| value.clone())
             .unwrap_or_default()
+    }
+
+    fn option_flags(&self) -> String {
+        let mut flags = String::new();
+        if self.errexit {
+            flags.push('e');
+        }
+        if self.nounset {
+            flags.push('u');
+        }
+        if self.xtrace {
+            flags.push('x');
+        }
+        if self.interactive {
+            flags.push('i');
+        }
+        if self.histexpand {
+            flags.push('H');
+        }
+        if self.noclobber {
+            flags.push('C');
+        }
+        if self.errtrace {
+            flags.push('E');
+        }
+        if self.functrace {
+            flags.push('T');
+        }
+        flags
     }
 
     fn scalar_is_set(&self, name: &str) -> bool {
@@ -5699,6 +5844,14 @@ impl Shell {
                 return Flow::Status(2);
             }
         };
+
+        const MAX_SOURCE_DEPTH: usize = 64;
+        if self.source_depth >= MAX_SOURCE_DEPTH {
+            eprintln!(
+                "sharky: source: {raw_path}: maximum source depth ({MAX_SOURCE_DEPTH}) exceeded"
+            );
+            return Flow::Status(1);
+        }
 
         let extra_args = &args[index + 1..];
         let saved = (!extra_args.is_empty())
@@ -7647,6 +7800,9 @@ impl Shell {
         if self.vi {
             active.push("vi");
         }
+        if self.ignoreeof {
+            active.push("ignoreeof");
+        }
         active
     }
 
@@ -7659,6 +7815,8 @@ impl Shell {
             "failglob" => self.failglob,
             "nocasematch" => self.nocasematch,
             "extglob" => self.extglob,
+            "huponexit" => self.huponexit,
+            "login_shell" => self.login_shell,
             _ => return None,
         })
     }
@@ -7672,6 +7830,7 @@ impl Shell {
             "failglob" => self.failglob = on,
             "nocasematch" => self.nocasematch = on,
             "extglob" => self.extglob = on,
+            "huponexit" => self.huponexit = on,
             _ => return false,
         }
         true
@@ -7715,6 +7874,8 @@ impl Shell {
                     "extglob",
                     "failglob",
                     "globstar",
+                    "huponexit",
+                    "login_shell",
                     "nocasematch",
                     "nullglob",
                 ] {
@@ -7730,7 +7891,10 @@ impl Shell {
             }
             let mut status = 0;
             for name in names {
-                if !self.set_shopt_option(name, on) {
+                if name == "login_shell" {
+                    eprintln!("sharky: shopt: login_shell: cannot modify read-only option");
+                    status = 1;
+                } else if !self.set_shopt_option(name, on) {
                     eprintln!("sharky: shopt: {name}: invalid shell option name");
                     status = 1;
                 }
@@ -7745,6 +7909,8 @@ impl Shell {
                 "extglob",
                 "failglob",
                 "globstar",
+                "huponexit",
+                "login_shell",
                 "nocasematch",
                 "nullglob",
             ]
@@ -7881,6 +8047,7 @@ impl Shell {
             "errtrace" => self.errtrace = on,
             "functrace" => self.functrace = on,
             "vi" => self.vi = on,
+            "ignoreeof" => self.ignoreeof = on,
             _ => return false,
         }
         true
@@ -13266,6 +13433,7 @@ fn is_builtin_name(name: &str) -> bool {
             | "let"
             | "times"
             | "exit"
+            | "logout"
             | "export"
             | "unset"
             | "set"

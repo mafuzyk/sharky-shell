@@ -420,3 +420,89 @@ fn json_login_honors_a_profile_exit() {
 
     std::fs::remove_dir_all(&home).ok();
 }
+
+#[test]
+fn shopt_login_shell_and_noprofile_norc_and_logout_behave_like_bash() {
+    let home = scratch("login-features");
+    std::fs::create_dir_all(home.join(".config/sharky")).unwrap();
+    std::fs::write(home.join(".profile"), "PROF_LOADED=yes\n").unwrap();
+    std::fs::write(
+        home.join(".config/sharky/config.sharky"),
+        "env RC_LOADED \"yes\"\n",
+    )
+    .unwrap();
+
+    // `shopt -q login_shell` is 0 under -l and 1 without -l, and read-only on -s/-u.
+    let is_login = run(
+        &home,
+        &["-l", "-c", "shopt -q login_shell && printf LOGIN; shopt -u login_shell 2>/dev/null || printf '|RO'"],
+    );
+    assert_eq!(is_login.status.code(), Some(0), "{is_login:?}");
+    assert_eq!(String::from_utf8_lossy(&is_login.stdout), "LOGIN|RO");
+
+    let not_login = run(&home, &["-c", "shopt -q login_shell || printf NONLOGIN"]);
+    assert_eq!(not_login.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&not_login.stdout), "NONLOGIN");
+
+    // `--noprofile` skips `.profile`; `--norc` skips `config.sharky`.
+    let skip_profile = run(
+        &home,
+        &["-l", "--noprofile", "-c", r#"printf '%s' "${PROF_LOADED:-no}""#],
+    );
+    assert_eq!(String::from_utf8_lossy(&skip_profile.stdout), "no");
+
+    let skip_rc = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args(["--norc", "-c", r#"printf '%s' "${RC_LOADED:-no}""#])
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&skip_rc.stdout), "no");
+
+    // `SHELL` is populated when empty in login mode.
+    let shell_env = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args(["-l", "-c", r#"printf '%s' "$SHELL""#])
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .env("HOME", &home)
+        .env_remove("SHELL")
+        .output()
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&shell_env.stdout).trim().is_empty());
+
+    // `logout` fails outside login shell.
+    let bad_logout = run(&home, &["-c", "logout"]);
+    assert_eq!(bad_logout.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&bad_logout.stderr).contains("not login shell"));
+
+    // Interactive login PTY sees `i` in `$-` inside `.profile`, and `logout` runs logout scripts.
+    let logout_log = home.join("logout.log");
+    std::fs::write(
+        home.join(".profile"),
+        format!("printf 'FLAGS:%s\\n' \"$-\" > '{}'\n", home.join("flags.log").display()),
+    )
+    .unwrap();
+    std::fs::write(
+        home.join(".config/sharky/logout.sharky"),
+        append_marker(&logout_log, "logout.sharky"),
+    )
+    .unwrap();
+    std::fs::write(
+        home.join(".bash_logout"),
+        append_marker(&logout_log, "bash_logout"),
+    )
+    .unwrap();
+
+    let (mut child, master) = login_pty(&home);
+    let mut writer =
+        unsafe { std::fs::File::from_raw_fd(master.try_clone().unwrap().into_raw_fd()) };
+    std::thread::sleep(Duration::from_millis(250));
+    let _ = writer.write_all(b"logout 0\r");
+    let status = wait_for_exit(&mut child);
+    assert!(status.success(), "{status:?}");
+
+    let flags = std::fs::read_to_string(home.join("flags.log")).unwrap_or_default();
+    assert!(flags.contains('i'), "flags in login profile missing i: {flags:?}");
+    assert_eq!(markers(&logout_log), ["logout.sharky", "bash_logout"]);
+
+    std::fs::remove_dir_all(&home).ok();
+}

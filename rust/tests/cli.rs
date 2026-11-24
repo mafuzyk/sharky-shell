@@ -2870,14 +2870,14 @@ fn config_explain_without_topic_prints_a_text_index() {
     );
     assert!(out.stderr.is_empty());
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("tide history"), "{text}");
-    assert!(text.contains("anchor"), "{text}");
+    assert!(text.contains("set history"), "{text}");
+    assert!(text.contains("bind"), "{text}");
     assert!(!text.contains('{'), "index must be plain text: {text}");
 }
 
 #[test]
 fn config_explain_joins_space_separated_topic_words() {
-    let out = sharky(&["config", "explain", "tide", "history"]);
+    let out = sharky(&["config", "explain", "set", "history"]);
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -2885,15 +2885,20 @@ fn config_explain_joins_space_separated_topic_words() {
         String::from_utf8_lossy(&out.stderr)
     );
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("tide history"), "{text}");
+    assert!(text.contains("set history"), "{text}");
     assert!(text.contains("1000"), "{text}");
     assert!(text.contains("expects a number"), "{text}");
     assert!(!text.contains('{'), "topic must be plain text: {text}");
+
+    let legacy = sharky(&["config", "explain", "tide", "history"]);
+    assert_eq!(legacy.status.code(), Some(0));
+    assert_eq!(legacy.stdout, out.stdout);
 }
 
 #[test]
 fn config_explain_exposes_every_recognized_directive() {
     for directive in [
+        "set", "env", "path", "alias", "abbr", "bind", "color", "style", "startup", "include",
         "tide", "pearl", "current", "reef", "shoal", "anchor", "coral", "wave", "wake",
     ] {
         let out = sharky(&["config", "explain", directive]);
@@ -3425,10 +3430,18 @@ fn doctor_reports_every_check_and_exits_zero_when_healthy() {
     assert!(out.stderr.is_empty(), "{}", String::from_utf8_lossy(&out.stderr));
     let text = String::from_utf8_lossy(&out.stdout);
     let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(lines.len(), 6, "{text}");
-    for (name, line) in ["stdin", "stdout", "config", "theme", "history", "tools"]
-        .iter()
-        .zip(&lines)
+    assert_eq!(lines.len(), 7, "{text}");
+    for (name, line) in [
+        "stdin",
+        "stdout",
+        "config",
+        "theme",
+        "history",
+        "tools",
+        "login-shell",
+    ]
+    .iter()
+    .zip(&lines)
     {
         assert!(line.starts_with("OK   "), "{line}");
         assert!(line.contains(&format!("{name}:")), "{line}");
@@ -3724,7 +3737,7 @@ fn doctor_checks_configured_omp_tool_without_leaking_config_path() {
         .expect("failed to run sharky");
     assert_eq!(missing_bin.status.code(), Some(1));
     let out1 = String::from_utf8_lossy(&missing_bin.stdout);
-    assert_eq!(out1.lines().count(), 6, "{out1}");
+    assert_eq!(out1.lines().count(), 7, "{out1}");
     assert!(out1.contains("FAIL tools:"), "{out1}");
     assert!(out1.contains("oh-my-posh"), "{out1}");
     assert!(!out1.contains("s3cr3t-omp-path-never-print"), "{out1}");
@@ -3745,12 +3758,12 @@ fn doctor_checks_configured_omp_tool_without_leaking_config_path() {
         .expect("failed to run sharky");
     assert_eq!(missing_cfg.status.code(), Some(1));
     let out2 = String::from_utf8_lossy(&missing_cfg.stdout);
-    assert_eq!(out2.lines().count(), 6, "{out2}");
+    assert_eq!(out2.lines().count(), 7, "{out2}");
     assert!(out2.contains("FAIL tools:"), "{out2}");
     assert!(out2.contains("omp_config"), "{out2}");
     assert!(!out2.contains("s3cr3t-omp-path-never-print"), "{out2}");
 
-    // Creating the omp_config file makes all 6 checks pass.
+    // Creating the omp_config file makes all 7 checks pass.
     std::fs::write(&secret_path, b"{}").unwrap();
     let healthy = Command::new(env!("CARGO_BIN_EXE_sharky"))
         .arg("doctor")
@@ -3767,7 +3780,7 @@ fn doctor_checks_configured_omp_tool_without_leaking_config_path() {
 
     assert_eq!(healthy.status.code(), Some(0));
     let out3 = String::from_utf8_lossy(&healthy.stdout);
-    assert_eq!(out3.lines().count(), 6, "{out3}");
+    assert_eq!(out3.lines().count(), 7, "{out3}");
     assert!(out3.contains("OK   tools:"), "{out3}");
     assert!(out3.contains("oh-my-posh"), "{out3}");
     assert!(!out3.contains("s3cr3t-omp-path-never-print"), "{out3}");

@@ -1,4 +1,4 @@
-.TH SHARKY 1 "2026-11-24" "sharky 0.1.0-alpha.1" "User Commands"
+.TH SHARKY 1 "2026-11-24" "sharky 0.1.1-alpha" "User Commands"
 .SH NAME
 sharky \- Unix-first interactive shell
 .SH SYNOPSIS
@@ -77,8 +77,14 @@ profiles and history are neither read nor written. Cannot be combined with
 Force interactive mode; fails when standard input or output is not a terminal.
 .TP
 .B \-l, \-\-login
-Read login profiles before the command or system input. Not recommended as a
-login shell during alpha.
+Read login profiles before the command or interactive loop.
+Also sets \fBshopt \-q login_shell\fR and runs logout scripts on exit.
+.TP
+.B \-\-noprofile
+Skip login startup profiles even when \fB\-l\fR or \fB\-\-login\fR is set.
+.TP
+.B \-\-norc
+Synonym for \fB\-\-no\-config\fR; skip \fBconfig.sharky\fR, \fBconf.d/*.sharky\fR and \fBtheme.sharky\fR.
 .TP
 .B \-P, \-\-private
 Use no history file: prior commands are not read and new ones are not written.
@@ -217,60 +223,74 @@ declarative language with one statement per line, \fB//\fR comments and
 double-quoted values:
 .PP
 .nf
-    tide greeting off
-    tide history 10000
-    pearl EDITOR "nvim"
-    current "~/.local/bin"
-    reef ll "ls -lah"
-    anchor ctrl+r history_search
+    set greeting off
+    set history 10000
+    env EDITOR "nvim"
+    path "~/.local/bin"
+    alias ll "ls -lah"
+    bind ctrl+r history_search
 .fi
 .PP
 .SS config.sharky
 .TP
-.B tide \fIkey value\fR
+.B set \fIkey value\fR
 Shell preferences: \fBgreeting\fR, \fBautosuggest\fR, \fBautocd\fR,
-\fBhighlight\fR, \fBstarship\fR, \fBrprompt\fR and \fBprofile_paths\fR
-(\fBon\fR or \fBoff\fR), \fBprompt\fR (\fBnative\fR, \fBstarship\fR or \fBomp\fR),
+\fBhighlight\fR, \fBstarship\fR, \fBrprompt\fR, \fBprofile_paths\fR, \fBvi\fR,
+\fBtransient_prompt\fR (\fBon\fR or \fBoff\fR), \fBcursor\fR (\fBblock\fR,
+\fBbeam\fR or \fBunderline\fR), \fBprompt\fR (\fBnative\fR, \fBstarship\fR or \fBomp\fR),
 \fBomp_config\fR (Oh My Posh theme path), and \fBhistory\fR (a number).
 .TP
-.B pearl \fINAME value\fR
+.B env \fINAME value\fR
 Set an environment variable.
 .TP
-.B current \fIdirectory\fR
+.B path \fIdirectory\fR
 Prepend a directory to \fBPATH\fR.
 .TP
-.B reef \fIname command\fR
+.B alias \fIname command\fR
 Define an alias.
 .TP
-.B shoal \fIname expansion\fR
+.B abbr \fIname expansion\fR
 Define an abbreviation expanded on space or Enter in command position.
 .TP
-.B anchor \fIkey action\fR
+.B startup \fIcommand\fR
+Run a command once before the first interactive prompt.
+.TP
+.B include \fIpath\fR
+Load another declarative \fB.sharky\fR file inline. Files in \fBconf.d/*.sharky\fR
+also load automatically in alphabetical order.
+.TP
+.B bind \fIkey action\fR
 Bind a key to an editor action. Key names use \fBctrl+x\fR, \fBc+x\fR,
 \fBalt+x\fR or \fBm+x\fR, named keys such as \fBtab\fR, \fBshift-tab\fR,
-\fBhome\fR and \fBend\fR, or a single character. Actions include
-\fBaccept_line\fR, \fBabort\fR, \fBbackward_char\fR, \fBforward_char\fR,
-\fBbackward_word\fR, \fBforward_word\fR, \fBkill_line\fR, \fByank\fR,
-\fBundo\fR, \fBhistory_search\fR, \fBcomplete\fR,
-\fBaccept_suggestion\fR and \fBfuzzy_files\fR.
+\fBalt+left\fR, \fBalt+right\fR, \fBhome\fR and \fBend\fR, or a single character.
+Actions include \fBaccept_line\fR, \fBabort\fR, \fBbackward_char\fR,
+\fBforward_char\fR, \fBbackward_word\fR, \fBforward_word\fR, \fBkill_line\fR,
+\fByank\fR, \fBundo\fR, \fBhistory_search\fR, \fBcomplete\fR,
+\fBaccept_suggestion\fR, \fBfuzzy_files\fR, \fBdir_back\fR and \fBdir_forward\fR.
 .SS theme.sharky
 .TP
-.B coral \fIname #RRGGBB\fR
+.B color \fIname #RRGGBB\fR
 Define a colour.
 .TP
-.B wave \fIkey value\fR
-Select a built-in preset (\fBwave preset\fR with \fBsharky\fR, \fBneolambda\fR,
-\fBpure\fR, \fBrobbyrussell\fR or \fBpowerline\fR), set the primary or right
-prompt template (\fBprompt\fR, \fBrprompt\fR), or set styles and symbol glyphs
+.B style \fIkey value\fR
+Select a built-in preset (\fBstyle preset\fR with \fBcatppuccin\fR, \fBtokyonight\fR,
+\fBsharky\fR, \fBneolambda\fR, \fBpure\fR, \fBrobbyrussell\fR or \fBpowerline\fR),
+set templates (\fBprompt\fR, \fBrprompt\fR, \fBprompt.transient\fR,
+\fBprompt.continuation\fR), or set styles and symbol glyphs
 (\fBprompt.symbol.glyph\fR, \fBprompt.error.glyph\fR, \fBprompt.os.glyph\fR). Templates
 support \fB\\uXXXX\fR/\fB\\u{X}\fR Unicode escapes, placeholders (\fB{cwd}\fR, \fB{cwd_short}\fR,
 \fB{cwd_full}\fR, \fB{cwd_home}\fR, \fB{git}\fR, \fB{git_dirty}\fR, \fB{duration}\fR,
 \fB{duration_ms}\fR, \fB{symbol}\fR, \fB{status}\fR, \fB{error_status}\fR, \fB{user}\fR,
 \fB{host}\fR, \fB{os_icon}\fR, \fB{shell}\fR, \fB{mem}\fR, \fB{venv}\fR, \fB{nix}\fR,
-\fB{ssh}\fR, \fB{jobs}\fR, \fB{time}\fR, \fB{fill}\fR), conditional \fB[...]\fR groups and
+\fB{ssh}\fR, \fB{jobs}\fR, \fB{time}\fR, \fB{env:VAR}\fR, \fB{fill}\fR), conditional \fB[...]\fR groups and
 inline \fB{style:text}\fR spans. Styles accept \fB@name\fR or \fB#RRGGBB\fR,
 optional \fBon @bg\fR, and \fBbold\fR, \fBdim\fR, \fBitalic\fR, \fBunderline\fR or
-\fBreverse\fR/\fBinvert\fR, for example \fBwave prompt.git "@ink on @kelp bold"\fR.
+\fBreverse\fR/\fBinvert\fR, for example \fBstyle prompt.git "@ink on @ok bold"\fR.
+.PP
+Note: \fBset \-o ignoreeof\fR / \fBIGNOREEOF\fR protects against accidental EOF exits;
+\fBlogout\fR runs \fB~/.config/sharky/logout.sharky\fR, \fB~/.bash_logout\fR and
+\fB/etc/sharky/logout.sharky\fR; \fBshopt huponexit\fR forwards SIGHUP to jobs when
+leaving an interactive login shell.
 .PP
 Unknown instructions, wrong arity, invalid colours and undefined colour
 references are reported as \fBfile:line\fR errors; the shell keeps running with

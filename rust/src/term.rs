@@ -133,6 +133,23 @@ impl Drop for RawMode {
     }
 }
 
+/// Restores terminal state on panic so a panicking interactive shell never
+/// leaves raw mode, bracketed paste, or the alternate screen active.
+pub fn restore_on_panic() {
+    unsafe {
+        if RAW_ACTIVE.swap(false, Ordering::AcqRel) {
+            let saved = (*SAVED_TERMIOS.0.get()).assume_init_ref();
+            libc::tcsetattr(0, libc::TCSANOW, saved);
+            let clear = b"\x1b[?2004l";
+            libc::write(1, clear.as_ptr() as *const _, clear.len());
+        }
+        if ALTERNATE.swap(false, Ordering::AcqRel) {
+            let leave = b"\x1b[?1049l";
+            libc::write(1, leave.as_ptr() as *const _, leave.len());
+        }
+    }
+}
+
 pub fn is_tty(fd: i32) -> bool {
     unsafe { libc::isatty(fd) == 1 }
 }

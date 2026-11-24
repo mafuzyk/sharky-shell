@@ -114,6 +114,18 @@ fn render_native_raw(shell: &Shell) -> String {
     eval_template(shell, template, true, &mut ctx).text
 }
 
+pub fn render_transient(shell: &Shell) -> String {
+    let template = shell.style("prompt.transient").unwrap_or("{symbol} ");
+    let mut ctx = PromptCtx::default();
+    eval_template(shell, template, true, &mut ctx).text
+}
+
+pub fn render_continuation(shell: &Shell) -> String {
+    let template = shell.style("prompt.continuation").unwrap_or("... ");
+    let mut ctx = PromptCtx::default();
+    eval_template(shell, template, true, &mut ctx).text
+}
+
 fn expand_fills(rendered: &str, columns: usize, shell: &Shell) -> String {
     if !rendered.contains(FILL_PREFIX) {
         return rendered.to_string();
@@ -474,7 +486,18 @@ fn eval_token(
             }
         }
         "time" => Some(paint("prompt.time", local_time_hms())),
-        _ => None,
+        _ => {
+            if let Some(var_name) = name.strip_prefix("env:") {
+                let val = shell.var(var_name);
+                if val.is_empty() {
+                    Some((String::new(), false))
+                } else {
+                    Some(paint("prompt.env", val))
+                }
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -1348,5 +1371,28 @@ wave prompt.symbol "@cyan bold"
         assert!(rendered.contains("92ms"));
         assert!(rendered.contains("sharky"));
         assert!(rendered.contains(">>"));
+    }
+
+    #[test]
+    fn renders_env_token_transient_and_continuation_prompts() {
+        let mut shell = Shell::new();
+        shell.set_var("MY_ENV_TAG", "prod".to_string());
+        let raw = r#"{cwd} [{env:MY_ENV_TAG}][MISSING:{env:EMPTY_TAG}] {symbol} "#;
+        let mut ctx = super::PromptCtx::default();
+        let evaluated = super::eval_template(&shell, raw, false, &mut ctx).text;
+        assert!(evaluated.contains("prod"), "{evaluated:?}");
+        assert!(!evaluated.contains("MISSING:"), "{evaluated:?}");
+
+        assert_eq!(super::render_transient(&shell), "❯ ");
+        assert_eq!(super::render_continuation(&shell), "... ");
+
+        let cfg = sharky_config::parse(
+            "style prompt.transient \"> \"\nstyle prompt.continuation \".. \"\n",
+            "theme.sharky",
+        )
+        .unwrap();
+        shell.apply_config(cfg);
+        assert_eq!(super::render_transient(&shell), "> ");
+        assert_eq!(super::render_continuation(&shell), ".. ");
     }
 }

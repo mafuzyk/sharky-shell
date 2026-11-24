@@ -10,7 +10,15 @@ pub struct Preset {
 }
 
 /// Ordered preset names for help text and error diagnostics.
-pub const NAMES: &[&str] = &["sharky", "neolambda", "pure", "robbyrussell", "powerline"];
+pub const NAMES: &[&str] = &[
+    "sharky",
+    "neolambda",
+    "pure",
+    "robbyrussell",
+    "powerline",
+    "catppuccin",
+    "tokyonight",
+];
 
 /// All built-in presets shipped inside `sharky-config`.
 pub const PRESETS: &[Preset] = &[
@@ -183,6 +191,81 @@ pub const PRESETS: &[Preset] = &[
             ("error", "@danger"),
             ("suggestion", "@muted"),
             ("selection", "@ink on @sea"),
+        ],
+    },
+    Preset {
+        name: "catppuccin",
+        description: "Catppuccin Mocha palette with crisp two-line prompt and right clock",
+        colors: &[
+            ("base", "#1E1E2E"),
+            ("text", "#CDD6F4"),
+            ("mauve", "#CBA6F7"),
+            ("blue", "#89B4FA"),
+            ("green", "#A6E3A1"),
+            ("peach", "#FAB387"),
+            ("red", "#F38BA8"),
+            ("overlay", "#6C7086"),
+            ("surface", "#313244"),
+        ],
+        styles: &[
+            (
+                "prompt",
+                "{cwd}[ {git}{git_dirty}][ {duration}]\n{symbol} ",
+            ),
+            ("rprompt", "[{venv} ][{time}]"),
+            ("prompt.symbol.glyph", "❯"),
+            ("prompt.cwd", "@blue bold"),
+            ("prompt.git", "@mauve"),
+            ("prompt.git_dirty", "@peach"),
+            ("prompt.duration", "@overlay"),
+            ("prompt.venv", "@green"),
+            ("prompt.time", "@overlay"),
+            ("prompt.symbol", "@mauve bold"),
+            ("prompt.error", "@red bold"),
+            ("command", "@text"),
+            ("builtin", "@blue"),
+            ("string", "@green"),
+            ("variable", "@peach"),
+            ("error", "@red"),
+            ("suggestion", "@overlay"),
+            ("selection", "@base on @blue"),
+        ],
+    },
+    Preset {
+        name: "tokyonight",
+        description: "Tokyo Night palette with user/host context and git status",
+        colors: &[
+            ("bg", "#1A1B26"),
+            ("fg", "#C0CAF5"),
+            ("cyan", "#7DCFFF"),
+            ("blue", "#7AA2F7"),
+            ("magenta", "#BB9AF7"),
+            ("green", "#9ECE6A"),
+            ("yellow", "#E0AF68"),
+            ("red", "#F7768E"),
+            ("comment", "#565F89"),
+        ],
+        styles: &[
+            (
+                "prompt",
+                "[{user}@{host} ]{cwd}[ {git}{git_dirty}][ {duration}]\n{symbol} ",
+            ),
+            ("prompt.symbol.glyph", "❯"),
+            ("prompt.user", "@cyan"),
+            ("prompt.host", "@blue"),
+            ("prompt.cwd", "@blue bold"),
+            ("prompt.git", "@magenta"),
+            ("prompt.git_dirty", "@yellow"),
+            ("prompt.duration", "@comment"),
+            ("prompt.symbol", "@cyan bold"),
+            ("prompt.error", "@red bold"),
+            ("command", "@fg"),
+            ("builtin", "@cyan"),
+            ("string", "@green"),
+            ("variable", "@magenta"),
+            ("error", "@red"),
+            ("suggestion", "@comment"),
+            ("selection", "@bg on @cyan"),
         ],
     },
 ];
