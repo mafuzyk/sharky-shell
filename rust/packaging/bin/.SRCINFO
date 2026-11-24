@@ -1,0 +1,19 @@
+pkgbase = sharky-shell-bin
+	pkgdesc = Unix-first interactive shell written in Rust (prebuilt binary, alpha)
+	pkgver = 4.0.0_alpha.5
+	pkgrel = 1
+	url = https://github.com/mafuzyk/sharky-shell
+	arch = x86_64
+	license = GPL-3.0-only
+	provides = sharky
+	provides = sharky-shell
+	conflicts = sharky
+	conflicts = sharky-shell
+	conflicts = sharky-shell-git
+	options = !strip
+	source = https://github.com/mafuzyk/sharky-shell/releases/download/v4.0.0-alpha.5/sharky-x86_64-unknown-linux-musl.tar.gz
+	source = LICENSE::https://github.com/mafuzyk/sharky-shell/raw/v4.0.0-alpha.5/LICENSE
+	sha256sums = 079dccc1e077a8c0e9418253ce9e49cc058b0b711c47f332a728bb15a3ae956d
+	sha256sums = 3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986
+
+pkgname = sharky-shell-bin

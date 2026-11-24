@@ -1,0 +1,16 @@
+target/
+tmp/
+.bundle/
+coverage/
+.agent-teams/
+.env
+.env.*
+*.log
+*.swp
+.DS_Store
+
+docs/
+
+dist/
+.ruby-oracle/
+.audit/

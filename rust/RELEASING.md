@@ -1,0 +1,124 @@
+# Releasing sharky
+
+Releases ship alpha builds through the normal channel: the AUR packages, GitHub
+release assets and the Nix flake below are the supported delivery paths. Alpha
+names the project's ongoing maturity, not a separate release track, so this
+checklist is the same for every version.
+
+Version numbers live in `rust/Cargo.toml`, `rust/man/sharky.1` and the AUR
+recipes. Bump them and write the `CHANGELOG.md` entry before tagging.
+
+## 1. Final checks
+
+```sh
+cd rust
+systemd-run --user --scope --quiet -p MemoryMax=2G -- cargo test -j 6
+systemd-run --user --scope --quiet -p MemoryMax=2G -- cargo clippy -j 6 --all-targets
+systemd-run --user --scope --quiet -p MemoryMax=2G -- cargo build --release --locked -j 6
+./target/release/sharky --version
+```
+
+The differential suite needs a local Ruby v1 checkout; it is skipped when
+`.ruby-oracle/bin/sharky` is absent (override with `SHARKY_REF`).
+
+## 2. Merge and tag
+
+```sh
+cd ..                       # repository root
+git checkout main
+git merge --ff-only v3.5
+git tag -a v3.5.3 -m "sharky 3.5.3"
+git push origin main
+git push origin v3.5.3
+```
+
+Pushing is the first irreversible step: it publishes the tag, and the release
+workflow builds the static musl tarball used by `sharky-shell-bin`.
+
+## 3. Build the packages
+
+`sharky-shell-git` builds from the repository:
+
+```sh
+cd rust/packaging
+makepkg -f --nodeps
+makepkg --printsrcinfo > .SRCINFO
+```
+
+`sharky-shell-bin` installs the tarball attached to the GitHub release. Bump
+`pkgver` in `rust/packaging/bin/PKGBUILD` first, then refresh both checksums
+(the release tarball and the tag's `LICENSE`):
+
+```sh
+cd rust/packaging/bin
+updpkgsums                  # or sha256sum the two source files by hand
+makepkg -f --nodeps
+makepkg --printsrcinfo > .SRCINFO
+```
+
+Both packages should contain:
+
+```
+usr/bin/sharky
+usr/share/man/man1/sharky.1.gz
+usr/share/sharky/config.sharky
+usr/share/sharky/theme.sharky
+usr/share/licenses/<pkgname>/LICENSE
+```
+
+The root `flake.nix` installs the same tarball for `x86_64-linux`. Once the new
+release asset exists, bump its `version` and derive the replacement `hash` from
+the digest published in the asset's `.sha256` file:
+
+```sh
+nix hash to-sri --type sha256 <sha256-hex-from-the-release-asset>
+nix build .#default --rebuild
+./result/bin/sharky --version
+```
+
+Both `default` and `sharky-bin` resolve to that one derivation, so updating the
+pin updates both names. There are no placeholder outputs or other architectures.
+
+## 4. AUR
+
+There are two independent AUR repositories:
+
+- `ssh://aur@aur.archlinux.org/sharky-shell-git.git`
+- `ssh://aur@aur.archlinux.org/sharky-shell-bin.git` (x86_64 only)
+
+```sh
+git clone ssh://aur@aur.archlinux.org/sharky-shell-git.git
+cp rust/packaging/PKGBUILD rust/packaging/.SRCINFO sharky-shell-git/
+cd sharky-shell-git
+git add PKGBUILD .SRCINFO
+git commit -m "upgpkg: sharky-shell-git <version>"
+git push
+```
+
+```sh
+git clone ssh://aur@aur.archlinux.org/sharky-shell-bin.git
+cp rust/packaging/bin/PKGBUILD rust/packaging/bin/.SRCINFO sharky-shell-bin/
+cd sharky-shell-bin
+git add PKGBUILD .SRCINFO
+git commit -m "upgpkg: sharky-shell-bin <version>"
+git push
+```
+
+The first upload of a package uses an `initial upload:` message; later updates
+use `upgpkg:`. The `-bin` package must be updated only after the GitHub release
+for that tag exists, because its sources point at the release assets.
+
+## 5. After the push
+
+```sh
+git clone https://aur.archlinux.org/sharky-shell-git.git /tmp/aur-git
+cd /tmp/aur-git && makepkg -si
+sharky --version
+
+git clone https://aur.archlinux.org/sharky-shell-bin.git /tmp/aur-bin
+cd /tmp/aur-bin && makepkg -si
+sharky --version
+```
+
+If a package fails on a clean machine, check `namcap PKGBUILD` and
+`namcap *.pkg.tar.zst`.

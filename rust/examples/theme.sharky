@@ -1,0 +1,32 @@
+// Sharky ~ under the sea
+// Optional built-in presets: sharky, neolambda, pure, robbyrussell, powerline
+// wave preset neolambda
+
+// Palette
+coral abyss  #071923
+coral foam   #E4F5F4
+coral sea    #35B8C5
+coral kelp   #8CCFA8
+coral danger #FF8F80
+coral muted  #6C8A96
+
+// Prompt
+wave prompt "{cwd}[ {git}{git_dirty}][ {duration}] {symbol} "
+wave prompt.symbol.glyph "❯"
+wave prompt.cwd @kelp
+wave prompt.git @sea
+wave prompt.git_dirty @danger
+wave prompt.duration @muted
+wave prompt.symbol @sea
+wave prompt.error "@danger bold"
+
+// Syntax highlighting
+wave command @foam
+wave builtin @sea
+wave string @kelp
+wave variable @sea
+wave error @danger
+
+// Suggestions & selection
+wave suggestion @muted
+wave selection "@abyss on @sea"

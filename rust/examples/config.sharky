@@ -1,0 +1,37 @@
+// Sharky ~ settings
+// One statement per line: instruction property value
+
+// Shell behaviour
+tide greeting off
+tide autosuggest on
+tide highlight on
+tide history 10000
+// Prompt engine: native (default), starship, or omp (Oh My Posh)
+// tide prompt native
+// tide prompt starship
+// tide prompt omp
+// tide omp_config "~/.config/oh-my-posh/theme.omp.json"
+// tide rprompt on
+
+// Environment
+pearl EDITOR "nvim"
+pearl BROWSER "firefox"
+
+// Extra PATH entries, prepended in order
+current "~/.cargo/bin"
+current "~/.local/bin"
+
+// Startup commands, run once before the first prompt
+// wake "fastfetch"
+
+// Abbreviations expand when you press space or Enter
+// shoal gco "git checkout"
+
+// Aliases
+reef ll "ls -lah"
+reef gs "git status"
+reef cls "clear"
+
+// Key bindings
+anchor ctrl+r history_search
+anchor tab complete

@@ -1,0 +1,481 @@
+use std::cell::UnsafeCell;
+use std::io::{self, Read};
+use std::mem::MaybeUninit;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use nix::libc;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Key {
+    Char(char),
+    Enter,
+    Backspace,
+    Delete,
+    Left,
+    Right,
+    AltLeft,
+    AltRight,
+    Home,
+    End,
+    Up,
+    Down,
+    Tab,
+    ShiftTab,
+    Ctrl(char),
+    Alt(char),
+    Escape,
+    PasteStart,
+    PasteEnd,
+    Unknown,
+}
+
+pub struct RawMode {
+    original: libc::termios,
+}
+
+static RAW_ACTIVE: AtomicBool = AtomicBool::new(false);
+static ALTERNATE: AtomicBool = AtomicBool::new(false);
+
+/// The terminal settings captured before raw mode, for the fatal-signal
+/// handler. Interior mutability without `static mut`: the cell is written by
+/// the shell thread and published through `RAW_ACTIVE` with release ordering,
+/// which the handler observes with acquire ordering, so a read can only happen
+/// after a complete write.
+struct SavedTermios(UnsafeCell<MaybeUninit<libc::termios>>);
+
+// SAFETY: see above; access is ordered by `RAW_ACTIVE` and the shell is
+// single-threaded.
+unsafe impl Sync for SavedTermios {}
+
+static SAVED_TERMIOS: SavedTermios = SavedTermios(UnsafeCell::new(MaybeUninit::uninit()));
+
+/// The shell's fatal-signal action. It cannot run shell code, so it restores the
+/// terminal, lets a hangup reach the jobs, and records the signal; the shell
+/// notices at a safe point, runs the EXIT action and leaves with 128+signal.
+pub extern "C" fn fatal_signal(signal: libc::c_int) {
+    // A terminal hangup must take the jobs with it, as bash does. This runs
+    // before anything else so a job that ignores the hangup still dies from the
+    // `SIGCONT` that follows it.
+    if signal == libc::SIGHUP {
+        crate::signal::forward_hangup();
+    }
+    // SAFETY: the handler only performs async-signal-safe syscalls and records
+    // the signal in an atomic.
+    unsafe {
+        if RAW_ACTIVE.load(Ordering::Acquire) {
+            let saved = (*SAVED_TERMIOS.0.get()).assume_init_ref();
+            // TCSANOW and not TCSADRAIN: draining the output queue can block
+            // forever when nobody is reading the terminal.
+            libc::tcsetattr(0, libc::TCSANOW, saved);
+        }
+        // Never block on a terminal nobody drains: the shell is leaving, and a
+        // retried write must fail with `EAGAIN` instead of parking forever. A
+        // live terminal still accepts the small writes an EXIT action makes.
+        let flags = libc::fcntl(1, libc::F_GETFL);
+        if flags >= 0 && flags & libc::O_NONBLOCK == 0 {
+            libc::fcntl(1, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+        // Escape sequences only matter when the shell owns an interactive
+        // terminal; a script's output must stay exactly what its actions print.
+        let interactive = RAW_ACTIVE.load(Ordering::Acquire) || ALTERNATE.load(Ordering::Acquire);
+        if interactive {
+            let clear = b"\x1b[?2004l";
+            libc::write(1, clear.as_ptr() as *const _, clear.len());
+            if ALTERNATE.load(Ordering::Acquire) {
+                let leave = b"\x1b[?1049l";
+                libc::write(1, leave.as_ptr() as *const _, leave.len());
+            }
+        }
+    }
+    crate::signal::record_fatal(signal);
+}
+
+impl RawMode {
+    pub fn enable() -> Option<Self> {
+        // SAFETY: termios is a plain C struct initialised by tcgetattr.
+        unsafe {
+            let mut termios: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(0, &mut termios) != 0 {
+                return None;
+            }
+            let original = termios;
+            termios.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG | libc::IEXTEN);
+            termios.c_iflag &= !(libc::IXON | libc::ICRNL);
+            termios.c_cc[libc::VMIN] = 1;
+            termios.c_cc[libc::VTIME] = 0;
+            // Publish the saved settings before the terminal becomes raw: from
+            // here on a fatal signal restores them, even in the window before
+            // tcsetattr runs, and the release store makes the write visible to
+            // a handler that observes the flag.
+            (*SAVED_TERMIOS.0.get()).write(original);
+            RAW_ACTIVE.store(true, Ordering::Release);
+            if libc::tcsetattr(0, libc::TCSADRAIN, &termios) != 0 {
+                RAW_ACTIVE.store(false, Ordering::Release);
+                return None;
+            }
+            let _ = write_stdout("\x1b[?2004h");
+            Some(RawMode { original })
+        }
+    }
+}
+
+impl Drop for RawMode {
+    fn drop(&mut self) {
+        let _ = write_stdout("\x1b[?2004l");
+        // Restore first, clear the flag second: a fatal signal in between still
+        // sees an active raw mode and restores again, instead of exiting with
+        // the terminal raw.
+        // SAFETY: restoring the termios captured in enable().
+        unsafe {
+            libc::tcsetattr(0, libc::TCSADRAIN, &self.original);
+        }
+        RAW_ACTIVE.store(false, Ordering::Release);
+    }
+}
+
+pub fn is_tty(fd: i32) -> bool {
+    unsafe { libc::isatty(fd) == 1 }
+}
+
+/// True when standard input was a terminal whose peer is gone. A real terminal
+/// answers `tcgetattr`; a hung-up pty answers `EIO`, and a non-tty answers
+/// `ENOTTY`, which is not a hangup.
+pub fn terminal_lost() -> bool {
+    // SAFETY: termios is a plain C struct written by tcgetattr on success.
+    unsafe {
+        let mut termios: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(0, &mut termios) == 0 {
+            return false;
+        }
+        io::Error::last_os_error().raw_os_error() == Some(libc::EIO)
+    }
+}
+
+pub fn width() -> usize {
+    // SAFETY: winsize is a plain C struct filled by TIOCGWINSZ on a valid fd.
+    unsafe {
+        let mut size: libc::winsize = std::mem::zeroed();
+        if libc::ioctl(1, libc::TIOCGWINSZ, &mut size) == 0 && size.ws_col > 0 {
+            size.ws_col as usize
+        } else {
+            80
+        }
+    }
+}
+
+pub fn read_paste() -> io::Result<Vec<u8>> {
+    const MARKER: &[u8] = b"\x1b[201~";
+    let mut bytes = Vec::new();
+    let mut matched = 0;
+    loop {
+        let mut byte = [0u8; 1];
+        let count = unsafe { libc::read(0, byte.as_mut_ptr() as *mut _, 1) };
+        if count <= 0 {
+            bytes.extend(MARKER[..matched].iter());
+            break;
+        }
+        let byte = byte[0];
+        if matched > 0 && byte == MARKER[matched] {
+            matched += 1;
+            if matched == MARKER.len() {
+                break;
+            }
+            continue;
+        }
+        if matched > 0 {
+            bytes.extend(MARKER[..matched].iter());
+            matched = 0;
+        }
+        if byte == MARKER[0] {
+            matched = 1;
+        } else {
+            bytes.push(byte);
+        }
+    }
+    Ok(bytes)
+}
+
+pub fn enter_alternate_screen() -> io::Result<()> {
+    ALTERNATE.store(true, std::sync::atomic::Ordering::Relaxed);
+    write_stdout("\x1b[?1049h")
+}
+
+pub fn leave_alternate_screen() -> io::Result<()> {
+    ALTERNATE.store(false, std::sync::atomic::Ordering::Relaxed);
+    write_stdout("\x1b[?1049l")
+}
+
+/// Signals the prompt wait must not sleep through: a fatal signal and a child
+/// changing state. They are blocked while the flags are checked and unblocked
+/// atomically inside `ppoll`, so a delivery between the shell's check and its
+/// blocking wait cannot be lost behind a full sleep.
+fn notice_mask() -> libc::sigset_t {
+    // SAFETY: sigemptyset and sigaddset only write into the set.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGHUP);
+        libc::sigaddset(&mut set, libc::SIGTERM);
+        libc::sigaddset(&mut set, libc::SIGCHLD);
+        libc::sigaddset(&mut set, libc::SIGWINCH);
+        set
+    }
+}
+
+/// Waits for standard input to become readable, or for a notice to arrive.
+/// Returns `None` when a notice interrupted the wait, which the editor turns
+/// into another loop iteration where it services its flags.
+fn wait_for_input(milliseconds: Option<i32>) -> io::Result<Option<()>> {
+    let block = notice_mask();
+    let mut old: libc::sigset_t = unsafe { std::mem::zeroed() };
+    // SAFETY: both sets are initialised by the calls above.
+    if unsafe { libc::sigprocmask(libc::SIG_BLOCK, &block, &mut old) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // A notice delivered before the block is already decided: do not sleep.
+    if crate::signal::fatal_signal().is_some()
+        || crate::signal::child_pending()
+        || crate::signal::winch_pending()
+    {
+        unsafe { libc::sigprocmask(libc::SIG_SETMASK, &old, std::ptr::null_mut()) };
+        return Ok(None);
+    }
+
+    let mut pollfd = libc::pollfd {
+        fd: 0,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let timeout = milliseconds.map_or(std::ptr::null(), |millis| &libc::timespec {
+        tv_sec: 0,
+        tv_nsec: millis as i64 * 1_000_000,
+    } as *const libc::timespec);
+    // SAFETY: one valid pollfd and a static timespec; `old` unblocks the notice
+    // signals only for the duration of the wait.
+    let ready = unsafe { libc::ppoll(&mut pollfd, 1, timeout, &old) };
+    let errno = io::Error::last_os_error();
+    unsafe { libc::sigprocmask(libc::SIG_SETMASK, &old, std::ptr::null_mut()) };
+
+    if ready < 0 {
+        if errno.kind() == io::ErrorKind::Interrupted {
+            return Ok(None);
+        }
+        return Err(errno);
+    }
+    if ready == 0 {
+        return Ok(None);
+    }
+    Ok(Some(()))
+}
+
+pub fn read_key_timeout(millis: i32) -> io::Result<Option<Key>> {
+    if wait_for_input(Some(millis))?.is_none() {
+        return Ok(None);
+    }
+    read_key().map(Some)
+}
+
+pub fn read_key() -> io::Result<Key> {
+    // Blocking here must still wake for a notice: the shell waits with the
+    // notice mask open atomically, so a signal delivered between the editor's
+    // flag check and this call cannot be slept through.
+    if wait_for_input(None)?.is_none() {
+        return Ok(Key::Unknown);
+    }
+    let mut byte = [0u8; 1];
+    let count = unsafe { libc::read(0, byte.as_mut_ptr() as *mut _, 1) };
+    if count == 0 {
+        return Ok(Key::Ctrl('d'));
+    }
+    if count < 0 {
+        let err = io::Error::last_os_error();
+        if err.kind() == io::ErrorKind::Interrupted {
+            return Ok(Key::Unknown);
+        }
+        return Err(err);
+    }
+
+    let key = match byte[0] {
+        0x03 => Key::Ctrl('c'),
+        0x04 => Key::Ctrl('d'),
+        0x0c => Key::Ctrl('l'),
+        0x01 => Key::Ctrl('a'),
+        0x05 => Key::Ctrl('e'),
+        0x07 => Key::Ctrl('g'),
+        0x12 => Key::Ctrl('r'),
+        0x0b => Key::Ctrl('k'),
+        0x15 => Key::Ctrl('u'),
+        0x17 => Key::Ctrl('w'),
+        0x1f => Key::Ctrl('_'),
+        0x7f | 0x08 => Key::Backspace,
+        b'\r' | b'\n' => Key::Enter,
+        b'\t' => Key::Tab,
+        0x1b => read_escape()?,
+        byte @ 0x01..=0x1a => Key::Ctrl((b'a' + byte - 1) as char),
+        byte if byte < 0x20 => Key::Unknown,
+        byte if byte < 0x80 => Key::Char(byte as char),
+        byte => match read_utf8(byte)? {
+            Some(char) => Key::Char(char),
+            None => Key::Unknown,
+        },
+    };
+
+    Ok(key)
+}
+
+fn read_utf8(first: u8) -> io::Result<Option<char>> {
+    let extra = match first {
+        0xc0..=0xdf => 1,
+        0xe0..=0xef => 2,
+        0xf0..=0xf7 => 3,
+        _ => return Ok(None),
+    };
+
+    let mut bytes = vec![first];
+    for _ in 0..extra {
+        let mut byte = [0u8; 1];
+        let count = unsafe { libc::read(0, byte.as_mut_ptr() as *mut _, 1) };
+        if count <= 0 {
+            return Ok(None);
+        }
+        bytes.push(byte[0]);
+    }
+
+    Ok(String::from_utf8(bytes).ok().and_then(|text| text.chars().next()))
+}
+
+fn read_escape() -> io::Result<Key> {
+    let Some(next) = read_byte_with_timeout(20)? else {
+        return Ok(Key::Escape);
+    };
+    if next != b'[' && next != b'O' {
+        return Ok(Key::Alt(next as char));
+    }
+
+    let Some(code) = read_byte_with_timeout(20)? else {
+        return Ok(Key::Escape);
+    };
+
+    let key = match code {
+        b'A' => Key::Up,
+        b'B' => Key::Down,
+        b'C' => Key::Right,
+        b'D' => Key::Left,
+        b'H' => Key::Home,
+        b'F' => Key::End,
+        b'Z' => Key::ShiftTab,
+        digit => {
+            let mut number = String::from(digit as char);
+            while let Some(byte) = read_byte_with_timeout(20)? {
+                if byte == b'~' {
+                    break;
+                }
+                if byte.is_ascii_alphabetic() {
+                    number.push(byte as char);
+                    break;
+                }
+                number.push(byte as char);
+            }
+            match number.as_str() {
+                "1" | "7" => Key::Home,
+                "4" | "8" => Key::End,
+                "3" => Key::Delete,
+                "1;3C" => Key::AltRight,
+                "1;3D" => Key::AltLeft,
+                "1;5C" => Key::Alt('f'),
+                "1;5D" => Key::Alt('b'),
+                "200" => Key::PasteStart,
+                "201" => Key::PasteEnd,
+                _ => Key::Unknown,
+            }
+        }
+    };
+
+    Ok(key)
+}
+
+fn read_byte_with_timeout(milliseconds: i32) -> io::Result<Option<u8>> {
+    let mut pollfd = libc::pollfd {
+        fd: 0,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: single valid pollfd on the stack.
+    let ready = unsafe { libc::poll(&mut pollfd, 1, milliseconds) };
+    if ready <= 0 {
+        return Ok(None);
+    }
+
+    let mut byte = [0u8; 1];
+    let count = unsafe { libc::read(0, byte.as_mut_ptr() as *mut _, 1) };
+    if count <= 0 {
+        return Ok(None);
+    }
+    Ok(Some(byte[0]))
+}
+
+pub const MARK_PROMPT_START: &str = "\x1b]133;A\x1b\\";
+pub const MARK_INPUT_START: &str = "\x1b]133;B\x1b\\";
+
+pub fn mark_command_start(command: &str) -> String {
+    format!(
+        "\x1b]133;C;cmdline_url={}\x1b\\",
+        percent_encode(command, false)
+    )
+}
+
+pub fn mark_command_end(status: i32) -> String {
+    format!("\x1b]133;D;{status}\x1b\\")
+}
+
+pub fn mark_working_directory(path: &std::path::Path) -> String {
+    format!(
+        "\x1b]7;file://{}{}\x1b\\",
+        hostname(),
+        percent_encode(&path.to_string_lossy(), true)
+    )
+}
+
+pub fn percent_encode(value: &str, keep_slash: bool) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        let keep = byte.is_ascii_alphanumeric()
+            || matches!(byte, b'-' | b'.' | b'_' | b'~')
+            || (keep_slash && *byte == b'/');
+        if keep {
+            out.push(*byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+fn hostname() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .map(|name| name.trim().to_string())
+        .unwrap_or_default()
+}
+
+pub fn write_stdout(text: &str) -> io::Result<()> {
+    use std::io::Write;
+    let mut out = io::stdout();
+    out.write_all(text.as_bytes())?;
+    out.flush()
+}
+
+/// Writes a diagnostic straight to the shell's standard error. Unlike
+/// `eprintln!`, this is not diverted by a test harness's output capture, so a
+/// forked child's message reaches the descriptor it was given.
+pub fn write_stderr(text: &str) -> io::Result<()> {
+    use std::io::Write;
+    let mut err = io::stderr();
+    err.write_all(text.as_bytes())?;
+    err.flush()
+}
+
+pub fn read_stdin_lines() -> io::Result<String> {
+    let mut text = String::new();
+    io::stdin().read_to_string(&mut text)?;
+    Ok(text)
+}
