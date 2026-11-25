@@ -65,8 +65,8 @@ pub(crate) mod json;
 // byte-identical.
 pub(crate) use supervisor::{
     active, begin_request, cancel_op, child_guard, clear_foreground, cleanup, end_request,
-    next_frame, note_foreground, note_group, request_group, service, take_queued_cancelled,
-    wait_poll, wait_poll_fd,
+    next_frame, note_foreground, note_group, pending_outcome, request_group, service,
+    take_queued_cancelled, wait_poll, wait_poll_fd,
 };
 
 use std::collections::BTreeMap;

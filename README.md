@@ -22,7 +22,7 @@
 
 <img src="assets/screenshots/hero-sharky.png" width="900" alt="sharky interactive shell, --check preflight, and Code Mode JSON output" />
 
-<p><em>Interactive shell with live syntax highlighting, syntax preflight, and native parallel Code Mode (v0.1.1-alpha)</em></p>
+<p><em>Interactive shell with live syntax highlighting, syntax preflight, and native parallel Code Mode (v0.1.2)</em></p>
 
 </div>
 
@@ -44,7 +44,7 @@ install -Dm755 sharky ~/.local/bin/sharky
 ```
 
 > [!NOTE]
-> `sharky` is currently in `alpha` (`0.1.1-alpha`). Use it freely as an interactive shell, login shell (`-l`/`--login`, `logout`, `shopt -q login_shell`), and structured agent runtime.
+> `sharky` is currently in `alpha` (`0.1.2`). Use it freely as an interactive shell, login shell (`-l`/`--login`, `logout`, `shopt -q login_shell`), and structured agent runtime.
 
 <details>
 <summary>NixOS module, Home Manager module, AUR git package, and building from source</summary>

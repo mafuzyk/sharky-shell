@@ -8,6 +8,16 @@ rather than a separate preview track.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-25
+
+### Fixed
+
+- **MCP / Agent Supervisor `timeout_ms` & Process-Group Cleanup (`supervisor.rs`, `shell.rs`, `code.rs`)**:
+  - Interrupted shell AST evaluation (`run_program`, `run_list`, `run_for`, `run_for_arith`, `run_while`) and `wait`/`wait_group` when `supervisor::pending_outcome()` arms, preventing pure-shell loops (`while true; do :; done`) and sequential chains (`cmd1; cmd2; cmd3`) from outrunning an expired timeout.
+  - Updated `supervisor::note_foreground()` to signal (`SIGTERM`/`SIGKILL`) immediately when a new foreground PGID starts while `pending` is already armed, and supervised `wait` job PGIDs so `sleep & wait` terminates its process group on timeout instead of hanging indefinitely.
+  - Made `$(...)` command-substitution pipe reading break cleanly once the direct child exits (with a bounded `2500ms` escalation fallback) after timeout/cancel, preventing escaped `setsid` grandchildren from holding the capture pipe open and blocking the MCP server loop.
+  - Fixed sub-millisecond ceiling truncation (`div_ceil(1_000_000)`) and tracked outer deadline bounds in `code.rs::merge_timeout()`, ensuring outer `sharky_code` timeouts always surface `status: 124` and `termination: "timeout"`.
+
 ## [0.1.1-alpha] - 2026-11-24
 
 ### Added

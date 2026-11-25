@@ -394,14 +394,23 @@ pub(crate) fn note_foreground(pgid: i32) {
         if state.request_group == 0 {
             state.request_group = pgid;
         }
-        // A cancel that arrived between two commands now has a group to stop.
+        // A cancel or timeout that already armed stops any new group immediately
+        // so subsequent commands in a script cannot outrun the pending stop.
         let arm = match state.pending.as_mut() {
-            Some(pending) if !pending.term_sent => {
-                pending.term_sent = true;
-                signal(pgid, libc::SIGTERM);
-                Some(pending.kill_at)
+            Some(pending) => {
+                let now = Instant::now();
+                if pending.kill_sent || now >= pending.kill_at {
+                    pending.term_sent = true;
+                    pending.kill_sent = true;
+                    signal(pgid, libc::SIGKILL);
+                    Some(now)
+                } else {
+                    pending.term_sent = true;
+                    signal(pgid, libc::SIGTERM);
+                    Some(pending.kill_at)
+                }
             }
-            _ => None,
+            None => None,
         };
         if let Some(kill_at) = arm {
             state.note_group_stop(pgid, kill_at);

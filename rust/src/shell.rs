@@ -1672,10 +1672,23 @@ impl Shell {
         self.set_foreground(getpgrp());
     }
 
+    /// Returns whether an active agent request was cancelled or timed out.
+    #[inline]
+    fn agent_interrupted() -> bool {
+        if !crate::agent::active() {
+            return false;
+        }
+        crate::agent::service();
+        crate::agent::pending_outcome().is_some()
+    }
+
     fn run_program(&mut self, program: &Program) -> Flow {
         let mut status = self.last_status;
 
         for line in &program.lines {
+            if Self::agent_interrupted() {
+                return Flow::Interrupt;
+            }
             match self.run_list(line) {
                 Flow::Status(code) => {
                     status = code;
@@ -1705,7 +1718,7 @@ impl Shell {
             if let Some(signal) = crate::signal::fatal_signal() {
                 return Flow::Exit(128 + signal);
             }
-            if crate::signal::take_interrupt() {
+            if crate::signal::take_interrupt() || Self::agent_interrupted() {
                 return Flow::Interrupt;
             }
 
@@ -1735,7 +1748,7 @@ impl Shell {
             if let Some(signal) = crate::signal::fatal_signal() {
                 return Flow::Exit(128 + signal);
             }
-            if crate::signal::take_interrupt() {
+            if crate::signal::take_interrupt() || Self::agent_interrupted() {
                 return Flow::Interrupt;
             }
         }
@@ -1746,7 +1759,7 @@ impl Shell {
         if let Some(signal) = crate::signal::fatal_signal() {
             return Flow::Exit(128 + signal);
         }
-        if crate::signal::take_interrupt() {
+        if crate::signal::take_interrupt() || Self::agent_interrupted() {
             return Flow::Interrupt;
         }
 
@@ -3101,6 +3114,9 @@ impl Shell {
 
         let mut status = 0;
         for value in values {
+            if Self::agent_interrupted() {
+                return Flow::Interrupt;
+            }
             self.set_var(name, value);
             match self.run_list(body) {
                 Flow::Status(code) => status = code,
@@ -3122,6 +3138,9 @@ impl Shell {
 
         let mut status = 0;
         loop {
+            if Self::agent_interrupted() {
+                return Flow::Interrupt;
+            }
             if !condition.is_empty() {
                 match arith::evaluate(condition, self) {
                     Ok(0) => break,
@@ -3153,6 +3172,9 @@ impl Shell {
         let mut status = 0;
 
         loop {
+            if Self::agent_interrupted() {
+                return Flow::Interrupt;
+            }
             let condition_status = match self.run_suppressed(condition) {
                 Flow::Status(code) => code,
                 other => return other,
@@ -6406,12 +6428,15 @@ impl Shell {
 
     fn wait_builtin(&mut self, args: &[String]) -> i32 {
         if args.is_empty() {
-            let jobs: Vec<(usize, Vec<Pid>)> = self
+            let jobs: Vec<(usize, Pid, Vec<Pid>)> = self
                 .jobs
                 .iter()
-                .map(|job| (job.id, job.pids.clone()))
+                .map(|job| (job.id, job.pgid, job.pids.clone()))
                 .collect();
-            for (id, pids) in jobs {
+            for (id, pgid, pids) in jobs {
+                if Self::agent_interrupted() {
+                    return 124;
+                }
                 let known = self
                     .jobs
                     .iter()
@@ -6419,8 +6444,11 @@ impl Shell {
                     .and_then(|job| job.stop);
                 let claimed = match known {
                     Some(signal) => Some(signal),
-                    None => self.wait_group(&pids).1,
+                    None => self.wait_group_supervised(pgid, &pids).1,
                 };
+                if Self::agent_interrupted() {
+                    return 124;
+                }
                 if let Some(signal) = claimed {
                     // Bash warns and keeps the job: it is not done yet, and
                     // fg/bg/kill still have to reach it.
@@ -6442,6 +6470,9 @@ impl Shell {
             // promises.
             self.finished_jobs.clear();
             for pid in std::mem::take(&mut self.substitution_pids) {
+                if Self::agent_interrupted() {
+                    return 124;
+                }
                 let _ = exec::wait(pid);
             }
             return 0;
@@ -6462,6 +6493,9 @@ impl Shell {
         // one, so a failure for an earlier id does not hide a later success.
         let mut status = 0;
         for target in args {
+            if Self::agent_interrupted() {
+                return 124;
+            }
             status = self.wait_target(target);
         }
         status
@@ -6564,7 +6598,13 @@ impl Shell {
             return 128 + signal;
         }
 
-        let (status, stopped) = self.wait_group(pids);
+        let job_pgid = self
+            .jobs
+            .iter()
+            .find(|job| job.id == id)
+            .map(|job| job.pgid)
+            .unwrap_or(Pid::from_raw(0));
+        let (status, stopped) = self.wait_group_supervised(job_pgid, pids);
         let Some(signal) = stopped else {
             // The status has to survive the job's departure: bash answers a
             // second `wait` for the same pid with it until a bare `wait` runs.
@@ -6581,11 +6621,25 @@ impl Shell {
         128 + signal
     }
 
+    fn wait_group_supervised(&self, pgid: Pid, pids: &[Pid]) -> (i32, Option<i32>) {
+        if pgid.as_raw() > 0 {
+            crate::agent::note_foreground(pgid.as_raw());
+        }
+        let result = self.wait_group(pids);
+        if pgid.as_raw() > 0 {
+            crate::agent::clear_foreground();
+        }
+        result
+    }
+
     /// Waits for every process of a job, returning 128+signal and that signal
     /// when one of them stops instead of exiting.
     fn wait_group(&self, pids: &[Pid]) -> (i32, Option<i32>) {
         let mut status = 0;
         for pid in pids {
+            if Self::agent_interrupted() {
+                return (124, None);
+            }
             match exec::wait_stopped(*pid) {
                 Some(WaitStatus::Exited(_, code)) => status = code,
                 Some(WaitStatus::Signaled(_, signal, _)) => status = 128 + signal as i32,
@@ -9764,6 +9818,8 @@ impl Shell {
                         }
                     }
                     let mut chunk = [0u8; 8192];
+                    let mut reaped_status: Option<Option<WaitStatus>> = None;
+                    let mut abort_deadline: Option<std::time::Instant> = None;
                     loop {
                         if crate::signal::fatal_signal().is_some() {
                             break;
@@ -9771,6 +9827,25 @@ impl Shell {
                         crate::agent::service();
                         if crate::signal::fatal_signal().is_some() {
                             break;
+                        }
+                        if crate::agent::pending_outcome().is_some() {
+                            let deadline = *abort_deadline.get_or_insert_with(|| {
+                                std::time::Instant::now() + std::time::Duration::from_millis(2500)
+                            });
+                            if reaped_status.is_none() {
+                                match exec::wait_scan(child) {
+                                    Some(WaitStatus::StillAlive)
+                                    | Some(WaitStatus::Stopped(..))
+                                    | Some(WaitStatus::Continued(..)) => {}
+                                    other => {
+                                        reaped_status = Some(other);
+                                        break;
+                                    }
+                                }
+                            }
+                            if std::time::Instant::now() >= deadline {
+                                break;
+                            }
                         }
                         // SAFETY: `chunk` is valid for writes of `chunk.len()`.
                         let count = unsafe {
@@ -9799,7 +9874,19 @@ impl Shell {
                         }
                     }
                     drop(read);
-                    let status = match self.wait_foreground_member(child) {
+                    let wait_res = match reaped_status {
+                        Some(res) => res,
+                        None if crate::agent::pending_outcome().is_some() => {
+                            match exec::wait_scan(child) {
+                                Some(WaitStatus::StillAlive)
+                                | Some(WaitStatus::Stopped(..))
+                                | Some(WaitStatus::Continued(..)) => None,
+                                other => other,
+                            }
+                        }
+                        None => self.wait_foreground_member(child),
+                    };
+                    let status = match wait_res {
                         Some(WaitStatus::Exited(_, code)) => code,
                         Some(WaitStatus::Signaled(_, signal, _)) => 128 + signal as i32,
                         _ => crate::signal::fatal_signal().map_or(1, |signal| 128 + signal),

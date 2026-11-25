@@ -1078,7 +1078,10 @@ impl<'a, H: CodeHost> Env<'a, H> {
         if now >= deadline {
             return Err(Abort::Timeout);
         }
-        let rem = (deadline - now).as_millis().min(i64::MAX as u128) as i64;
+        let rem = (deadline - now)
+            .as_nanos()
+            .div_ceil(1_000_000)
+            .min(i64::MAX as u128) as i64;
         Ok(Some(rem.max(1)))
     }
 
@@ -2006,13 +2009,13 @@ impl<'a, H: CodeHost> Env<'a, H> {
         }
     }
 
-    fn merge_timeout(&self, requested: Option<i64>) -> Result<Option<i64>, Abort> {
+    fn merge_timeout(&self, requested: Option<i64>) -> Result<(Option<i64>, bool), Abort> {
         let outer = self.remaining_timeout_ms()?;
         Ok(match (requested, outer) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
+            (Some(a), Some(b)) if b <= a => (Some(b), true),
+            (Some(a), _) => (Some(a), false),
+            (None, Some(b)) => (Some(b), true),
+            (None, None) => (None, false),
         })
     }
 
@@ -2055,7 +2058,8 @@ impl<'a, H: CodeHost> Env<'a, H> {
             self.request.id.clone(),
         )
         .map_err(|err| Abort::Runtime(err.message))?;
-        decoded.timeout_ms = self.merge_timeout(decoded.timeout_ms)?;
+        let (merged, outer_bounded) = self.merge_timeout(decoded.timeout_ms)?;
+        decoded.timeout_ms = merged;
 
         let result = self
             .host
@@ -2072,7 +2076,7 @@ impl<'a, H: CodeHost> Env<'a, H> {
             return Err(Abort::Cancelled);
         }
         if matches!(result.termination, Termination::Timeout)
-            && self.deadline.is_some_and(|d| Instant::now() >= d)
+            && (outer_bounded || self.deadline.is_some_and(|d| Instant::now() >= d))
         {
             return Err(Abort::Timeout);
         }
@@ -2129,7 +2133,8 @@ impl<'a, H: CodeHost> Env<'a, H> {
             self.request.id.clone(),
         )
         .map_err(|err| Abort::Runtime(err.message))?;
-        decoded.timeout_ms = self.merge_timeout(decoded.timeout_ms)?;
+        let (merged, _) = self.merge_timeout(decoded.timeout_ms)?;
+        decoded.timeout_ms = merged;
         self.charge_call(decoded.tasks.len())?;
 
         let result = self
@@ -2205,7 +2210,8 @@ impl<'a, H: CodeHost> Env<'a, H> {
         let mut decoded =
             protocol::decode_parallel(&spec, &limits, self.request.id.clone())
                 .map_err(|err| Abort::Runtime(err.message))?;
-        decoded.timeout_ms = self.merge_timeout(decoded.timeout_ms)?;
+        let (merged, _) = self.merge_timeout(decoded.timeout_ms)?;
+        decoded.timeout_ms = merged;
         self.charge_call(decoded.tasks.len())?;
 
         let result = self
@@ -2242,7 +2248,8 @@ impl<'a, H: CodeHost> Env<'a, H> {
         let limits = self.host.limits();
         let mut decoded = protocol::decode_workflow(&spec, &limits, self.request.id.clone())
             .map_err(|err| Abort::Runtime(err.message))?;
-        decoded.timeout_ms = self.merge_timeout(decoded.timeout_ms)?;
+        let (merged, _) = self.merge_timeout(decoded.timeout_ms)?;
+        decoded.timeout_ms = merged;
         self.charge_call(decoded.tasks.len())?;
 
         let result = self

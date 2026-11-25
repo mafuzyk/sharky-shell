@@ -64,7 +64,7 @@ fn agent_guide_json_and_plain_text_describe_shell_and_mcp() {
     let doc = parse(stdout.trim());
     assert_eq!(int(get(&doc, "schema_version")), 1);
     assert_eq!(text(get(&doc, "kind")), "agent_guide");
-    assert_eq!(text(get(&doc, "shell_version")), "0.1.1-alpha");
+    assert_eq!(text(get(&doc, "shell_version")), "0.1.2");
     let tools = get(&doc, "mcp_tools").as_array().expect("mcp_tools array");
     assert_eq!(tools.len(), 16);
     assert!(tools.contains(&json::Value::String("sharky_exec".to_string())));

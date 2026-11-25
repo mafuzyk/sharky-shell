@@ -5,7 +5,7 @@ the source of truth. The Ruby v1 tree is frozen at tag `v1-ruby` and is not
 published here; keep a local checkout at `../.ruby-oracle/` only when you need
 the behavioural oracle for the differential tests.
 
-Status: `0.1.1-alpha`, an ongoing stage of maturity shipped through the normal
+Status: `0.1.2`, an ongoing stage of maturity shipped through the normal
 release channel.
 Interactive features include path-checked ghost autosuggestions with word-by-word
 acceptance (`Alt+Right`/`Ctrl+Right`), prefix-filtered `Up`/`Down` history recall,

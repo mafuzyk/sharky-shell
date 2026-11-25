@@ -566,3 +566,113 @@ fn code_sh_auto_isolates_with_cwd_and_env() {
         "{bad_json:?}"
     );
 }
+
+#[test]
+fn mcp_code_timeout_terminates_loops_chains_wait_and_cmdsub_and_keeps_server_healthy() {
+    use std::io::{BufRead, BufReader};
+    use std::time::{Duration, Instant};
+
+    let dir = temp_dir("mcp-timeout-health");
+    let pidfile = dir.join("escaped.pid");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sharky"))
+        .args(["agent", "--mcp", "--no-config"])
+        .env("SHARKY_CONFIG", NO_CONFIG)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn sharky mcp");
+
+    let mut stdin = child.stdin.take().expect("mcp stdin");
+    let mut reader = BufReader::new(child.stdout.take().expect("mcp stdout"));
+
+    let mut rpc = |id: i64, method: &str, params: &str| -> json::Value {
+        let line = format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{method}","params":{params}}}"#);
+        writeln!(stdin, "{line}").expect("write mcp rpc");
+        stdin.flush().expect("flush mcp rpc");
+        let mut resp = String::new();
+        let n = reader.read_line(&mut resp).expect("read mcp rpc");
+        assert!(n > 0, "unexpected EOF waiting for id={id}");
+        json::parse_line(resp.trim_end_matches(&['\r', '\n'][..]).as_bytes())
+            .expect("valid jsonrpc response")
+    };
+
+    let init = rpc(1, "initialize", "{}");
+    assert!(init.get("result").is_some(), "{init:?}");
+
+    let call_tool = |rpc: &mut dyn FnMut(i64, &str, &str) -> json::Value,
+                     id: i64,
+                     name: &str,
+                     arguments_json: &str|
+     -> (json::Value, Duration) {
+        let started = Instant::now();
+        let params = format!(r#"{{"name":"{name}","arguments":{arguments_json}}}"#);
+        let msg = rpc(id, "tools/call", &params);
+        let elapsed = started.elapsed();
+        let structured = msg
+            .get("result")
+            .and_then(|r| r.get("structuredContent"))
+            .cloned()
+            .unwrap_or_else(|| panic!("missing structuredContent in {msg:?}"));
+        (structured, elapsed)
+    };
+
+    let escaped_cmd = format!(
+        "x=$(sh -c 'setsid sleep 15 >/dev/null 2>&1 & echo $! > \"{}\"; sleep 60')",
+        pidfile.display()
+    );
+    let cases = [
+        ("loop", r#"sh("while true; do :; done")"#.to_string()),
+        ("chain", r#"sh("sleep 1; sleep 3; sleep 60")"#.to_string()),
+        ("wait", r#"sh("sleep 60 & wait")"#.to_string()),
+        (
+            "cmdsub_escaped",
+            format!("sh({})", encode_str(&escaped_cmd)),
+        ),
+    ];
+
+    let mut next_id = 2;
+    for (label, code) in cases {
+        let args = format!(r#"{{"code":{},"timeout_ms":300}}"#, encode_str(&code));
+        let (res, elapsed) = call_tool(&mut rpc, next_id, "sharky_code", &args);
+        next_id += 1;
+        assert!(
+            elapsed < Duration::from_secs(4),
+            "{label} took too long to timeout: {elapsed:?}, res={res:?}"
+        );
+        assert_eq!(int(&res, "status"), 124, "{label}: {res:?}");
+        assert_eq!(text(&res, "termination"), "timeout", "{label}: {res:?}");
+
+        let (ping, ping_elapsed) = call_tool(
+            &mut rpc,
+            next_id,
+            "sharky_exec",
+            r#"{"isolated":true,"argv":["echo","ping"],"timeout_ms":2000}"#,
+        );
+        next_id += 1;
+        assert!(
+            ping_elapsed < Duration::from_secs(2),
+            "follow-up ping after {label} blocked: {ping_elapsed:?}"
+        );
+        assert_eq!(int(&ping, "status"), 0, "after {label}: {ping:?}");
+        assert_eq!(
+            text(&ping, "stdout"),
+            "ping\n",
+            "after {label}: {ping:?}"
+        );
+    }
+
+    if let Ok(pid_text) = fs::read_to_string(&pidfile)
+        && let Ok(pid) = pid_text.trim().parse::<i32>()
+        && pid > 0
+    {
+        let _ = Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status();
+    }
+    drop(stdin);
+    let exit = child.wait().expect("wait mcp server");
+    assert!(exit.success(), "mcp server exit={exit:?}");
+    let _ = fs::remove_dir_all(&dir);
+}
